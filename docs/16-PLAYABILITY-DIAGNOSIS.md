@@ -43,6 +43,35 @@ So "not playable" is, so far, a *sequence* problem, not a broken-input problem: 
 presses drive the attract loop but never enter gameplay. Whether the main menu is reachable —
 and whether it responds correctly when it is — is the next test.
 
+## Further runs (2026-11-06, evening)
+
+| inputs | frame | screen |
+|---|---|---|
+| `start@1150, start@2500` | 3000 | still the cinematic, different camera (the press did something) |
+| `--vmu`, `start@1400, a@1600` | 2000 | still the cinematic |
+
+Pressing Start during the intro does not skip to a menu; the cinematic simply continues from a
+different point. With a VMU the game reaches the character screen around frame 1200 (see
+`work/vmu_title2.png`), without one it shows the "No VMU Found" warning and later loops through
+attract mode.
+
+## Blocked on one datum
+
+Every remaining question about the expected flow needs the reference, and Flycast's input cannot
+be automated here:
+
+* `SendKeys` after `AppActivate` — no effect;
+* `PostMessage` WM_KEYDOWN/WM_KEYUP to its window — no effect;
+* clicking the window to focus, then `SendKeys` — no effect.
+
+`emu.cfg` has `[input] maple_sdl_keyboard = 0`; passing
+`-config input:maple_sdl_keyboard=1` starts it but the keyboard pad still does not take input
+from script, so the mapping likely needs to be set up in Flycast's GUI by hand.
+
+So the next step is not another ten-minute run: it is one observation in Flycast (press Start at
+the title) to establish whether a main menu, the intro, or gameplay comes next. With that, the
+same frame sequence can be reproduced in our build with `--press` and compared.
+
 ## Next test
 
 Press Start *during* the intro (the usual way to skip a movie into the menu), then screenshot:
