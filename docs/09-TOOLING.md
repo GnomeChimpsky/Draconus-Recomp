@@ -114,3 +114,32 @@ ctest --test-dir build-test --output-on-failure
 Without the `TMP`/`TEMP` override, the memcard, CDI and symbol-table tests fail (they create
 files under `%LOCALAPPDATA%\Temp`, which this environment denies); one of them crashes with
 `0xC0000409`. That is the environment, not the code.
+
+## Emulation speed (measured 2026-11-06)
+
+| configuration | guest time | host time | speed |
+|---|---|---|---|
+| `--interpret`, headless, title/idle, 600 frames | 9.84 s | 39.5 s | **0.25x** |
+| `--interpret --window` (vsync), 300 frames | 4.83 s | 19.4 s | 0.25x |
+| `--interpret --window --present-mode immediate` | 4.83 s | 18.9 s | 0.26x |
+| `--interpret`, in-game with input, 900 frames | 14.84 s | 67.1 s | **0.22x** |
+| translated path (stops at frame 54, so boot only) | 0.74 s | 0.99 s | 0.75x |
+
+**This is expected.** `play-draconus.bat` defaults to `--interpret`, which runs every guest
+instruction through the development interpreter — a bring-up tool, not a shipping core. It
+costs roughly 4-5x real time, i.e. about 13 fps at 60 Hz.
+
+Present mode makes no difference (vsync 19.4 s vs immediate 18.9 s), so the cost is CPU, not
+presentation. Scaling the window will not help either.
+
+The fix is the translated path: emitted C++ runs at native speed (the boot segment above is
+0.75x even while the interpreter is warming up, and it would be far faster in-game). That path
+currently stops at frame 54 on the task-switch defect (`docs/ENGINE-CHANGES.md`), so speed and
+playability are the same open problem.
+
+If the interpreter has to stay in use for a while, the levers in order of payoff are:
+
+1. Fix the translated path — the only one that reaches real-time.
+2. Profile and optimise the interpreter's dispatch/memory path (a decode cache and inlined
+   memory access are the usual wins; expect tens of percent, not multiples).
+3. Reduce the guest workload (not possible without changing the game).
