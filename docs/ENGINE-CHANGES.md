@@ -220,6 +220,36 @@ address (a tail jump, or a call through `call_indirect` that restores PR afterwa
 recorded state is not reproducible by the interpreter's replay, and the comparison is
 invalid rather than the function being wrong.
 
+**Instruction-level tracer built and the false positive proven (2026-11-06).** The tracer
+now exists: `--trace-insns LO:HI` makes the translator emit a `dream::trace::insn()` call
+before every instruction in the range, `DREAM_TRACE_INSNS=lo:hi:FILE` records them from
+both engines, and the interpreter calls the same hook at its fetch point. Addresses are
+masked to P0 (`0x0C...`) because the translator emits in P0 space while the guest runs in
+P1.
+
+Result for the suspect function (`DREAM_INTERP_FUNCS=0x8C22CAA4:0x8C22CB8E` forces it back
+to the interpreter, and the run prints `interpreting 1 named functions` to confirm):
+
+* translated trace: 1,130 instructions in range;
+* interpreted trace: 1,130 instructions;
+* **identical on every line** — same `pc`, `r15`, `t` and `sr` at every step.
+
+So the function executes identically in both engines in the real run, and `--replay`'s
+disagreement for it is a **harness false positive**, now proven rather than suspected.
+
+**The faulting `rte` names the real lead.** The report prints
+
+```
+rte from pc 0x8c22ac4e sp 0x8c483a3c -> pc 0x60000040 sp 0x8c483944
+```
+
+i.e. the handler returns to a PC restored from `SPC = 0x60000040`. The corruption therefore
+happens *before* that `rte`: either the interrupt entry saved a bogus PC, or the handler
+wrote `SPC` itself.
+
+**Next:** trace the window around the handler (`0x8C000600`, `0x8C2336FA`, `0x8C22AC4E`)
+with the same tool and watch `SPC` — the tracer is now the instrument this needs.
+
 **SR audit (2026-11-06): every SR read is composed.** Against the stale-T idea:
 
 * generated code: `0` direct `c.sr` uses, `110` `read_sr`, `77` `write_sr`;

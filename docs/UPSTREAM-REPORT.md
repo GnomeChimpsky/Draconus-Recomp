@@ -104,6 +104,18 @@ replay: fn_0c22caa4 disagrees with the interpreter (entry fpscr 00040001, pr=0 s
   children**: the callees are untranslated, so they never reach `Replay::enter` and run in
   the interpreter on both sides.
 
+### Proven false positive (2026-11-06, instruction-level tracer)
+
+The project's own tracer was used to execute `fn_0c22caa4` in both engines and record
+every instruction: 1,130 instructions in range, **identical on every line** (`pc`, `r15`,
+`t`, `sr`). With `DREAM_INTERP_FUNCS` forcing the function back to the interpreter (the run
+confirms `interpreting 1 named functions`), the traces still match.
+
+So this function behaves identically in both engines, and the replay disagreement is
+definitively a **harness false positive** — the comparison method, not the code, is at
+fault. A differential harness that reports a divergence here should be fixed before its
+output is trusted on other titles.
+
 ### Important caveat (2026-11-06)
 
 Forcing this function back to the interpreter
