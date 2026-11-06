@@ -52,10 +52,20 @@ it. The dump stays where it is; nothing is copied.
 ```
 
 That launches the recompiled build with a window, using the development interpreter for
-game logic (the machine-translated path still faults at `0x8C001006`; see
-`docs/ENGINE-CHANGES.md`). It needs `engine/build-render` to exist and the user's own
-disc at the path in `engine/games/draconus/draconus.toml`. Extra arguments pass through,
-e.g. `.\play-draconus.bat --max-frames 600 --rtc-seed 1000000 --screenshot-at 500`.
+game logic. It verifies the disc path before starting and says so plainly if the dump is
+missing or was never imported.
+
+```powershell
+.\play-draconus.bat                              # window, interpreter path
+.\play-draconus.bat -Scale 2                     # 1280x960
+.\play-draconus.bat -Translated                  # the incomplete translated path
+.\play-draconus.bat --max-frames 600 --rtc-seed 1000000 --screenshot-at 500
+```
+
+The machine-translated path stops after about 54 frames at guest `0x60000040`. That is a
+known, traced defect in the runtime's task switch, not a crash of the build:
+`docs/ENGINE-CHANGES.md` has the chain, and the differential harness shows the translated
+code itself agreeing with the interpreter (`0 disagreements` over the run).
 
 Controls: arrows = d-pad, `Z` `X` `A` `S` = A, B, X, Y, Enter = Start, `Q`/`W` = triggers,
 `F1` rebinds, `F10` frame counter, `F12` screenshot, Escape quits.
