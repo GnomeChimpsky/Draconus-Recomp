@@ -700,6 +700,47 @@ fault unchanged, so they were reverted rather than carried unverified.
 path other than a translated call — e.g. after an interrupt/task switch — or the
 interaction between the entry stub's tail `jmp` and the interpreter.
 
+## ROOT CAUSE (2026-11-06): the handler's restore is one 4-byte slot out of step
+
+Two new diagnostics (`DREAM_TRACE_SWITCH`, `DREAM_TRACE_SPC`) and an instruction trace over the
+handler range pin the fault to the guest's own exception epilogue.
+
+The switch report:
+
+```
+exc:    vec 0x600 pc 0x8c22ac4e  spc 0x8c22ac4e  r15 0x8c483a3c  nesting 1
+exc:    vec 0x600 pc 0x8c233122  spc 0x8c233122  r15 0x8c483940  nesting 2
+switch: spc 0x60000040 sp 0x8c483944 frame_pc 0x8c22ac4e frame_sp 0x8c483a3c
+```
+
+and the instruction trace across the epilogue:
+
+```
+save (r15 0x8c4838f8 downwards)   spc 0x8c233122   ssr 0x60000040   pr 0x8c2336fa
+8c23377e  lds.l @r15+,pr
+8c233780  ldc.l @r15+,spc
+8c233782  ldc.l @r15+,ssr
+8c233784  rte
+
+restore (r15 0x8c483938 upwards)  pr <- 0x8c233122   spc <- 0x60000040   ssr <- 0x8c2336fa
+```
+
+Each pop takes the **next slot's value**: PR receives the saved SPC, SPC receives the saved SSR,
+SSR receives the saved PR. The restore starts exactly **4 bytes too high**.
+
+**Why:** the FPU mode differs between the two sides. The save explicitly sets
+`fpscr = 0x00040001` before pushing the FR registers; at the restore `fpscr = 0x00000000`. An
+`fmov` on SH-4 moves 4 or 8 bytes depending on FPSCR.FR/SZ, so the save and the restore do not
+move the same number of bytes and every later slot shifts.
+
+This is the same hazard the emitter documents for translated `fmov` ("the emitter decides the
+size of an `fmov` from a static guess at it", `replay.cpp`), except here it is the **interpreter**
+executing the guest's own save/restore with a mode that changed in between.
+
+**Next:** find what clears FPSCR to 0 between the save and the restore (the nested exception at
+`0x8C233122` is the prime suspect — its handler may leave FPSCR cleared), and check whether the
+save should be restoring FPSCR before the FR pops rather than after.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
