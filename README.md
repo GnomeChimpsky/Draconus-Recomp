@@ -110,19 +110,25 @@ python -m dracdisc extract  "<path to retail .gdi>" -o ..\..\work\extracted
 python -m unittest discover -s tests
 ```
 
-Status: the retail game **boots, renders and plays** — Treyarch logo, title screen, VMU
-prompt and an in-game 3D scene (red sky, terrain, creatures, siege engine) through Vulkan at
-640x480, deterministically, from the owner's own disc. Translation covers 89.7 % of code
-bytes (3,285 functions).
+Status: the retail game **boots and renders gameplay, but is not playable yet**. It draws
+the Treyarch logo, the title screen, the VMU prompt, the intro cinematic and an in-game 3D
+scene (red sky, terrain, creatures, siege engine) through Vulkan at 640x480,
+deterministically, from the owner's own disc. Translation covers 89.7 % of code bytes
+(3,285 functions). What is missing for "playable" is control and progression: the sequence
+advances through scripted input, not through a working game loop end to end.
 
-The development interpreter path (`--interpret`) is what `play-draconus.bat` uses and it is
-solid. The *translated* path reaches 54 frames and then stops: a task switch resumes on a
-corrupted context (`ldc.l @r15+,sr` reading a pointer where a saved SR belongs, at
-`0x8C233756`). The chain is traced end to end in `docs/ENGINE-CHANGES.md`, and three engine
-fixes have been contributed along the way — hook dispatch at the interpreter's fetch boundary,
-an instruction-level tracer, and a `--replay` false-positive fix that now lets the
-differential harness report **0 disagreements over a whole 400-frame run**, exonerating the
-code generator. What remains is the runtime's interrupt/task-switch path.
+The development interpreter path (`--interpret`) is what the launcher uses. The *translated*
+path reaches 54 frames and then stops: a task switch resumes on a corrupted context
+(`ldc.l @r15+,sr` reading a pointer where a saved SR belongs, at `0x8C233756`). The chain is
+traced end to end in `docs/ENGINE-CHANGES.md`, and three engine fixes have been contributed
+along the way: hook dispatch at the interpreter's fetch boundary, an instruction-level
+tracer, and a `--replay` false-positive fix that lets the differential harness report
+**0 disagreements over a whole 400-frame run**, exonerating the code generator. What remains
+is the runtime's interrupt/task-switch path.
+
+Audio works in menus and gameplay but not on the title screen, and the title's silence is
+unexplained (`docs/13-M6-AUDIO-BASELINE.md`). Visual comparison against Flycast has started:
+the title screen matches apart from VMU state and aspect (`docs/14-M3-M6-FLYCAST-REFERENCE.md`).
 
 The earlier retail boot failure was a bug in this project's own multi-sector disc reader,
 fixed and regression-tested. See `docs/11-M2-RESULTS.md`.
