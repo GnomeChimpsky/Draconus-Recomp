@@ -342,7 +342,32 @@ So the fault is a **task-context restore reading the task's saved stack at the w
 offset** — the save side and the restore side disagree by one slot. Every downstream
 symptom (SR = `0x60000040`, SPC/SSR swapped, PC = `0x60000040`) follows from this.
 
-**Next:** find the matching save (`stc.l sr,@-r15` for the same task) and compare `r15` at
+**Save/restore inspected (2026-11-06).** The two sides are symmetric guest code and both are
+**untranslated**, so the interpreter executes them in both modes:
+
+```
+save  (0x8C23364A..)  stc.l ssr / stc.l spc / sts.l pr / stc.l gbr / stc.l vbr / sts.l mach /
+                      sts.l macl / r14..r0 / stc.l sr / sts.l fpul / sts.l fpscr / fr15..fr0
+restore (0x8C233730..) frchg / fmov fr0..fr15 / lds.l fpscr / lds.l fpul / ldc.l sr / ...
+```
+
+The pop order is the exact reverse of the push order, and `fpscr` is `0x00040001` at the
+first restore in **both** runs, so the FP-mode stride hypothesis does not explain it at that
+point.
+
+The trace does show how early the runs diverge: at that same instruction the translated
+run has `r15 = 0x8C00F350`, `spc = 0x0C22B502`, while the interpreted run has
+`r15 = 0x8C00F31C`, `spc = 0x8C22B540` — different call paths, not just different code. So
+cross-run comparison is confounded by interrupt timing from the very first interrupt, and
+cannot be used to compare this function call by call.
+
+**Conclusion of this investigation pass.** The chain is established from symptom to a
+concrete instruction (`ldc.l @r15+,sr` reading a pointer slot), but the step that makes the
+two runs take different paths happens earlier and needs a *within-run* differential (capture
+state at a chosen point, then execute both engines from that identical state). That is the
+snapshot/step harness described above, not another trace window.
+
+**Superseded:** **Next:** find the matching save (`stc.l sr,@-r15` for the same task) and compare `r15` at
 save and at restore. A 4-byte delta names the push/pop that is unbalanced — most likely in
 the runtime's task switch (`nonlocal_return` / `resume_at`), which is where translated and
 interpreted execution differ.
