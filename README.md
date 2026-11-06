@@ -63,14 +63,22 @@ python -m dracdisc extract  "<path to retail .gdi>" -o ..\..\work\extracted
 python -m unittest discover -s tests
 ```
 
-Status: the retail game **boots and renders** — Treyarch logo, title screen, VMU
-prompt, and an in-game 3D scene (red sky, terrain, creatures, siege engine) at 640×480
-through Vulkan on an RTX 3080, deterministically, from the user's own disc. Translation
-covers 89.7 % of code bytes (3,285 functions); the translated path now gets **54 frames**
-before stopping at `0x60000040` (it previously died at 29 frames on a hook-marker bug,
-fixed in `docs/ENGINE-CHANGES.md` patch 003). Full playthroughs still use `--interpret`
-via `play-draconus.bat`. The earlier retail boot failure was a bug in our own
-multi-sector disc reader, fixed and regression-tested. See `docs/11-M2-RESULTS.md`.
+Status: the retail game **boots, renders and plays** — Treyarch logo, title screen, VMU
+prompt and an in-game 3D scene (red sky, terrain, creatures, siege engine) through Vulkan at
+640x480, deterministically, from the owner's own disc. Translation covers 89.7 % of code
+bytes (3,285 functions).
+
+The development interpreter path (`--interpret`) is what `play-draconus.bat` uses and it is
+solid. The *translated* path reaches 54 frames and then stops: a task switch resumes on a
+corrupted context (`ldc.l @r15+,sr` reading a pointer where a saved SR belongs, at
+`0x8C233756`). The chain is traced end to end in `docs/ENGINE-CHANGES.md`, and three engine
+fixes have been contributed along the way — hook dispatch at the interpreter's fetch boundary,
+an instruction-level tracer, and a `--replay` false-positive fix that now lets the
+differential harness report **0 disagreements over a whole 400-frame run**, exonerating the
+code generator. What remains is the runtime's interrupt/task-switch path.
+
+The earlier retail boot failure was a bug in this project's own multi-sector disc reader,
+fixed and regression-tested. See `docs/11-M2-RESULTS.md`.
 
 ## Licence
 
