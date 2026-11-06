@@ -14,6 +14,9 @@ not vendored here.
 
 ## Where the work stands
 
+Audio baseline: `docs/13-M6-AUDIO-BASELINE.md` (what plays, what does not, and why).
+
+
 `docs/12-HANDOVER.md` is the state of play: what works, what does not, the list of local
 engine changes, and the next three tasks. The engine-side findings are in
 `docs/UPSTREAM-REPORT.md` (one proposed fix, one fixed harness bug, one open fault), and
