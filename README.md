@@ -34,6 +34,20 @@ Then edit `engine\games\draconus\draconus.toml` → `[disc] image` to point at y
 dump, and run `.\play-draconus.bat`. See `docs/09-TOOLING.md` for the Vulkan SDK and SDL3
 requirements, and `docs/LEGAL.md` for what you must supply.
 
+## Graphical launcher
+
+```powershell
+tools\launcher.bat
+```
+
+Pick a `.gdi`, press **Verify** (it refuses anything that is not the USA V1.000 release and
+writes the config on success), choose a window scale and a path, press **Play**. The logic
+under the window is the same code the scripts use, and it has a headless self-test:
+
+```powershell
+python tools\launcher.py --selftest
+```
+
 ## Import a disc
 
 ```powershell
