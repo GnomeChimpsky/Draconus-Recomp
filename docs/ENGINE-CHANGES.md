@@ -389,7 +389,26 @@ not caught.
 stateful HLE hook (GD-ROM especially), or snapshot/restore the hook's host state alongside
 the journal.
 
-**Superseded:** **Skip set shrunk (2026-11-06, `DREAM_REPLAY_JOURNAL_LIMIT=200000`).** Raising the journal bound
+**Superseded:** **Device-writing calls compared too (2026-11-06, `DREAM_REPLAY_ALLOW_DEVICE=1`).** The harness
+normally skips a call whose subtree wrote a device, because the write cannot be undone. For a
+diagnostic run that restriction was lifted (the device sees the write twice, which is fine
+when the question is whether registers diverge):
+
+```
+replay: 2,284,637 calls compared, 87,938 skipped
+        (device writes 0, host state 19, interrupts 248, non-local returns 87,653, too long 18),
+        0 disagreements
+```
+
+**Zero disagreements again**, now covering the category that was previously the blind spot.
+(The non-local count jumps to 87,653 because calls with device side effects are more likely to
+unwind differently in the replay; those are skipped, not compared.)
+
+This closes the question of the code generator for this title: every translated call the
+harness can compare — with or without device writes — matches the interpreter. The fault is
+therefore in the **runtime's interrupt/task-switch path**, not in emitted code.
+
+**Skip set shrunk (2026-11-06, `DREAM_REPLAY_JOURNAL_LIMIT=200000`).** Raising the journal bound
 moves the "too long" and "non-local" categories almost to zero:
 
 ```
