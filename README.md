@@ -12,6 +12,13 @@ This repository holds the research, the disc tooling, the title configuration an
 engine fixes. The engine itself is fetched by `setup.ps1` at a pinned commit, so it is
 not vendored here.
 
+## Where the work stands
+
+`docs/12-HANDOVER.md` is the state of play: what works, what does not, the list of local
+engine changes, and the next three tasks. The engine-side findings are in
+`docs/UPSTREAM-REPORT.md` (one proposed fix, one fixed harness bug, one open fault), and
+`docs/ENGINE-CHANGES.md` is the running ledger with every trace and dead end.
+
 ## From a fresh clone
 
 This repository deliberately does **not** contain the engine. `setup.ps1` fetches it at a
