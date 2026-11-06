@@ -342,7 +342,38 @@ So the fault is a **task-context restore reading the task's saved stack at the w
 offset** — the save side and the restore side disagree by one slot. Every downstream
 symptom (SR = `0x60000040`, SPC/SSR swapped, PC = `0x60000040`) follows from this.
 
-**Save/restore inspected (2026-11-06).** The two sides are symmetric guest code and both are
+**Within-run differential built, and the false positive explained (2026-11-06).** The replay
+harness now records both sides of a comparison in one process: `DREAM_REPLAY_TRACE=<prefix>`
+plus `DREAM_REPLAY_DUMP=<addr>` writes `<prefix>.a.txt` (the translated execution) and
+`<prefix>.b.txt` (the interpreter replay of the same call, same entry state, memory undone
+by the journal). The instruction trace prints all 16 registers plus `t`, `sr`, `spc`, `ssr`,
+`fpscr`, `pr`, `gbr`.
+
+Result for `fn_0c22caa4`: the traces are identical for 52 instructions, then diverge at
+`0x0C22CB30` — the instruction *after* the call at `0x0C22CB2C`:
+
+```
+A (translated) r0=4      r2=8c232824  r3=8c2325d0  r4=8c257020
+B (replay)     r0=0      r2=8c175b54  r3=1         r4=0x11
+```
+
+The callee (`0x8C22A966`) is **untranslated**, so both runs execute identical interpreted
+code — and yet they part, with the replay going through the syscall stub area
+(`0x8C175B54`).
+
+That is the explanation of the false positive: the journal restores **memory**, but it does
+not restore **host-side state** reached through a BIOS HLE hook (GD-ROM file position,
+timers, RNG, Maple). The first execution consumes that state; the replay observes it moved
+on, takes a different branch, and the comparison reports a disagreement that is not a code
+bug. The harness already skips calls whose journal saw a *device* access
+(`journal_saw_device`, both read and write), but an HLE hook is not an MMIO access and is
+not caught.
+
+**Upstream fix to suggest:** mark the call as uncomparable when its subtree entered a
+stateful HLE hook (GD-ROM especially), or snapshot/restore the hook's host state alongside
+the journal.
+
+**Superseded:** **Save/restore inspected (2026-11-06).** The two sides are symmetric guest code and both are
 **untranslated**, so the interpreter executes them in both modes:
 
 ```
