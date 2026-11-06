@@ -247,7 +247,28 @@ i.e. the handler returns to a PC restored from `SPC = 0x60000040`. The corruptio
 happens *before* that `rte`: either the interrupt entry saved a bogus PC, or the handler
 wrote `SPC` itself.
 
-**Next:** trace the window around the handler (`0x8C000600`, `0x8C2336FA`, `0x8C22AC4E`)
+**First trace window (2026-11-06, `DREAM_TRACE_INSNS=0x8C22AC00:0x8C22AD00`, now also
+printing `spc`/`ssr`).** 427,640 recorded instructions. The tail is a tight call loop:
+
+```
+8c22ac46  sts.l pr,@-r15
+8c22ac48  mov.l 0x8c22acac,r3
+8c22ac4a  jsr @r3
+8c22ac4c  nop
+8c22ac4e  lds.l @r15+,pr      <- the address the report called "rte from pc"
+8c22ac50  rts
+```
+
+so `0x8C22AC4E` is not an `rte` at all: it is the epilogue of a yield/scheduler call that
+the guest executes over and over. In the last iteration `ssr` collapses to `0x00000004`
+while `spc` is still `0x0C17B6D0`, and the fault PC is `0x60000040`. So the bogus PC is
+**not** in `SPC` at that point — it is written after `0x8C22AC50`, i.e. just outside this
+window.
+
+**Next:** widen the window to the caller (`0x8C17B6D0`, `0x8C17B600:0x8C17B800`) or trace the
+`jsr @r3` target at `[0x8C22ACAC]`, and watch `spc` until it becomes `0x60000040`.
+
+**Superseded note:** **Next:** trace the window around the handler (`0x8C000600`, `0x8C2336FA`, `0x8C22AC4E`)
 with the same tool and watch `SPC` — the tracer is now the instrument this needs.
 
 **SR audit (2026-11-06): every SR read is composed.** Against the stale-T idea:
