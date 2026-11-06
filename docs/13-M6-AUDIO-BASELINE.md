@@ -105,6 +105,35 @@ fires — that needs a reference.
 * `gdrom.cdda` is absent even in play, so the disc's two CDDA tracks are unused by this title.
   CD-audio playback stays unimplemented without loss here.
 
+## 100-second dropout measurement
+
+`--max-frames 6000 --press "start@1150,a@1400" --wav` (99.9 s, 488 s of host time on the
+interpreter path):
+
+```
+samples          4,406,658
+non-zero         3,410,599  (77.4 %)
+key-ons         9
+channels active 2
+```
+
+Gap analysis (50 ms windows, threshold < -72 dBFS, counting runs of 0.25 s or more):
+
+| at | length | reading |
+|---|---|---|
+| 4.00 s | 0.85 s | start of the intro burst |
+| 12.80 s | 12.80 s | the title screen, silent as above |
+| 67.70 s | 2.80 s | after the music starts |
+| 91.00 s | 2.30 s | after the music starts |
+
+Mean RMS after the music starts is 4,616. The two later gaps are either cue boundaries (a
+track ending before the next starts) or real dropouts; a reference capture is needed to tell
+them apart. Everything else from 25 s to 100 s is continuous.
+
+The ten-minute gate is one longer run of the same command (`--max-frames 36000`), but at
+~490 s of host time per 100 s of guest audio on the interpreter path it is a ~50 minute run,
+so it is a scheduled job rather than something to do while iterating.
+
 ## Remaining M6 questions
 
 1. Is the title screen meant to have music? Needs a Flycast capture (not installed here) or a
