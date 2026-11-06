@@ -171,6 +171,52 @@ instruction. The pieces exist (`devinterp::run` from a captured `Ctx`, the journ
 
 ---
 
+## C. The fault chain (most useful evidence for the real defect)
+
+Independent of the harness question, the translated run's fault has been traced to a single
+instruction. With `DREAM_TRACE_SR=1` (a local diagnostic that logs every `write_sr` with its
+PC), the last writes before the fault are:
+
+```
+sr-write pc 0x8c2336d4 value 0x600000f0 old 0x70000000
+sr-write pc 0x8c233100 value 0x60000041 old 0x600000f0
+sr-write pc 0x8c233122 value 0x70000040 old 0x60000041
+sr-write pc 0x8c233756 value 0xa05f6900 old 0x700000f1    <- corruption
+sr-write pc 0x8c233784 value 0x8c2336fa old 0x20000100
+```
+
+`0x8C233756` is `ldc.l @r15+,sr`, the third pop of the title's own task-context restore:
+
+```
+8c233752  lds.l @r15+,fpscr
+8c233754  lds.l @r15+,fpul
+8c233756  ldc.l @r15+,sr      ; loads 0xA05F6900, a Holly/PVR register address
+```
+
+The matching save side is symmetric and in the same (untranslated) code:
+
+```
+8c233676  stc.l sr,@-r15
+8c233678  sts.l fpul,@-r15
+8c23367a  sts.l fpscr,@-r15
+```
+
+so the save and restore orders agree, yet the restore reads a slot holding a pointer instead
+of a saved SR. Consequences, in order: `SR` becomes `0x60000040`, the next exception saves
+that as `SSR`, the handler epilogue pops `SPC`/`SSR` crossed, and its `rte` restores
+`PC = 0x60000040` — the observed fault.
+
+Also ruled out by measurement: IMASK is honoured (`runtime/src/sh4/intc.cpp:82-89`), the
+entry FP mode matches between engines (`fpscr = 0x00040001` at the restore), and both the
+save and restore are interpreted in both modes.
+
+**What this suggests:** the save and restore disagree because the *stack contents* differ,
+which points at whatever runs between them — the task switch. `task-switching RTEs: 1` is
+reported for the run. A within-run differential (snapshot the state, then execute both
+engines from it) is needed to see the first divergent instruction; cross-run tracing is
+confounded because the two runs take different paths from the first interrupt
+(`r15 = 0x8C00F350 / `0x8C00F31C`, `spc = 0x0C22B502 / 0x8C22B540`).
+
 ## Environment notes
 
 * Windows 10/11 x64, MSVC 19.44, CMake 3.31, Ninja, Vulkan SDK 1.4.363.0, SDL3 3.2.28
