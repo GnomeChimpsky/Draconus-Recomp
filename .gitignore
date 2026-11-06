@@ -1,0 +1,41 @@
+# Setup and generated output — never commit
+work/
+scratch/
+.tmp/
+
+# The engine is fetched by setup.ps1 at a pinned commit and is not part of this repository.
+engine/
+
+# Game data and anything derived from it
+*.gdi
+*.chd
+*.bin
+*.raw
+*.iso
+*.cdi
+Draconus - Cult of the Wyrm*/
+Die by the Sword + Limb From Limb GOG/
+game/*/extracted/
+
+# Screenshots and captures (guest pixels)
+*.ppm
+*.png
+*.vmu
+*.sav
+screenshot-*.ppm
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Build output
+build*/
+out/
+
+# Editor / OS
+.vs/
+.vscode/
+.DS_Store
+Thumbs.db

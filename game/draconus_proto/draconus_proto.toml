@@ -1,0 +1,20 @@
+[game]
+id = "draconus_proto"
+title = "Draconus: Cult of the Wyrm (Jan 2000 prototype)"
+region = "JUE"
+product = "E8A9"
+
+[disc]
+image = "CHANGE-ME: path to your own .gdi (or .chd) dump"
+sha1_1st_read = "6cda173e30230aeb6a8a4f11afec2911b3f189ed"
+
+[binary]
+path = "extracted/fs/1ST_READ.BIN"
+load_address = 0x8C010000
+link_address = 0x0C010000
+entry = 0x8C010000
+
+[functions]
+pointers = false
+sweep = false
+extra = []

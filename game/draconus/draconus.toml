@@ -1,0 +1,46 @@
+# Draconus: Cult of the Wyrm (USA), F888 / T-402 / T40203N / V1.000 / 2000-05-19.
+# Values measured from the owner's own dump; see docs/01-DISC-FORENSICS.md.
+# The boot program is sha256 86fc4486b066518adf6aada38236177b8bd2ed2566b0c1b6f2e2c7f532574ad8.
+
+[game]
+id = "draconus"
+title = "Draconus: Cult of the Wyrm"
+region = "USA"
+product = "F888"
+
+[disc]
+image = "CHANGE-ME: path to your own .gdi (or .chd) dump"
+sha1_1st_read = "936ef49f675029a512edddd3baece16a2e85c4e4"
+
+[binary]
+path = "extracted/fs/1ST_READ.BIN"       # written by dracdisc extract (or dcdisc extract)
+load_address = 0x8C010000                # where the BIOS loads the file
+link_address = 0x0C010000                # P0 alias of the same RAM, what literal pools assume
+entry = 0x8C010000
+
+[functions]
+# Discovery measurements on this binary (2026-11-04, MSVC build, 1 core):
+#   call graph only     0.1 s ->     3 functions, 0.0 % of code bytes
+#   + pointer tables    0.6 s -> 14,913 functions, 26.1 % of code bytes
+#   + aggressive sweep  >15 min, no completion (superlinear on this title)
+# Full-set `emit` then took >300 s and produced no output file, while a 500-function
+# subset emits in 0.2 s -- so emission is the current blocking defect, not discovery.
+# For M2 bring-up we translate the entry stub only and let the development
+# interpreter run the rest (ADR 2), then seed from --suggest-config.
+pointers = false
+sweep = false
+extra = []
+
+[[relocations]]
+# Detected by --suggest-config: the game copies 56 bytes from the image to the
+# general-exception vector at VBR+0x600 (VBR = 0x8C000000) and runs it there.
+source = 0x0C233614
+size = 0x38
+dest = 0x8C000600
+entries = [0x8C000600]
+
+[hle]
+# guest address = "runtime handler"; filled in as the Katana calls are reached.
+
+[hooks]
+# guest address = "hook name"; later milestones.
