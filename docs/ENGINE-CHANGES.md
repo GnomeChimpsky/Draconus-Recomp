@@ -793,7 +793,35 @@ untranslated (interpreted in both modes) and its own frame is balanced over the 
 The fault is therefore in a call chain of **interpreted** functions, which is exactly the region
 the differential harness cannot see: both engines run the same interpreter there.
 
-**Better tool for the next session:** log every interpreted call and return with `(pc, target,
+**Call-balance logger built (2026-11-06, `DREAM_TRACE_BALANCE=1`).** The interpreter now pairs
+every call with its return and reports any call whose stack pointer differs. Result:
+
+| run | unbalanced calls |
+|---|---|
+| translated (faults at frame 54) | **1** |
+| interpreter (works) | **0** |
+
+and the single one is:
+
+```
+unbalanced: call 0x8c2336f6 -> 0x8c2330d6 r15 in 0x8c483958 out 0x8c483860 (-248)
+```
+
+`0x8C2330D6` is one of the three VBR-dispatched handler functions, untranslated in both modes —
+so this is the guest's own scheduler entry, and the `-248` is a **task switch** (the stack moves
+to another task). In the working run the same call is either balanced or never paired, so the
+switch path differs between the modes.
+
+That reframes the remaining work: the defect is not a wild stack pointer inside a function, it is
+**when and how the scheduler's switch is taken**. The translated path reaches a switch that the
+interpreter path does not, or reaches it in a different state.
+
+**Next:** compare the two runs at this call — the same `(pc, target, r15)` pair in both modes,
+around frame 54 — and see whether the switch itself is taken in the interpreter run. If it is not,
+the difference is interrupt timing, and the emitter's poll placement (function entry and backward
+branches) is the mechanism to examine.
+
+**Superseded:** **Better tool for the next session:** log every interpreted call and return with `(pc, target,
 r15)` and pair them, flagging any call whose `r15` on return differs from `r15` at entry. That
 finds the unbalanced function directly instead of walking one frame per trace window.
 
