@@ -220,6 +220,18 @@ address (a tail jump, or a call through `call_indirect` that restores PR afterwa
 recorded state is not reproducible by the interpreter's replay, and the comparison is
 invalid rather than the function being wrong.
 
+**SR audit (2026-11-06): every SR read is composed.** Against the stale-T idea:
+
+* generated code: `0` direct `c.sr` uses, `110` `read_sr`, `77` `write_sr`;
+* the emitter touches `c.sr` only for `clrs`/`sets` (the S bit, `emit.cpp:1483/1487`); `stc
+  sr` and `ldc sr` go through `read_sr`/`write_sr`;
+* the runtime touches `c.sr` only in the interpreter's `clrs`/`sets` and the reset
+  (`system.cpp:31`).
+
+So no path can see a stale T bit: three hypotheses are now eliminated with evidence — the
+entry snapshot (identical), the FPSCR `pr`/`sz` bits (they are FPSCR bits 19/20, not the PR
+register), and stale T (all reads composed).
+
 **Snapshot verified (2026-11-06, `DREAM_REPLAY_DUMP=0x0C22CAA4`).** The harness was
 instrumented to print the state it records at a function's entry and the state its
 interpreter replay starts from. They are identical (`pr 0x0c22c978`, `sr 0x400000f0`,
