@@ -220,6 +220,17 @@ address (a tail jump, or a call through `call_indirect` that restores PR afterwa
 recorded state is not reproducible by the interpreter's replay, and the comparison is
 invalid rather than the function being wrong.
 
+**Snapshot verified (2026-11-06, `DREAM_REPLAY_DUMP=0x0C22CAA4`).** The harness was
+instrumented to print the state it records at a function's entry and the state its
+interpreter replay starts from. They are identical (`pr 0x0c22c978`, `sr 0x400000f0`,
+`fpscr 0x00040001`, `t 1`, `r15 0x8c00f30c`), so the replay does **not** start from a
+different state: the entry-snapshot hypothesis is dead.
+
+The dumps do show that `Ctx::sr` and `Ctx::t` are not kept in sync (`sr 0x400000f0` with
+`t 1`); T lives in `c.t` and `read_sr` composes it. That is by design, but it means any
+path that reads `c.sr` directly instead of `read_sr` sees a stale T — worth auditing, and
+the next thing to check.
+
 **Correction (2026-11-06): the replay disagreement is probably a harness artifact.**
 Forcing the function back to the interpreter with
 `DREAM_INTERP_FUNCS=0x8C22CAA4:0x8C22CB8E` leaves the boot failure **exactly** as it was (54
