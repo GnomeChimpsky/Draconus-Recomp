@@ -266,7 +266,29 @@ while `spc` is still `0x0C17B6D0`, and the fault PC is `0x60000040`. So the bogu
 **not** in `SPC` at that point — it is written after `0x8C22AC50`, i.e. just outside this
 window.
 
-**Next:** widen the window to the caller (`0x8C17B6D0`, `0x8C17B600:0x8C17B800`) or trace the
+**Second trace window (2026-11-06, `DREAM_TRACE_INSNS=0x8C175B00:0x8C175C00`).**
+855,454 instructions. The tail is the syscall stub that jumps to the GD-ROM hook:
+
+```
+8c175b6c  mov.l 0x8c175b78,r0      ; r0 = [0x8C175B78] = 0x8C0000BC (the GD vector slot)
+8c175b6e  mov.l @r0,r0             ; r0 = the HLE hook address
+8c175b70  jmp @r0                  ; -> 0x8C001006
+```
+
+and on the final iteration `ssr` changes from `0x40000000` to **`0x04000000`** between
+`0x8C175B6C` and `0x8C175B6E`, while `sr` stays `0x40000000` on every one of the 855,454
+lines. `0x04000000` is exactly `0x40000000 >> 4` — a four-bit shift of the MD bit.
+
+No instruction in the window writes `SSR`, and no line in the window has an invalid `SR`,
+so the value is written by the interrupt/task-switch machinery, not by guest code. A
+value that is `SR >> 4` points at a context save/restore that reads the SR/SSR pair at a
+wrong offset or stride.
+
+**Next:** find every write to `c.ssr` (only `enter_exception` and the guest `ldc rN,ssr`
+should exist) and print the writer with a tag; the one that produces `0x04000000` names the
+bug.
+
+**Superseded:** **Next:** widen the window to the caller (`0x8C17B6D0`, `0x8C17B600:0x8C17B800`) or trace the
 `jsr @r3` target at `[0x8C22ACAC]`, and watch `spc` until it becomes `0x60000040`.
 
 **Superseded note:** **Next:** trace the window around the handler (`0x8C000600`, `0x8C2336FA`, `0x8C22AC4E`)
