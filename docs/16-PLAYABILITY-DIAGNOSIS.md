@@ -55,6 +55,25 @@ different point. With a VMU the game reaches the character screen around frame 1
 `work/vmu_title2.png`), without one it shows the "No VMU Found" warning and later loops through
 attract mode.
 
+## Reference confirmed: Start at the title plays the intro
+
+Flycast was checked by hand (its input cannot be scripted here): pressing Start at
+"PRESS START BUTTON" **plays the intro movie**. That matches what our build does, so the first
+node of the flow is correct:
+
+```
+title --Start--> intro movie --???--> ???
+```
+
+The open question is the node after the movie. On our build without a VMU the sequence reaches
+`DEMO PLAY / PRESS START BUTTON` at frame ~6000 and a further Start returns to the title. With a
+VMU the path differs earlier (no "No VMU Found" warning, character screen around frame 1200), so
+the post-movie comparison has to be made **with a VMU attached on both sides** or it compares two
+different flows.
+
+The run intended to capture that node was interrupted (the window was closed) before it could
+write a frame, so it is the next thing to do rather than a result.
+
 ## Blocked on one datum
 
 Every remaining question about the expected flow needs the reference, and Flycast's input cannot
