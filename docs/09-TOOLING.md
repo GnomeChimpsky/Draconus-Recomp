@@ -100,3 +100,17 @@ Measured costs on this machine (12 cores, MSVC 19.44):
 * PowerShell treats a native program's stderr as an error record; `unittest` prints
   progress to stderr, so a green run can still show a non-zero shell exit. Check the
   `OK (n tests)` line, not the exit code, when running tests through PowerShell.
+
+## Running the engine's test suite here
+
+```powershell
+cmake -S . -B build-test -G Ninja -DCMAKE_BUILD_TYPE=Release `
+      -DDREAM_DEV_INTERPRETER=ON -DDREAM_RENDERER=OFF -DDREAM_BUILD_TESTS=ON -DDREAM_WERROR=OFF
+cmake --build build-test --parallel
+$env:TMP = "$PWD\..\work\tmp"; $env:TEMP = $env:TMP   # the sandbox denies %TEMP%
+ctest --test-dir build-test --output-on-failure
+```
+
+Without the `TMP`/`TEMP` override, the memcard, CDI and symbol-table tests fail (they create
+files under `%LOCALAPPDATA%\Temp`, which this environment denies); one of them crashes with
+`0xC0000409`. That is the environment, not the code.

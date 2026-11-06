@@ -681,6 +681,24 @@ fault unchanged, so they were reverted rather than carried unverified.
 path other than a translated call — e.g. after an interrupt/task switch — or the
 interaction between the entry stub's tail `jmp` and the interpreter.
 
+## Validation against the engine's own tests (2026-11-06)
+
+All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
+(`engine/build-test`) and the suite passes:
+
+```
+100% tests passed, 0 tests failed out of 6
+  runtime.unit        75/75 cases
+  translator.unit     15/15 cases
+  emit/translator/version/programs  passed
+  dcdisc.pytest       skipped (pytest not configured in that build)
+```
+
+**Sandbox caveat:** the file-writing tests need a writable `%TEMP%`. Under this environment
+`C:\Users\<user>\AppData\Local\Temp` is denied, which makes the memcard, CDI and symbols
+tests fail or crash with `0xC0000409`. Pointing `TMP`/`TEMP` at a workspace directory makes
+every case pass — the failures were environmental, not code.
+
 ## How to update the engine
 
 1. Re-download the pinned commit into a scratch directory.
