@@ -45,12 +45,23 @@ chunks, 1,680 frame swaps, 96,068 interrupts, no faults**, and two 600-frame run
 byte-identical. The first display-list write is at frame 86. The earlier "retail won't
 boot" blocker was a bug in our own multi-sector disc reader, fixed and regression-tested.
 
-**Open:** the *translated* path faults at `0x8C001006` (the GD-ROM hook address) when a
-translated unit hands back to interpreted code, so today's working configuration is
-`--interpret`. See `docs/11-M2-RESULTS.md`.
+**Translated path: first blocker fixed, next one open.** The `0x8C001006` fault (a hook
+marker fetched as code after a task switch) was fixed by dispatching hook entries at the
+interpreter's fetch boundary — `docs/ENGINE-CHANGES.md` patch 003, offered upstream in
+`docs/UPSTREAM-REPORT.md`. The translated path now reaches **54 frames / 350 GD-ROM
+sectors**, deterministically, and stops at `0x60000040` where an `rte` restores a swapped
+`SPC`/`SSR`.
 
-**Next:** make the translated path work (hook dispatch across a unit boundary), then
-enable the renderer for visual parity (M3).
+**Investigated and eliminated** (evidence in `docs/ENGINE-CHANGES.md`): hook dispatch on
+returns, `resume_at` matching, the interpreter's fetch path (fixed), the interrupt frame,
+a 4-byte stack imbalance, the replay harness's entry snapshot, the FPSCR PR/SZ bits, and a
+stale T flag. `--replay` reports one disagreement, but forcing that function to interpret
+does not move the failure, so it is a harness false positive, not the defect.
+
+**Next:** an instruction-level differential tracer (per-instruction trace hook in emitted
+code + the same hook in the interpreter, compared from a captured entry state). That is
+the only tool that can localise the remaining fault, and it retires the whole class.
+`docs/UPSTREAM-REPORT.md` specifies it.
 
 ### M2b — boot-state analysis
 
