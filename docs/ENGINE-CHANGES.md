@@ -737,7 +737,33 @@ This is the same hazard the emitter documents for translated `fmov` ("the emitte
 size of an `fmov` from a static guess at it", `replay.cpp`), except here it is the **interpreter**
 executing the guest's own save/restore with a mode that changed in between.
 
-**Next:** find what clears FPSCR to 0 between the save and the restore (the nested exception at
+**Byte accounting: the drift is one call (2026-11-06).** Walking the handler from its entry:
+
+```
+entry r15        0x8c48393c
+after entry pop  0x8c483940   = SP at exception entry (correct)
+lowest (save)    0x8c48385c   the save pushed 57 words
+before restore   0x8c483860   <-- +4 appeared here, with no push in between
+final (rte)      0x8c483944   = expected +4
+```
+
+Between the last save push (`0x8C2336CC`, r15 `0x8C48385C`) and the restore
+(`0x8C2336FA`, r15 `0x8C483860`) the only stack-moving event is the call at
+`0x8C2336F6` (`jsr @r14`, the VBR-dispatched game handler). **That callee returns with r15 one
+word higher than it was called with**, and every later pop is therefore one slot off: PR takes
+SPC, SPC takes SSR, SSR takes PR — which is exactly the corruption observed, and why the `rte`
+resumes at `0x60000040`.
+
+The three possible callees (`0x8C232228`, `0x8C2330D6`, `0x8C23FDD0`) are all **untranslated**,
+so the interpreter runs them in both modes. That makes the next question sharp: either one of
+those functions has an instruction the interpreter implements with an unbalanced stack, or the
+call/return around it is mishandled (delay slot, `rte` inside the callee, or a non-local return).
+
+**Next:** trace r15 through the callee at `[r14]` — entry, every push/pop, and the return — with
+`DREAM_TRACE_INSNS` over that function's range, and compare its stack delta with what the
+disassembly says it should be. A `+4` there is the whole bug.
+
+**Superseded:** **Next:** find what clears FPSCR to 0 between the save and the restore (the nested exception at
 `0x8C233122` is the prime suspect — its handler may leave FPSCR cleared), and check whether the
 save should be restoring FPSCR before the FR pops rather than after.
 
