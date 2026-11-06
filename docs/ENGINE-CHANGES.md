@@ -284,7 +284,42 @@ so the value is written by the interrupt/task-switch machinery, not by guest cod
 value that is `SR >> 4` points at a context save/restore that reads the SR/SSR pair at a
 wrong offset or stride.
 
-**Next:** find every write to `c.ssr` (only `enter_exception` and the guest `ldc rN,ssr`
+**SSR writers instrumented (2026-11-06, `DREAM_TRACE_SSR=1`; 238 writes in 120 frames).**
+The last events before the fault:
+
+```
+ssr-write exception pc 0x8c22ac4e value 0x40000000
+ssr-write exception pc 0x8c233122 value 0x60000040    <- SR itself is corrupt here
+ssr-write ldc.l     pc 0x8c233782 value 0x8c2336fa    <- SSR receives a code address
+```
+
+Two facts follow, and they are the clearest statement of the bug so far:
+
+1. The exception taken at `0x8C233122` already has **SR = `0x60000040`** (`read_sr` returns
+   it), so SR was corrupted *before* that point. `0x60000040` is MD|RB with IMASK 4 — a
+   plausible-looking status word, which is why nothing rejects it.
+2. The handler's epilogue then loads **SSR from a stack slot holding `0x8C2336FA`**, a code
+   address. The epilogue itself is correct guest code:
+
+   ```
+   8c23377e  lds.l @r15+,pr
+   8c233780  ldc.l @r15+,spc
+   8c233782  ldc.l @r15+,ssr
+   8c233784  rte
+   ```
+
+   so SPC and SSR are being popped from a stack whose contents are already crossed.
+
+Both the exception site (`0x8C233122`) and the epilogue (`0x8C233782`) are **untranslated**
+— the interpreter runs them — so the interpreter is executing correct code over a corrupted
+saved context. The corruption is therefore in whatever set SR/SPC before the exception, or
+in the task context the runtime switched to.
+
+**Next:** log every `write_sr` with the writing PC (emit `write_sr_at(c, v, pc)` instead of
+`write_sr(c, v)`, or add pc to the helper) and find who writes `0x60000040` into SR. That is
+the last hop of the chain.
+
+**Superseded:** **Next:** find every write to `c.ssr` (only `enter_exception` and the guest `ldc rN,ssr`
 should exist) and print the writer with a tag; the one that produces `0x04000000` names the
 bug.
 
