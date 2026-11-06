@@ -4,6 +4,8 @@ A native Windows x64 static recompilation of **Draconus: Cult of the Wyrm**
 (Dreamcast, 2000, developed by Treyarch and published by Crave Entertainment; USA V1.000,
 `F888` / `T-402`), built on [`dream-recomp`](https://github.com/phobos665/dream-recomp).
 
+The game currently boots and renders gameplay, but is not playable. 
+
 The game's SH-4 code is translated ahead of time into C++, and the Dreamcast hardware
 (file system, controllers, video, sound, memory card) is replaced by native code. The
 result runs from the user's own disc — no game data is included or distributed.
