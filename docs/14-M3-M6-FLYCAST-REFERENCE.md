@@ -45,6 +45,32 @@ So the render itself matches: same layout, same fonts, same colours. The two dif
 A pixel diff is only meaningful after fixing both: run Flycast in a 4:3 window (or crop), and
 attach a VMU on our side (`--vmu FILE`).
 
+## Screenshots need a presented frame
+
+`--screenshot-at N` fires on the *Nth presented frame*, so it does nothing in a headless run
+(`presented` stays 0). With `--window` it works:
+
+```
+draconus_boot --config ... --interpret --window --max-frames 1500 --rtc-seed 1000000 \
+    --vmu work/test.vmu --screenshot-at 1200
+-> wrote screenshot-000.ppm: presented frame 1200, guest frame 1302
+```
+
+Note the two counters differ: presented frames lag guest frames, so a frame index from one run
+does not transfer to the other.
+
+## More content captured with a VMU attached
+
+| frame (presented) | screen |
+|---|---|
+| 1200 | character screen: "CYNBIС THE WARRIOR / AEOWYN THE SORCERESS", portraits, dragon crest |
+| 900 (earlier run, no window) | intro cinematic: red sky, terrain, creatures, siege engine |
+
+So beyond the title, the character-select/attract screen renders correctly too (see
+`work/vmu_title2.png`). Lining these up against Flycast needs Start pressed in Flycast, which
+this harness does not automate yet — its window is a normal one, so `SendKeys`/`PostMessage` to
+it is the next step for a frame-accurate M3 comparison.
+
 ## The VMU changes the flow, not just an overlay
 
 With `--vmu work/test.vmu` the engine reports `memory card ...: created, formatted and
