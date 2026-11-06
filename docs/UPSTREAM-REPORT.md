@@ -104,6 +104,26 @@ replay: fn_0c22caa4 disagrees with the interpreter (entry fpscr 00040001, pr=0 s
   children**: the callees are untranslated, so they never reach `Replay::enter` and run in
   the interpreter on both sides.
 
+### FIXED: the replay false positive was a harness bug (2026-11-06)
+
+Root cause found and fixed. The journal restores memory, but not host state reached through a
+stateful HLE hook (GD-ROM file position, timers, RNG, Maple). Re-running such a call let the
+replay observe a world the first execution had already changed, and the comparison reported a
+disagreement that was not a code bug.
+
+Fix: `Bios::sys_gdrom` marks the side effect (`runtime/src/hle/side_effects.*`), and
+`Replay::exit` skips a call whose subtree set it, counted as `skipped_host_state`. After the
+fix:
+
+```
+replay: 2,458,232 calls compared, 151,659 skipped
+        (device writes 150,246, host state 169, interrupts 1,181,
+         non-local returns 18, too long 45), 0 disagreements
+```
+
+**Zero disagreements over a whole 400-frame run** — the translated code matches the
+interpreter everywhere the harness can check.
+
 ### Proven false positive (2026-11-06, instruction-level tracer)
 
 The project's own tracer was used to execute `fn_0c22caa4` in both engines and record

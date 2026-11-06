@@ -10,6 +10,7 @@ offered upstream and so an engine update can be re-applied deliberately.
 | 002 | 2026-11-06 | same | `runtime/src/sh4/abi_bare.cpp` (`call_indirect`), `runtime/src/system.cpp` (`on_rte`), `runtime/src/devinterp/interpreter.cpp` | Diagnostic only: `DREAM_TRACE_HOOK=1` logs every dispatch into the hook page and every `rte` with `spc`/`frame_pc`/`r15`/`frame_sp`/`sr`/`ssr`. Off unless the variable is set; no behaviour change. | no — local aid |
 | 003 | 2026-11-06 | same | `runtime/src/devinterp/interpreter.cpp` (fetch loop), `runtime/src/system.cpp` (`on_untranslated`) | **Fixes the `0x8C001006` fault.** A hook marker has no guest code, but the interpreter only dispatched hooks on call/jump transfers, so control arriving *on* a marker (a task resumed on the GD-ROM vector after a scheduler switch) fetched `0xFF` as an instruction. The fetch loop now dispatches an exact entry inside `[native_lo, native_hi)`; `on_untranslated` declares the BIOS hook page as that range. | yes — bug fix |
 | 004 | 2026-11-06 | same | `runtime/include/dream/runtime/trace.h`, `runtime/src/trace.cpp`, `runtime/CMakeLists.txt`, `translator/src/main.cpp`, `translator/include/dream/translator/emit.h`, `translator/src/emit/emit.cpp`, `runtime/src/devinterp/interpreter.cpp` | **Instruction-level differential tracer.** `--trace-insns LO:HI` emits a guarded `dream::trace::insn()` before every instruction in range; `DREAM_TRACE_INSNS=lo:hi:FILE` records `pc r15 t sr spc ssr` from both engines. Addresses are masked to P0 because the translator emits in P0 while the guest runs in P1. Off by default; no behaviour change when unused. | yes — new feature |
+| 005 | 2026-11-06 | same | `runtime/include/dream/runtime/hle/side_effects.h`, `runtime/src/hle/side_effects.cpp`, `runtime/src/hle/bios.cpp`, `runtime/src/devinterp/replay.cpp`, `runtime/include/dream/runtime/devinterp/replay.h`, `runtime/boot/boot_main.cpp` | **Fixes a `--replay` false positive.** A call whose subtree entered a stateful HLE hook (GD-ROM position, timers, RNG, Maple) was compared, but the journal only restores memory, so the replay observed different host state and reported a disagreement. `Bios::sys_gdrom` now notes the side effect and the harness skips such calls (`skipped_host_state`). | yes — bug fix |
 
 ## Patch detail — 001
 
@@ -341,6 +342,21 @@ epilogue, which then loads `0x8C2336FA` (a code address) into SR from the crosse
 So the fault is a **task-context restore reading the task's saved stack at the wrong
 offset** — the save side and the restore side disagree by one slot. Every downstream
 symptom (SR = `0x60000040`, SPC/SSR swapped, PC = `0x60000040`) follows from this.
+
+**False positive fixed, and the harness now runs clean (2026-11-06).** With stateful HLE
+calls skipped (patch 005):
+
+```
+--replay --max-frames 400
+replay: 2,458,232 calls compared, 151,659 skipped
+        (device writes 150,246, host state 169, interrupts 1,181,
+         non-local returns 18, too long 45), 0 disagreements
+```
+
+**Zero disagreements over the whole run.** Every translated function the harness can compare
+agrees with the interpreter, so the code generator is exonerated for this title: the
+remaining fault is in the runtime's interrupt/task-switch machinery, exactly where the traced
+chain (SR <- `0xA05F6900` at `ldc.l @r15+,sr`) points.
 
 **Within-run differential built, and the false positive explained (2026-11-06).** The replay
 harness now records both sides of a comparison in one process: `DREAM_REPLAY_TRACE=<prefix>`
