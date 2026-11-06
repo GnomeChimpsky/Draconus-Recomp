@@ -1,22 +1,16 @@
-# DraconusRecomp — research workspace
+# DraconusRecomp
 
-This folder holds the research for a native Windows x64 static recompilation of
-**Draconus: Cult of the Wyrm** (Dreamcast, USA, `F888` / licence `T-402`, V1.000,
-released 2000-05-19), developed by Treyarch and published by Crave Entertainment.
+A native Windows x64 static recompilation of **Draconus: Cult of the Wyrm**
+(Dreamcast, 2000, developed by Treyarch and published by Crave Entertainment; USA V1.000,
+`F888` / `T-402`), built on [`dream-recomp`](https://github.com/phobos665/dream-recomp).
 
-It is deliberately *not* a build tree. Nothing here contains game code or
-generated code; the tools read the user's own dump.
+The game's SH-4 code is translated ahead of time into C++, and the Dreamcast hardware
+(file system, controllers, video, sound, memory card) is replaced by native code. The
+result runs from the user's own disc — no game data is included or distributed.
 
-```
-docs/                     research, decisions and the roadmap
-tools/draconus-disc/      dump inspection / extraction tool (Python, stdlib only)
-work/                     generated output (manifest, extracted boot file) — not source
-<disc dumps>              the retail GDI, the Jan-2000 prototype, and a CHD
-```
-
-Start with `docs/00-SUMMARY.md`, then `docs/07-ROADMAP.md`. The engine-side findings,
-including a ready-to-file report with one proposed fix and one open disagreement, are in
-`docs/UPSTREAM-REPORT.md`; the running ledger is `docs/ENGINE-CHANGES.md`.
+This repository holds the research, the disc tooling, the title configuration and the
+engine fixes. The engine itself is fetched by `setup.ps1` at a pinned commit, so it is
+not vendored here.
 
 ## From a fresh clone
 
