@@ -104,6 +104,20 @@ replay: fn_0c22caa4 disagrees with the interpreter (entry fpscr 00040001, pr=0 s
   children**: the callees are untranslated, so they never reach `Replay::enter` and run in
   the interpreter on both sides.
 
+### Important caveat (2026-11-06)
+
+Forcing this function back to the interpreter
+(`DREAM_INTERP_FUNCS=0x8C22CAA4:0x8C22CB8E`) leaves the boot failure **unchanged** — same
+frame, same address, same counters. If the function's translation were the cause,
+interpreting it would move the failure. So this disagreement is most likely a **harness
+artifact** (the entry snapshot is not reproducible by the interpreter), not the game's
+defect. It is reported because a differential harness that disagrees when nothing is wrong
+is itself a bug worth fixing.
+
+The stronger, independent evidence for the real defect is a swapped `SPC`/`SSR` at an
+`rte`: `spc 0x60000040, ssr 0x8c2336fa` — `0x60000040` is a plausible `SR` and
+`0x8C2336FA` a plausible `PC`.
+
 ### Why it matters
 
 The 54-frame boot stops at `0x60000040` (not in the Dreamcast map) with `SPC`/`SSR`
