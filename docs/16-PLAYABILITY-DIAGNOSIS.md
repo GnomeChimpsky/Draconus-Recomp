@@ -1,5 +1,11 @@
 # Diagnosis — why the game "is not playable"
 
+> **SUPERSEDED 2026-11-06.** This diagnosis is wrong. The owner ran the build interactively:
+> it plays the movies, shows its menus, loads into gameplay **and responds to input** (menu
+> navigation and character movement). The "attract loop, no menu reached" conclusion below came
+> from scripted presses at fixed frames, which do not reproduce a human navigating menus — not
+> from a defect in the game. Kept as a record of the wrong turn and of why scripted-input
+> reasoning is unreliable for flow questions.
 Investigated 2026-11-06 on the interpreter path, `--rtc-seed 1000000`, screenshots taken with
 `--window --screenshot-at N` (presented frames lag guest frames by ~87).
 

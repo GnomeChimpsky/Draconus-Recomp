@@ -8,7 +8,7 @@ rendered the game, and reduced the remaining translated-path fault to one instru
 | Thing | Command | Evidence |
 |---|---|---|
 | Disc validation and extraction | `python -m dracdisc verify "<own dump>.gdi"` | 15 tests; byte-identical to the engine's `dcdisc` |
-| Play the game | `.\play-draconus.bat` | title screen, VMU prompt, in-game 3D scene; deterministic |
+| Play the game | `.\play-draconus.bat` | movies, menus, gameplay and input all work; deterministic (interpreter path, 0.22x) |
 | Determinism check | `--rtc-seed 1000000` twice | identical cycles, GD-ROM sectors, TA chunks |
 | Instruction tracing | `DREAM_TRACE_INSNS=lo:hi:FILE` | 855k-instruction windows diffed |
 | Function differential | `--replay` (+ hooks build) | 2,458,232 calls, **0 disagreements** |

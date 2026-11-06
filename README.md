@@ -110,12 +110,16 @@ python -m dracdisc extract  "<path to retail .gdi>" -o ..\..\work\extracted
 python -m unittest discover -s tests
 ```
 
-Status: the retail game **boots and renders gameplay, but is not playable yet**. It draws
-the Treyarch logo, the title screen, the VMU prompt, the intro cinematic and an in-game 3D
-scene (red sky, terrain, creatures, siege engine) through Vulkan at 640x480,
-deterministically, from the owner's own disc. Translation covers 89.7 % of code bytes
-(3,285 functions). What is missing for "playable" is control and progression: the sequence
-advances through scripted input, not through a working game loop end to end.
+Status: **playable**. The retail game boots, plays its movies, shows its menus, loads into
+gameplay and responds to input — menu navigation and character movement both work — from the
+owner's own disc, deterministically. Translation covers 89.7 % of code bytes (3,285
+functions).
+
+Two things are not solved yet. **Speed:** the launcher uses the development interpreter, which
+runs at 0.22-0.25x real time (~13 fps at 60 Hz, `docs/09-TOOLING.md`). **The translated path:**
+it stops at frame 54 on a task-switch defect (`ldc.l @r15+,sr` reading a pointer where a saved
+SR belongs, at `0x8C233756`), so the fast path is not usable yet. Audio works in menus and
+gameplay but not on the title screen, and Flycast visual comparison has started.
 
 The development interpreter path (`--interpret`) is what the launcher uses. The *translated*
 path reaches 54 frames and then stops: a task switch resumes on a corrupted context
