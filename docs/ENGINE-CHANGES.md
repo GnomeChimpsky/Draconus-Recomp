@@ -389,6 +389,23 @@ not caught.
 stateful HLE hook (GD-ROM especially), or snapshot/restore the hook's host state alongside
 the journal.
 
+**Superseded:** **Correction and a sharper statement (2026-11-06).** `SR = 0x60000040` is *legitimate*: the
+code at `0x8C2330F8` is `stc sr,r0 / and r1,r0 / or #64,r0 / ldc r0,sr`, i.e. a critical
+section setting IMASK=4. It is not corruption.
+
+The corruption is the value the handler's epilogue loads into `SSR`: **`0x8C2336FA`**, which
+is the return address `jsr @r14` at `0x8C2336F6` stores in `PR`. So the `SSR` slot receives
+**PR's value** — the restore is **one 4-byte slot out of step** inside the handler.
+
+The handler saves in this order: `ssr, spc, pr, gbr, vbr, mach, macl, r14..r0, sr, fpul,
+fpscr, fr15..fr0`, and restores in the exact reverse, so the imbalance is not in the save
+prologue. It must be introduced between them — by the call the handler makes at
+`0x8C2336F6` (`jsr @r14`), which is a function pointer.
+
+**Next:** identify `[r14]` at `0x8C2336F6`, check whether that function was among the
+`--replay` skips (169 in the 400-frame run), and compare `r15` at its entry and exit. A
+4-byte delta there is the whole bug.
+
 **Superseded:** **Save/restore inspected (2026-11-06).** The two sides are symmetric guest code and both are
 **untranslated**, so the interpreter executes them in both modes:
 
