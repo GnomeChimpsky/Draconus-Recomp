@@ -315,7 +315,39 @@ Both the exception site (`0x8C233122`) and the epilogue (`0x8C233782`) are **unt
 saved context. The corruption is therefore in whatever set SR/SPC before the exception, or
 in the task context the runtime switched to.
 
-**Next:** log every `write_sr` with the writing PC (emit `write_sr_at(c, v, pc)` instead of
+**ROOT CAUSE LOCATED (2026-11-06, `DREAM_TRACE_SR=1`).** Every `write_sr` is now logged
+with its PC. The last writes before the fault:
+
+```
+sr-write pc 0x8c2336d4 value 0x600000f0 old 0x70000000
+sr-write pc 0x8c233100 value 0x60000041 old 0x600000f0
+sr-write pc 0x8c233122 value 0x70000040 old 0x60000041
+sr-write pc 0x8c233756 value 0xa05f6900 old 0x700000f1     <- the corruption
+sr-write pc 0x8c233784 value 0x8c2336fa old 0x20000100
+```
+
+`0x8C233756` is `ldc.l @r15+,sr` — part of the game's own task-context restore:
+
+```
+8c233752  lds.l @r15+,fpscr
+8c233754  lds.l @r15+,fpul
+8c233756  ldc.l @r15+,sr
+```
+
+It loads **`0xA05F6900`** — a Holly/PVR register address — into SR, i.e. the stack slot it
+reads holds a pointer instead of a saved SR. `0x8C233784` is the `rte` at the handler
+epilogue, which then loads `0x8C2336FA` (a code address) into SR from the crossed pair.
+
+So the fault is a **task-context restore reading the task's saved stack at the wrong
+offset** — the save side and the restore side disagree by one slot. Every downstream
+symptom (SR = `0x60000040`, SPC/SSR swapped, PC = `0x60000040`) follows from this.
+
+**Next:** find the matching save (`stc.l sr,@-r15` for the same task) and compare `r15` at
+save and at restore. A 4-byte delta names the push/pop that is unbalanced — most likely in
+the runtime's task switch (`nonlocal_return` / `resume_at`), which is where translated and
+interpreted execution differ.
+
+**Superseded:** **Next:** log every `write_sr` with the writing PC (emit `write_sr_at(c, v, pc)` instead of
 `write_sr(c, v)`, or add pc to the helper) and find who writes `0x60000040` into SR. That is
 the last hop of the chain.
 
