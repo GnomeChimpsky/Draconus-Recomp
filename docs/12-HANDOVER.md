@@ -46,7 +46,11 @@ Build trees: `engine/build-render` (playable, Vulkan + SDL3), `engine/build-repl
    then instrument `System::on_rte` and `sh4::resume_at` to log `frame_pcs`/`frame_sps`
    against `c.spc`/`c.r[15]` for the single switch in the run. The failing restore is at
    `0x8C233756`; the resumed task's stack is what to watch.
-3. **Launcher/disc import (M8).** Both halves exist: `tools/launcher.py` (GUI over verify/configure/play, `--selftest`), `tools/import-disc.bat` (scriptable), and the import half: `tools/import-disc.bat` verifies a
+3. **Flycast reference (M3/M6).** Flycast is installed and boots the disc; how to drive and
+   capture it is in `docs/14-M3-M6-FLYCAST-REFERENCE.md`. Visual reference works, audio
+   capture does not (no recording option), so M6's spectra gate needs a loopback recorder.
+
+4. **Launcher/disc import (M8).** Both halves exist: `tools/launcher.py` (GUI over verify/configure/play, `--selftest`), `tools/import-disc.bat` (scriptable), and the import half: `tools/import-disc.bat` verifies a
    dump and writes the config. What is missing is the graphical launcher (pick a dump, pick
    the disc, show settings) and the configuration UI. Then **visual parity (M3)** — Flycast is
    not installed here, so that needs a reference capture from elsewhere. Both are independent of the fault. Flycast
