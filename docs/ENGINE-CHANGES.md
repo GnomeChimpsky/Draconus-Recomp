@@ -778,7 +778,26 @@ untranslated, hence interpreted in both modes, which is why `--replay` never saw
 compares calls, and these are interpreted on both sides — if the interpreter mishandles an
 instruction here, both sides are "consistent" and the harness stays silent.
 
-**Next:** trace `r15` from the tail-jump target (`[0x8C232308]`) to the return at `0x8C2336FA`,
+**Chain followed one level further (2026-11-06).** The trampoline's tail jump is logged by
+`DREAM_TRACE_CALL_AT` (extended to `Flow::Jump`):
+
+```
+jump-at 0x8c232248 -> 0x8c1a62ec r15 0x8c48385c     (the failing call)
+jump-at 0x8c232248 -> 0x8c1a62ec r15 0x8c4839e4     (earlier calls, other stack depths)
+```
+
+So the chain is `0x8C2336F6` → `0x8C232228` (trampoline) → `0x8C1A62EC`. That last function is
+untranslated (interpreted in both modes) and its own frame is balanced over the traced window
+(`r15` returns to its entry value), so the +4 is not introduced there either.
+
+The fault is therefore in a call chain of **interpreted** functions, which is exactly the region
+the differential harness cannot see: both engines run the same interpreter there.
+
+**Better tool for the next session:** log every interpreted call and return with `(pc, target,
+r15)` and pair them, flagging any call whose `r15` on return differs from `r15` at entry. That
+finds the unbalanced function directly instead of walking one frame per trace window.
+
+**Superseded:** **Next:** trace `r15` from the tail-jump target (`[0x8C232308]`) to the return at `0x8C2336FA`,
 and compare the net stack delta with the disassembly of that function. This is now a short walk
 through one call chain rather than an open search.
 
