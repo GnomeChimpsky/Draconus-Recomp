@@ -389,7 +389,30 @@ not caught.
 stateful HLE hook (GD-ROM especially), or snapshot/restore the hook's host state alongside
 the journal.
 
-**Superseded:** **The handler's callee is identified (2026-11-06, `DREAM_TRACE_CALL_AT=0x8C2336F6`).** The
+**Superseded:** **Skip set shrunk (2026-11-06, `DREAM_REPLAY_JOURNAL_LIMIT=200000`).** Raising the journal bound
+moves the "too long" and "non-local" categories almost to zero:
+
+```
+default     : 2,458,232 compared, 151,659 skipped (device 150,246, host 169, interrupts 1,181,
+              non-local 18, too long 45), 0 disagreements
+bound 200k  : 2,051,024 compared,  75,126 skipped (device 75,095, host 1, interrupts 23,
+              non-local 0,  too long 7), 0 disagreements
+```
+
+(Compared count *falls* with a larger bound because a bigger parent comparison absorbs the
+nested calls that were previously compared on their own.)
+
+**Still zero disagreements.** The only substantial category left is device writes (75,095),
+which by definition cannot be replayed: the call is skipped, so a divergence inside one stays
+invisible. That is now the entire remaining blind spot of the harness.
+
+**Where this leaves the investigation.** The fault is a 4-byte stack imbalance in an
+interpreted exception handler whose callees are all interpreted, in a run where every
+translated call the harness *can* compare agrees with the interpreter. The blind spot is
+device-writing calls. Closing it needs the engine author (state that can be snapshotted and
+restored) or a Flycast reference run, not another local trace.
+
+**The handler's callee is identified (2026-11-06, `DREAM_TRACE_CALL_AT=0x8C2336F6`).** The
 dispatch at `0x8C2336F6` calls one of three functions, all of them **untranslated**:
 
 | target | calls in 120 frames |
