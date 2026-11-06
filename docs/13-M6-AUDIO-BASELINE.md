@@ -67,17 +67,53 @@ Two facts matter:
    `runtime/src/aica/mixer.cpp:1037`), but implementing it would not change this title's
    silence.
 
-## Lead
+## In-game audio works — the title is what is silent
 
-The burst that does play came out of the ARM7/mixer without any SCPU command, which suggests
-the sound driver is working and the SH-4 side is not talking to it. Next measurements:
+The same capture run with scripted input (`--press "start@1150,a@1400"`, 3000 frames = 49.9 s)
+shows the real picture:
 
-1. Find the SH-4's sound-command path (SCPU at `0xA0800000` region) and check whether the
-   game writes it at all after init — count the writes, not just the calls.
-2. Check what the game reads from AICA during boot (version/status). If our AICA returns a
-   value the driver rejects, the game may conclude there is no sound hardware and disable its
-   audio path — which would explain a silent title with a working driver.
-3. Only then look at CDDA, and only if a title needs it.
+```
+  0-3 s   silence            (boot)
+  4-12 s  intro/logo burst
+ 13-24 s  silence            (title screen)
+ 25-49 s  sustained audio    (after Start and A: menus and the game)
+```
+
+RMS in the in-game section stays between 1,200 and 5,500 with peaks to ~24,600, i.e. continuous
+sound for 24 s. Counters for that run: **2 channels active, 1,420,937 of 2,199,574 samples
+non-zero (64.6 %)**, 5 key-ons.
+
+A spectrum of 30-36 s (6 s window, Hanning) confirms it is music rather than noise:
+
+```
+dominant frequencies  41.0, 41.2, 82.5, 123.5, 123.7, 330.0, 330.2, 392.5 Hz
+                      (E1/E2, B2, E4, G4 — harmonically related)
+centroid              1554 Hz
+zero-crossing rate    0.020   (tonal, not noisy)
+top-8 share           2.2 %    (many partials, i.e. a mix, not one tone)
+```
+
+So the AICA/ARM7 path produces tonal in-game audio today. What is missing is the *title
+screen* (13-24 s), which may be correct behaviour for this build or may be a cue that never
+fires — that needs a reference.
+
+## What the counters mean, revised
+
+* `SCPU sh4->arm 0` is **not** blocking sound: 24 s of music plays with that counter at zero.
+  The driver is evidently driven another way (register writes: 1,565 SH-4 vs 130,078 ARM in
+  the longer run), so SCPU is not this title's command channel.
+* `gdrom.cdda` is absent even in play, so the disc's two CDDA tracks are unused by this title.
+  CD-audio playback stays unimplemented without loss here.
+
+## Remaining M6 questions
+
+1. Is the title screen meant to have music? Needs a Flycast capture (not installed here) or a
+   reference recording. Everything else in the sequence has audio.
+2. `2 channels active` is low for a game with music and effects; the AICA has 64. Either the
+   mix really is sparse at this point in the game (menu) or voices are being keyed off early.
+   A longer in-game capture with combat would settle it.
+3. Dropouts: the 49.9 s capture has no gaps after 25 s, but M6 asks for ten minutes. `--wav`
+   caps at ten minutes, so the run is straightforward once the title question is answered.
 
 ## Reproducing the gate once Flycast is available
 
