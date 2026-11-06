@@ -389,6 +389,28 @@ not caught.
 stateful HLE hook (GD-ROM especially), or snapshot/restore the hook's host state alongside
 the journal.
 
+**Superseded:** **The handler's callee is identified (2026-11-06, `DREAM_TRACE_CALL_AT=0x8C2336F6`).** The
+dispatch at `0x8C2336F6` calls one of three functions, all of them **untranslated**:
+
+| target | calls in 120 frames |
+|---|---|
+| `0x8C2330D6` | 45 |
+| `0x8C232228` | 40 |
+| `0x8C23FDD0` | 34 |
+
+Because they are untranslated they run in the interpreter in **both** modes, and `--replay`
+reports no translated function that unbalances `r15` (`r15` is compared at every compared
+call). So the 4-byte drift is not produced by a translated function's prologue/epilogue.
+
+What remains is the skip set: in the 400-frame run the harness skipped 151,659 calls
+(device writes 150,246, host state 169, interrupts 1,181, non-local returns 18, too long 45).
+A skipped call is not compared, so a difference inside one is invisible — and the handler's
+stack is written by whatever ran inside those.
+
+**Next:** shrink the skip set. `too long` (45) and `non-local` (18) are visible in small
+numbers and can be compared by raising the journal bound or by using the within-run
+differential on them; that is the cheapest remaining experiment.
+
 **Superseded:** **Correction and a sharper statement (2026-11-06).** `SR = 0x60000040` is *legitimate*: the
 code at `0x8C2330F8` is `stc sr,r0 / and r1,r0 / or #64,r0 / ldc r0,sr`, i.e. a critical
 section setting IMASK=4. It is not corruption.
