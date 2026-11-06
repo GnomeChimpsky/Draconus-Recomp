@@ -759,7 +759,30 @@ so the interpreter runs them in both modes. That makes the next question sharp: 
 those functions has an instruction the interpreter implements with an unbalanced stack, or the
 call/return around it is mishandled (delay slot, `rte` inside the callee, or a non-local return).
 
-**Next:** trace r15 through the callee at `[r14]` — entry, every push/pop, and the return — with
+**The callee is a trampoline (2026-11-06).** `0x8C232228` does not push anything; it clears
+two device bits and tail-jumps:
+
+```
+8c232228  mov.l 0x8c2322f4,r3      ; a register byte
+8c23222c  and #251,r0 / mov.b r0,@r3
+8c232230  mov.l 0x8c232304,r4      ; another register
+8c232238  mov.w r2,@r4 / ...
+8c232242  mov.l 0x8c232308,r1
+8c232246  mov.l @r1,r0
+8c232248  jmp @r0                  ; tail call
+```
+
+The trace confirms `r15` is unchanged through all 17 instructions (`0x8C48385C`), so the +4 is
+introduced **after** the tail jump, by the function at `[0x8C232308]`. The whole chain is
+untranslated, hence interpreted in both modes, which is why `--replay` never saw it: the harness
+compares calls, and these are interpreted on both sides — if the interpreter mishandles an
+instruction here, both sides are "consistent" and the harness stays silent.
+
+**Next:** trace `r15` from the tail-jump target (`[0x8C232308]`) to the return at `0x8C2336FA`,
+and compare the net stack delta with the disassembly of that function. This is now a short walk
+through one call chain rather than an open search.
+
+**Superseded:** **Next:** trace r15 through the callee at `[r14]` — entry, every push/pop, and the return — with
 `DREAM_TRACE_INSNS` over that function's range, and compare its stack delta with what the
 disassembly says it should be. A `+4` there is the whole bug.
 
