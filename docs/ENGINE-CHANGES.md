@@ -220,6 +220,14 @@ address (a tail jump, or a call through `call_indirect` that restores PR afterwa
 recorded state is not reproducible by the interpreter's replay, and the comparison is
 invalid rather than the function being wrong.
 
+**Correction (2026-11-06): the replay disagreement is probably a harness artifact.**
+Forcing the function back to the interpreter with
+`DREAM_INTERP_FUNCS=0x8C22CAA4:0x8C22CB8E` leaves the boot failure **exactly** as it was (54
+frames, `0x60000040`, same counters). If that function's translation were the cause,
+interpreting it would move the failure. It does not, so `--replay`'s single disagreement does
+not correspond to the actual defect. The strongest evidence remains the independent one: an
+`rte` with `spc 0x60000040, ssr 0x8c2336fa` — SPC and SSR swapped.
+
 **Next:** print the full entry `Ctx` (all registers, `pr`, `sr`, `fpscr`, `pc`) at the
 wrapper for both the translated call and its replay, and diff them *before* the function
 body runs. If they differ, the bug is in the harness's snapshot point, not the game.
