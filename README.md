@@ -34,6 +34,17 @@ Then edit `engine\games\draconus\draconus.toml` → `[disc] image` to point at y
 dump, and run `.\play-draconus.bat`. See `docs/09-TOOLING.md` for the Vulkan SDK and SDL3
 requirements, and `docs/LEGAL.md` for what you must supply.
 
+## Import a disc
+
+```powershell
+tools\import-disc.bat "D:\dumps\draconus.gdi"          # verify + configure
+tools\import-disc.bat "D:\dumps\draconus.gdi" --whatif # verify only
+```
+
+The helper checks the dump against the known boot-executable hash (refusing anything that is
+not the USA V1.000 release, including the prototype), then points the engine-side config at
+it. The dump stays where it is; nothing is copied.
+
 ## Play it
 
 ```powershell

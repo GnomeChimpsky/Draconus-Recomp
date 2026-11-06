@@ -46,7 +46,10 @@ Build trees: `engine/build-render` (playable, Vulkan + SDL3), `engine/build-repl
    then instrument `System::on_rte` and `sh4::resume_at` to log `frame_pcs`/`frame_sps`
    against `c.spc`/`c.r[15]` for the single switch in the run. The failing restore is at
    `0x8C233756`; the resumed task's stack is what to watch.
-3. **Visual parity (M3) and the launcher (M8).** Both are independent of the fault. Flycast
+3. **Launcher/disc import (M8).** The import half exists: `tools/import-disc.bat` verifies a
+   dump and writes the config. What is missing is the graphical launcher (pick a dump, pick
+   the disc, show settings) and the configuration UI. Then **visual parity (M3)** — Flycast is
+   not installed here, so that needs a reference capture from elsewhere. Both are independent of the fault. Flycast
    is not installed here, so M3 needs a reference capture from another machine or a
    screenshot comparison against known-good footage.
 
