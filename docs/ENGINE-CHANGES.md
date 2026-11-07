@@ -816,7 +816,44 @@ That reframes the remaining work: the defect is not a wild stack pointer inside 
 **when and how the scheduler's switch is taken**. The translated path reaches a switch that the
 interpreter path does not, or reaches it in a different state.
 
-**Next:** compare the two runs at this call — the same `(pc, target, r15)` pair in both modes,
+**Balance-logger statistics (2026-11-06).** The logger only observes *interpreted* code, so:
+
+| run | calls paired | unbalanced |
+|---|---|---|
+| interpreter | **2,231,260** | **0** |
+| translated | a handful (only the interpreted fragments) | 1 (the task switch) |
+
+That is strong evidence the interpreter's call/return and stack handling are sound over 2.23 M
+calls, and it also shows the instrument cannot discriminate the two modes — the same blindness as
+`--replay`: the code that differs is not the code being observed.
+
+**New hypothesis: the SH-4 rule about SR-modifying instructions is not implemented.** The trace
+around the fault is:
+
+```
+exc:    vec 0x600 pc 0x8c22ac4e  r15 0x8c483a3c  nesting 1
+exc:    vec 0x600 pc 0x8c233122  r15 0x8c483940  nesting 2     <- nested, taken inside the handler
+switch: spc 0x60000040 sp 0x8c483944 frame_pc 0x8c22ac4e frame_sp 0x8c483a3c
+nonlocal: rts from pc 0x60000040 to 0x60000040
+```
+
+The guest's handler restores `SR` (`ldc.l @r15+,sr` at `0x8C233756`) and *then* pops the remaining
+saved context (r0-r14, macl, mach, vbr, gbr, pr, spc, ssr) before `rte`. Once SR is restored the
+interrupt mask is the interrupted task's again, so an interrupt delivered in that window pushes a
+frame **over the slots still waiting to be popped** — which is exactly the crossed
+`pr`/`spc`/`ssr` observed.
+
+On real SH-4 hardware an interrupt is **not accepted immediately after an instruction that writes
+SR** (`LDC Rm,SR`, `LDC.L @Rm+,SR`, `RTE`); the following instruction always executes first. A
+search of the runtime finds no such rule — `poll()` is just `if (c.cycles >= c.next_event)
+deliver_irq(...)`. Honouring it would push the nested interrupt past the epilogue's pops.
+
+**Next:** implement the one-instruction inhibit after SR writes in both engines (emitter label
+after `ldc ...sr`, interpreter flag in `poll`), and see whether the translated path gets past frame
+54. This is the first hypothesis that explains *why an interrupt lands in the wrong window* rather
+than where the stack went wrong.
+
+**Superseded:** **Next:** compare the two runs at this call — the same `(pc, target, r15)` pair in both modes,
 around frame 54 — and see whether the switch itself is taken in the interpreter run. If it is not,
 the difference is interrupt timing, and the emitter's poll placement (function entry and backward
 branches) is the mechanism to examine.
