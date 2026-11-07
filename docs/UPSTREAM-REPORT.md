@@ -237,6 +237,47 @@ engines from it) is needed to see the first divergent instruction; cross-run tra
 confounded because the two runs take different paths from the first interrupt
 (`r15 = 0x8C00F350 / `0x8C00F31C`, `spc = 0x0C22B502 / 0x8C22B540`).
 
+## D. The remaining fault: the runtime's guest-task-switch path
+
+This is the item worth the maintainer's attention, and it is now much better posed than "any
+translation breaks at 0x8C001006" (that was fixed, see A).
+
+**Observation.** Counting guest task switches with a local diagnostic (`DREAM_TRACE_SWITCH`):
+
+| run | frames | task-switching RTEs |
+|---|---|---|
+| interpreter (`--interpret`) | 600 | **0** |
+| translated | 54 | **1** |
+
+The interpreter path — the one that plays the game — **never executes a task switch**. The
+translated path takes exactly one, and that switch is where the resumed context is corrupted:
+`SPC` is restored from a stack slot holding an SR value, so its `rte` resumes at `0x60000040` and
+the run faults.
+
+**Consequences.**
+
+1. The differential harness cannot find this: `--replay` compares translated calls against the
+   interpreter (2,284,637 compared, 0 disagreements, including device-writing calls), and the
+   interpreter call-balance checker pairs 2,231,260 calls with 0 unbalanced — but neither ever
+   observes a switch, because the interpreter never takes one.
+2. There is therefore **no known-good reference** for the switch in this configuration. It is not
+   "the same code, slower"; it is code the working path never enters.
+3. The playable configuration is running a **degenerate schedule** (one task, no switches). That
+   is likely why it works, and it is a fidelity gap: a title that streams or runs audio on another
+   task would behave differently.
+
+**Why the modes differ.** The guest's scheduler decides whether to switch from its own state,
+which interrupt timing has already perturbed: translated code polls at function entry and backward
+branches, the interpreter at its own points, so the same run takes interrupts at different
+instruction boundaries and reaches a different decision.
+
+**The question for the maintainer:** what may the runtime assume about a guest task switch? The
+guest sets up `SPC`/`SSR` itself and then `rte`s; the runtime's `System::on_rte` interprets
+"`spc` differs from the suspended frame" as a switch and throws to the new `SPC`. If a guest's
+handler legitimately modifies `SPC` (as a scheduler does), when is that a switch and when is it a
+corrupted frame — and should the runtime validate the `SPC` it resumes at (e.g. reject a value
+outside the guest's code ranges) rather than resuming anywhere?
+
 ## Environment notes
 
 * Windows 10/11 x64, MSVC 19.44, CMake 3.31, Ninja, Vulkan SDK 1.4.363.0, SDL3 3.2.28
