@@ -894,6 +894,39 @@ disassembly says it should be. A `+4` there is the whole bug.
 `0x8C233122` is the prime suspect — its handler may leave FPSCR cleared), and check whether the
 save should be restoring FPSCR before the FR pops rather than after.
 
+## The working path never exercises the task switch (2026-11-07)
+
+Counting switches in each mode with `DREAM_TRACE_SWITCH`:
+
+| run | frames | task-switching RTEs |
+|---|---|---|
+| interpreter | 600 | **0** |
+| translated | 54 | **1** |
+
+The interpreter path — the one that plays the game — **never takes a task switch at all**. So:
+
+1. Every hour of "it works on the interpreter path" testing never covered the guest's scheduler.
+   The failing code is not "the same game running faster"; it is code the working path never
+   enters.
+2. The translated path reaches the switch once, and that single switch is where the context is
+   corrupted. The defect is inside the runtime's handling of a guest task switch, which until now
+   had no working reference at all.
+3. It also means the playable build is running a **degenerate schedule** — one task, no switches.
+   That may be why it plays at all while the switch is broken, and it is a fidelity gap in its own
+   right: a title that streamed, played music on a separate task, or ran a second thread would
+   behave differently.
+
+**Why the modes differ:** the switch is taken when the guest's scheduler decides to, which depends
+on state that interrupt timing has already changed. Translated code polls at function entry and
+backward branches; the interpreter polls at its own points, so the same run gets interrupts at
+different instruction boundaries and the scheduler reaches a different decision.
+
+**What this means for the fix:** there is no "known-good" behaviour to copy for the task switch,
+because the good path has never executed it. The switch has to be validated against the
+architecture (what the guest sets before its `rte`, and what the runtime may legally assume),
+which is exactly the question for the engine author — and it is now a much better-posed question
+than "translation breaks at frame 54".
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
