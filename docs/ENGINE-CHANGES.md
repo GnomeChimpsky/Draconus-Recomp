@@ -927,6 +927,25 @@ architecture (what the guest sets before its `rte`, and what the runtime may leg
 which is exactly the question for the engine author — and it is now a much better-posed question
 than "translation breaks at frame 54".
 
+### Repair experiment (2026-11-07): the corruption is in guest memory
+
+A sanity rule was tried (`DREAM_REPAIR_SWITCH=1`): when a "switch" resumes at an `SPC` that is not a
+guest code address, treat it as corruption and resume the interrupted frame instead.
+
+```
+repair: implausible spc 0x60000040 at sp 0x8c483944, resuming frame pc 0x8c22ac4e sp 0x8c483a3c
+stop: fault
+guest: 0.744 s (148749561 cycles), 54 frames, pc 0xac000010
+```
+
+It fires and repairs the frame correctly, then the run faults at `0xAC000010` instead — another
+implausible address. So the runtime's bookkeeping is not the only damage: **guest memory itself was
+overwritten** (the handler's saved context on its own stack), and re-entering from the interrupted
+frame walks into the next piece of corruption.
+
+That closes the "just fix the frame" family of fixes: whatever writes `0x60000040` into the saved
+SPC slot writes real memory, and it happens while the handler's frame is still live.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
