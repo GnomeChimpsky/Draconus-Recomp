@@ -946,6 +946,43 @@ frame walks into the next piece of corruption.
 That closes the "just fix the frame" family of fixes: whatever writes `0x60000040` into the saved
 SPC slot writes real memory, and it happens while the handler's frame is still live.
 
+### Watchpoint: who writes the saved context (2026-11-07)
+
+`DREAM_WATCH_WRITE=0x8C483938:0x0C` logs every store into the three slots the epilogue will pop
+(`pr` 0x938, `spc` 0x93C, `ssr` 0x940). The whole sequence, in order:
+
+```
+write 0x8c48393c = 0x00000001 at pc 0x8c233042  r15 0x8c48393c
+write 0x8c483938 = 0x8c233136 at pc 0x8c23304a  r15 0x8c483938
+write 0x8c483940 = 0x00088a03 at pc 0x8c2330de  r15 0x8c483940
+write 0x8c48393c = 0x00000000 at pc 0x8c2330e2  r15 0x8c48393c
+write 0x8c483938 = 0x00ee6b28 at pc 0x8c2330e6  r15 0x8c483938
+write 0x8c483938 = 0x8c22bb68 at pc 0x8c22ab6c  r15 0x8c483938
+write 0x8c48393c = 0x00000001 at pc 0x8c001006  r15 0x8c483938   <- HLE hook
+write 0x8c483940 = 0x00000080 at pc 0x8c001006  r15 0x8c483938   <- HLE hook
+write 0x8c483940 = 0x8c2336fa at pc 0x8c2330e8  r15 0x8c483940
+write 0x8c48393c = 0xffffff0f at pc 0x0c000600  r15 0x8c48393c   <- relocation unit
+write 0x8c48393c = 0x60000040 at pc 0x8c23364a  r15 0x8c48393c   <- handler saves SSR
+write 0x8c483938 = 0x8c233122 at pc 0x8c23364c  r15 0x8c483938   <- handler saves SPC
+```
+
+Three things this shows:
+
+1. **The regions overlap.** The functions at `0x8C2330xx` write 0x938/0x93C/0x940 — the same slots
+   the handler will later pop as `pr`/`spc`/`ssr` — and they do it with `r15` around `0x940`, i.e.
+   from a *shallower* stack than the handler's own frame (which had descended to `0x85C`). So the
+   corruption is not a wild pointer: two different contexts are using the same stack addresses.
+2. **The HLE hook writes there too** (`pc 0x8c001006`, the GD-ROM vector), with `r15 0x8c483938`.
+   That is the runtime's own hand-off running on a stack that belongs to the interrupted frame.
+3. **The handler's save is correct** (`0x8C23364A` writes SSR=0x60000040 at 0x93C, `0x8C23364C`
+   writes SPC=0x8C233122 at 0x938), which confirms the save side was never wrong — the slots were
+   already being used by another context before it saved them.
+
+**Conclusion:** the guest is switching stacks somewhere in the `0x8C2330xx` path (a scheduler), and
+the runtime keeps executing the HLE hook and the exception handler on the *old* stack address. The
+fix is on the runtime side: it must not run handler/hook work on a stack another context is using,
+or must not let a context switch leave the exception frame behind.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
