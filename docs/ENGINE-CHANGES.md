@@ -983,6 +983,37 @@ the runtime keeps executing the HLE hook and the exception handler on the *old* 
 fix is on the runtime side: it must not run handler/hook work on a stack another context is using,
 or must not let a context switch leave the exception frame behind.
 
+### The engines are in lockstep (2026-11-09)
+
+Rather than assume the clocks drift, the cycle counts were compared frame by frame:
+
+| frames | translated cycles | interpreted cycles | delta |
+|---|---|---|---|
+| 5 | 10,931,460 | 10,931,468 | −8 |
+| 10 | 19,282,592 | 19,282,588 | +4 |
+| 20 | 35,997,552 | 35,997,552 | **0** |
+| 30 | 66,033,875 | 66,033,923 | −48 |
+| 40 | 99,400,156 | 99,400,147 | +9 |
+| 50 | 132,766,397 | 132,766,397 | **0** |
+| 54 | 146,100,238 | 146,100,236 | +2 |
+
+The deltas oscillate and reconverge; there is no accumulating drift. At frame 54 both runs report
+69 interrupts and the same PC (`0x0C17B6D0` / `0x8C17B6D0` — the same physical address). **The two
+engines are effectively in lockstep up to the fault.**
+
+So neither poll placement nor cycle accounting explains the difference. And note where the fault
+actually happens: at `148,710,312` cycles — about **2.6 million cycles after** the frame-54 report.
+The divergence therefore lies in the window *after* frame 54, in code both engines reach from
+identical state.
+
+That is the narrowest the fault has ever been: a 2.6-million-cycle window entered from identical
+state, where one engine corrupts the exception frame and the other does not.
+
+**Next:** with the within-run differential (`DREAM_REPLAY_TRACE`), compare the functions executed in
+that window — starting with whichever translated functions run between `146.1M` and `148.7M`
+cycles. The interpreter's own run of the same window is the reference, and unlike earlier attempts
+the two runs are in the same state when the window opens.
+
 ### Poll-density hypothesis tested and refuted (2026-11-09)
 
 The engine's ADR 7 says check density is title-dependent and may need tuning, so two variants were
