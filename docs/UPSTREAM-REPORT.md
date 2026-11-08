@@ -239,6 +239,12 @@ confounded because the two runs take different paths from the first interrupt
 
 ## D. The remaining fault: the runtime's guest-task-switch path
 
+**Reproduce in one command:** `tools\repro-translated-path.ps1` runs the translated path under
+the diagnostics and prints the exception entries, the switch decision, the SPC writes, the writes
+into the handler's saved slots, and the outcome. It needs only `engine/build-render` plus the
+owner's disc, and modifies nothing.
+
+
 This is the item worth the maintainer's attention, and it is now much better posed than "any
 translation breaks at 0x8C001006" (that was fixed, see A).
 

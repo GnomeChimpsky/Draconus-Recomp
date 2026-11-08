@@ -40,6 +40,17 @@ Then edit `engine\games\draconus\draconus.toml` → `[disc] image` to point at y
 dump, and run `.\play-draconus.bat`. See `docs/09-TOOLING.md` for the Vulkan SDK and SDL3
 requirements, and `docs/LEGAL.md` for what you must supply.
 
+## Reproducing the translated-path fault
+
+```powershell
+tools\repro-translated-path.ps1
+```
+
+One command, no changes: runs the machine-translated path (which stops at guest frame 54) under
+the diagnostics and prints the exception entries, the task-switch decision, the SPC write that
+carries the bad value, and the stores into the handler's saved context. This is the artifact to
+attach to `docs/UPSTREAM-REPORT.md` when reporting it upstream.
+
 ## Graphical launcher
 
 ```powershell
