@@ -983,6 +983,32 @@ the runtime keeps executing the HLE hook and the exception handler on the *old* 
 fix is on the runtime side: it must not run handler/hook work on a stack another context is using,
 or must not let a context switch leave the exception frame behind.
 
+### Poll-density hypothesis tested and refuted (2026-11-09)
+
+The engine's ADR 7 says check density is title-dependent and may need tuning, so two variants were
+built and run on the translated path:
+
+| build | emitted polls | result |
+|---|---|---|
+| `--no-irq` | none | the run **hangs** (no VBlank reaches the guest) |
+| `--irq-dense` (new `--irq-dense` flag: a poll before every instruction) | every instruction | **same fault**: `0x60000040`, 54 frames, 148,710,312 cycles, 119 interrupts, 1 switch |
+| default | entries and back-edges | same fault, identical counters |
+
+The dense build reproduces the default build **digit for digit** — same cycles, same interrupt
+count, same switch. So poll placement is not what decides when this interrupt lands; the delivery
+point is fixed by the virtual clock, not by where we chose to look at it.
+
+**What that leaves:** the two engines must be disagreeing about *time*, not about polling. Emitted
+code advances `Ctx::cycles` by per-block **estimates** (`runtime-interrupts.md`: "advances
+`Ctx::cycles` by its per-block estimates"), while the interpreter advances by 1 per instruction and
+per cycle counts it decodes. If the estimates drift from the interpreter's accounting, the guest
+reaches the same interrupt at a different virtual time, with different state — which is exactly the
+shape of every difference observed so far.
+
+**Next:** compare `Ctx::cycles` between the two engines at the same guest point (e.g. the first
+VBlank) and see whether the estimates drift. If they do, the fix is in the per-block cycle model,
+and `--irq-dense`/`--no-irq` are both red herrings.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
