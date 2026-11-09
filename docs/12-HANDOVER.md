@@ -37,6 +37,33 @@ path. Full chain in `docs/ENGINE-CHANGES.md`, entry point for an engine author i
 Build trees: `engine/build-render` (playable, Vulkan + SDL3), `engine/build-replay`
 (`--replay-hooks --trace-insns`), `engine/build-trace` (tracer only, no renderer).
 
+## State at the end of the translated-path investigation (2026-11-10)
+
+The game is **playable** on the interpreter path (movies, menus, gameplay, input) at 0.22-0.25x real
+time. The translated path has been advanced from "faults at 29 frames" to "runs 600 frames" but only
+in a slow configuration, and the remaining defect is localised:
+
+| configuration | frames | speed | note |
+|---|---|---|---|
+| `--interpret` | 600+ | 0.22x | the shipping default |
+| handlers interpreted (`DREAM_HANDLER_INTERP=1`, translated build) | **600**, deterministic | 0.14x | proves the defect is in the handler path |
+| precise pending-aware polls | 59 | 0.5x | correct but insufficient |
+| standard translated | 54 | - | fault `0x60000040` |
+
+**Localised defect:** the relocated exception stub at `0x8C000600`-`0x8C000628` (20 instructions,
+copied there by the game at boot). When it runs as *emitted code* the handler's saved context is
+corrupted; when the same bytes run under `devinterp` the run is clean. Its instructions are faithful
+(self-modified literal re-read from memory, INTEVT read, `jmp @r1`), the handler reaches its `rte`,
+and `call_translated` inside handlers is ruled out. What remains is how that stub is *entered and
+counted* — the next measurement is one invocation's twenty `(pc, cycles)` pairs from each engine,
+extracted with a hard cap (three attempts dumped every invocation and were unusable — do not repeat
+that).
+
+**Engine changes carried (all validated, none of which fix this fault):** 001 present-mode guard,
+002 diagnostics, 003 hook dispatch fix, 004 tracer, 005 replay host-state fix, 006 SR-write rule,
+plus delay-slot tracing, cycle-phase alignment, flush-before-call, post-call poll and the
+pending-aware poll.
+
 ## Next three tasks, in order
 
 1. **Fix the harness limitation for HLE reads.** Patch 005 covers GD-ROM. Timers, RNG and
