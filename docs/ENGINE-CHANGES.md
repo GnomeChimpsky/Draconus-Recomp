@@ -1182,6 +1182,30 @@ the first flush that disagrees names the instruction whose cost differs. Earlier
 already showed +1 (translated 16 vs interpreted 15), which the phase fix was meant to remove — that
 measurement now has to be repeated on the fixed emitter.
 
+### Cycle accounting agrees at flushes; the poll reads a stale clock (2026-11-09)
+
+With the delay-slot phase fixed, two measurements:
+
+1. **Flush points agree exactly** over the first **1,000,001 instructions** — no mismatch at all.
+2. Checkpoint `cycles` (now recorded in `DREAM_TRACE_HASH` output) first differ at instruction
+   2,600,000 by **−1**, but that checkpoint sits *mid-block*, where the translated clock has not
+   been flushed yet while the interpreter has already counted each instruction.
+
+So the cost table is right and the phase is right. What differs is **when the poll reads the
+clock**: emitted code advances `cycles` in bursts (flushed at block ends), and a poll at a function
+entry or back-edge can read a clock that is still short of the instructions already executed in the
+current block. The interpreter, counting per instruction, always polls with an exact clock. Over
+~20 M instructions those unflushed tail cycles accumulate to the 352-cycle difference measured at
+the first interrupt.
+
+**Next measurement, precise:** log `cycles` at **every poll** (not only deliveries) in both engines
+and compare at the same instruction. The first poll where the two clocks differ by more than the
+block's pending cost confirms the mechanism; the fix is then to flush pending cycles immediately
+before every poll (and before every call, since a callee entry is a poll).
+
+**Tooling note:** `DREAM_TRACE_HASH` now prints `cycles` with each checkpoint, and
+`DREAM_TRACE_IRQ` logs every delivery with `pc cycles now intevt sr`.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
