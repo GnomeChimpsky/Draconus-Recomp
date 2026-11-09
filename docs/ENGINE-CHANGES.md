@@ -983,6 +983,37 @@ the runtime keeps executing the HLE hook and the exception handler on the *old* 
 fix is on the runtime side: it must not run handler/hook work on a stack another context is using,
 or must not let a context switch leave the exception frame behind.
 
+### CORRECTION (2026-11-09 evening): they are **not** in lockstep
+
+The prior entry concluded the engines are in lockstep because they report equal cycles at frame
+boundaries. That inference was wrong, and here is the measurement that shows it.
+
+Tracing both runs over the same cycle window and comparing **at equal cycle counts**:
+
+```
+cycle 146045159: translated executes 0x8C1A8AD8, interpreted executes 0x8C180D38
+cycle 146045160: translated 0x8C1A8ADA, interpreted 0x8C180D3A
+first such difference: 18,073 of 18,099 compared cycles differ
+```
+
+At the same virtual time the two engines are running **different guest instructions**. The cycle
+counts merely *resynchronise at device events* (the scheduler advances the clock to event
+deadlines), so equal totals at frame boundaries say nothing about the instruction stream.
+
+Two consequences:
+
+1. The earlier "2.6 M-cycle window entered from identical state" framing is void: the runs diverge
+   well before it. The original observation stands — the two modes part company at the first
+   interrupt — and every cross-run comparison remains invalid.
+2. The failure is not a drift, a poll-density issue, or a cycle-accounting bug. It is that the two
+   engines take different code paths early, so by frame 54 they are running different code that
+   happens to cost the same time.
+
+**Why this was hard to see:** the interpreter's tracer output for the first 3 M cycles is 519 MB
+(3 M interpreted instructions), while the translated run's is **empty** — with no `--trace-insns`
+hooks in that build, emitted code never calls the tracer at all. Comparing streams therefore needs
+either a wide tracer build or the snapshot harness that runs both engines from one captured state.
+
 ### The engines are in lockstep (2026-11-09)
 
 Rather than assume the clocks drift, the cycle counts were compared frame by frame:
