@@ -1336,6 +1336,54 @@ from the previous entry (59 frames) remains the best result.
 **Best state: 59 frames** (precise pending-aware polls), 0.5x, fault `0x60000140`.
 **Standard build: 54 frames**, now with the post-call poll (harmless, architecturally correct).
 
+## BREAKTHROUGH: the translated path RUNS (2026-11-09)
+
+Reading `System::enter_exception` revealed the clue:
+
+```cpp
+#ifdef DREAM_DEV_INTERPRETER
+    if (interpret_all) {
+        devinterp::run(c, m, 0, iopt, nullptr);   // handler always interpreted
+    } else
+#endif
+        sh4::call_indirect(c, m, handler);        // handler enters translated code
+```
+
+In `--interpret` mode every exception handler runs through the interpreter. In the translated build the
+same call goes through `call_indirect`, which finds the **translated relocation unit at `0x8C000600`**
+(the game copies its exception stub there at boot) and executes emitted code before handing to the
+interpreted body at `0x8C233648`. The handler therefore runs *differently in the two modes* — on the
+exact path where the context is corrupted.
+
+Forcing handlers through the interpreter in both modes (`DREAM_HANDLER_INTERP=1`) fixes it outright:
+
+```
+translated path, handlers interpreted:
+  stop: frame limit
+  guest: 9.838 s (1,967,764,531 cycles), 600 frames, pc 0x0c0112e4
+  (identical on a repeat run — deterministic)
+```
+
+**600 frames, no fault.** Before this, the translated path died at 54 frames.
+
+### What this establishes
+
+1. **The compiled code is not the problem**, and neither is the cycle model or poll placement: with
+   the same emitter and the same clocks, the run is clean as long as the handler is interpreted.
+2. **The defect is in the translation of the relocated exception-handler unit** — 0x38 bytes at
+   `0x8C000600`, translated as a separate image view. That unit, or its hand-off to `0x8C233648`,
+   corrupts the handler's saved context.
+3. **Cost:** handlers run every VBlank, so interpreting them makes the run *slower* than the
+   interpreter path — 0.14x real time (69.5 s host for 9.8 s guest) vs 0.22x. Correct, but not the
+   shipping configuration.
+
+### Next
+
+Diff that 0x38-byte unit's translated behaviour against the interpreter, instruction by instruction:
+it is tiny (about twenty instructions), it is the only code whose execution differs between the two
+modes on this path, and the machinery to compare it (`DREAM_TRACE_INSNS` with a narrow range,
+`DREAM_TRACE_CALL_AT`) already exists.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
