@@ -52,7 +52,7 @@ gap of this title — it was the correct schedule.
 
 ## Engine state (local, not committed)
 
-`engine/` is fetched by `setup.ps1` and carries seven local changes, all validated:
+`engine/` is fetched by `setup.ps1` and carries eight local changes, all validated:
 
 | # | What | Upstream? |
 |---|---|---|
@@ -86,9 +86,11 @@ Order is by value per unit of risk, not by size:
 
 ## Owner items
 
-`docs/owner-tasks.md` is the live list. Ones that matter soonest: delete the four zero-byte CHDs and
-the stray `flycast/` folder in the checkout; an Apple Developer account for a macOS release build
-(WP3.6 will need it).
+Nothing here blocks the next phase. The ones that matter soonest: the local engine patches are not
+re-applied by `setup.ps1`, so a fresh clone builds the pristine engine (README says so; a patch step
+is the natural next repository task). Also outstanding: delete the zero-byte CHDs and the stray
+`flycast/` folder in the checkout, and an Apple Developer account for a macOS release build (WP3.6
+will need it).
 
 ## Things that cost time and should not be repeated
 
