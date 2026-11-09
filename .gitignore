@@ -39,3 +39,7 @@ out/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local engine checkout (a pristine copy for source reading) and desktop shortcuts
+dream-recomp-main/
+*.lnk
