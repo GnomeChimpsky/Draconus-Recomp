@@ -1157,6 +1157,31 @@ poll placement, and not in the phase. That leaves the *scheduling* of the next e
 interpreter's equivalent poll sits at a different point in its own loop. Comparing `next_event` and
 `cycles` at the divergent instruction (0x0C176FE8 → handler vs 0x0C176FEA) is the next measurement.
 
+## The first interrupt is where the engines part (2026-11-09)
+
+Logging every delivery (`DREAM_TRACE_IRQ`, added: `pc cycles now intevt sr` in
+`System::deliver_pending`) at 54 frames gives both engines **69 deliveries at the same PCs** — and
+the first one is already different:
+
+```
+#0  translated  pc 0c22b502  cycles 39,374,652
+    interpreted pc 0c22a960  cycles 39,375,004     (+352 cycles, a different instruction)
+```
+
+That is the origin of everything downstream. The instruction streams are identical until this point;
+the translated clock then reaches the VBlank deadline 352 cycles earlier, so the interrupt lands on a
+different instruction, the handler runs at a different stack depth, and (much later) the guest's saved
+context is overwritten.
+
+**Why 352 cycles:** a small per-block cost difference accumulating over ~20 M instructions — one
+cycle every ~110 k instructions. Tiny, but decisive at a delivery boundary.
+
+**The concrete next step (option 1 made measurable):** rebuild the trace-everything build with the
+delay-slot phase fix and compare `cycles` at every **flush point** over the first ~1 M instructions;
+the first flush that disagrees names the instruction whose cost differs. Earlier the first block
+already showed +1 (translated 16 vs interpreted 15), which the phase fix was meant to remove — that
+measurement now has to be repeated on the fixed emitter.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
