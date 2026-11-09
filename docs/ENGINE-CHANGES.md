@@ -1453,6 +1453,78 @@ diff those.
 handlers interpreted** (0.14x, slower than the interpreter's 0.22x because handlers run every
 VBlank).
 
+## ROOT CAUSE FOUND AND FIXED: handler entry stopped at the interrupted code's PR (2026-11-10)
+
+The fault is fixed, and it was not the stub's instruction encoding, its cycle accounting, or the
+poll placement. The translated path now runs **600 frames deterministically, and its guest state
+matches the interpreter**: 34,022 TA chunks, 508 list inits, 503 renders, 504 frame swaps and the
+same Maple counters, with 1,967,764,531 cycles against the interpreter's 1,967,764,490 — a 41-cycle
+difference over 9.8 guest seconds, and no task switch in either run.
+
+### The defect
+
+`System::on_untranslated` — the bridge emitted code calls for a target with no translation — ran the
+interpreted code until it returned to `c.pr`. That is right for an ordinary call and wrong for an
+exception-handler entry: a handler does not return through PR, and when the VBR+0x600 stub hands the
+body to the interpreter, PR still belongs to the *interrupted* code.
+
+It only bit on a **nested delivery**. When an interrupt lands inside another handler's ISR, the outer
+handler is inside a `jsr @r14`, so PR is that ISR's return address — and the nested handler's own
+`jsr @r14` sets PR to the same value. The interpreted run then stopped at the ISR's `rts`, abandoning
+the handler before its epilogue with its saved context still on the guest stack. When the outer
+handler's epilogue finally ran it was four bytes out of step: `ldc.l @r15+,spc` loaded the SSR slot
+(`0x60000040`), `ldc.l @r15+,ssr` loaded the PR slot, and the `rte` was classified as a task switch
+to `0x60000040`.
+
+Evidence, `DREAM_TRACE_INSNS` over `0x0C233648..0x0C233790` in both engines:
+
+* the handler body executed 119 times in the translated run; exactly one invocation left `r15` four
+  bytes higher at its `jsr` return (`0x8C48385C` -> `0x8C483860`) than it entered it. All 450
+  interpreted invocations were balanced;
+* `DREAM_TRACE_HANDLER` named that invocation:
+  `untranslated: target 0x8c233648 return_to(pr) 0x8c2336fa ... ended Returned(early) pc 0x8c1a632e r15 0x8c48385c`.
+  `0x8C2336FA` is the return address of the outer handler's `jsr @r14`, which is also where the
+  nested handler's own call returns;
+* every other handler entry ended `Rte` — which is why the earlier "does the nested run return
+  early?" check came out negative. The failure is specific to a nested delivery whose PR collides
+  with the handler's own call return address.
+
+### The fix (patch 007)
+
+`enter_exception` marks the handler entry (`System::handler_entry_`); `on_untranslated` consumes the
+mark and uses stop address 0 — stop only at the handler's RTE — instead of `c.pr`. This is exactly
+the stop address the `--interpret` path has always passed in `enter_exception`
+(`devinterp::run(c, m, 0, iopt, nullptr)`), which is why `--interpret` and `DREAM_HANDLER_INTERP`
+were immune all along.
+
+### Regression test
+
+`runtime/tests/test_system.cpp`, "system: a nested handler's interpreted run ends at its RTE, not at
+a stale PR": a handler at an unregistered vector pushes a register, calls an ISR whose return
+address equals the stale PR, marks completion, acknowledges the source and RTEs. With the fix all
+six assertions pass; reverting the one line fails four of them (marker not written, `r15` four low,
+interrupted PC not restored, source not acknowledged). Both directions were run.
+
+### What it means for the rest of the work
+
+* **The task-switch theory is closed.** The transcript's `task-switching RTEs: 1` was this
+  corruption being classified as a switch; with the handler finishing, it is 0, and
+  `System::on_rte`'s switch detection was never wrong.
+* **The poll work was not the cause.** Precise pending-aware polls, the post-call poll and the
+  delay-slot phase alignment are still correct and are kept, but they moved the fault only because
+  they moved the delivery that found the broken handler.
+* **Speed did not improve.** 600 frames take 68 s translated against 38 s interpreted: with most of
+  the title still untranslated, the translated build pays a `devinterp::run` for every call it cannot
+  make natively. The speed lever remains translation coverage (M2 discovery/emission), not the
+  runtime.
+
+### Engine changes carried
+
+001 present-mode guard, 002 diagnostics, 003 hook dispatch at the interpreter fetch boundary, 004
+instruction tracer, 005 replay host-state skip, 006 SR-write rule, **007 handler-entry stop address**,
+plus delay-slot tracing, cycle-phase alignment, flush-before-call, the post-call poll and the
+pending-aware poll. 007 is the one that fixes the fault and is worth offering upstream.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

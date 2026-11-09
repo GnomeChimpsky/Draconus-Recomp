@@ -1,5 +1,10 @@
 # 11 — M2 results: first translation and boot attempt
 
+> **Superseded in part (2026-11-10).** The boot and extraction findings stand. The translated-path
+> faults recorded below were closed later: the hook-marker fault by patch 003, and the 54-frame
+> `0x60000040` fault by patch 007 (a handler entry stopping at the interrupted code's PR). Both paths
+> now run; the current state is `docs/12-HANDOVER.md` and the evidence is in `docs/ENGINE-CHANGES.md`.
+
 Date: 2026-11-04/05. Engine: `phobos665/dream-recomp` 0.1.0, `main` as fetched (tree dated
 2026-10-29), MSVC 19.44, Ninja, `-DDREAM_DEV_INTERPRETER=ON -DDREAM_RENDERER=OFF`.
 

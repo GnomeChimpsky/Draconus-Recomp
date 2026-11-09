@@ -45,23 +45,23 @@ chunks, 1,680 frame swaps, 96,068 interrupts, no faults**, and two 600-frame run
 byte-identical. The first display-list write is at frame 86. The earlier "retail won't
 boot" blocker was a bug in our own multi-sector disc reader, fixed and regression-tested.
 
-**Translated path: first blocker fixed, next one open.** The `0x8C001006` fault (a hook
-marker fetched as code after a task switch) was fixed by dispatching hook entries at the
-interpreter's fetch boundary — `docs/ENGINE-CHANGES.md` patch 003, offered upstream in
-`docs/UPSTREAM-REPORT.md`. The translated path now reaches **54 frames / 350 GD-ROM
-sectors**, deterministically, and stops at `0x60000040` where an `rte` restores a swapped
-`SPC`/`SSR`.
+**Translated path: both blockers fixed (2026-11-10).** The `0x8C001006` fault (a hook marker
+fetched as code after a task switch) was fixed by dispatching hook entries at the interpreter's
+fetch boundary (`docs/ENGINE-CHANGES.md` patch 003). The `0x60000040` fault was a handler entry
+stopping at the interrupted code's PR instead of the handler's RTE (patch 007), which left the
+handler's saved context on the guest stack and corrupted the outer epilogue. With it fixed the
+translated path runs 600 and 1,800 frames deterministically, with PVR/Maple counters identical to
+the interpreter's (41 cycles apart in 1.97 billion over 600 frames), and `--replay` still reports 0
+disagreements.
 
-**Investigated and eliminated** (evidence in `docs/ENGINE-CHANGES.md`): hook dispatch on
-returns, `resume_at` matching, the interpreter's fetch path (fixed), the interrupt frame,
-a 4-byte stack imbalance, the replay harness's entry snapshot, the FPSCR PR/SZ bits, and a
-stale T flag. `--replay` reports one disagreement, but forcing that function to interpret
-does not move the failure, so it is a harness false positive, not the defect.
+**Still open for M2's speed goal:** full-set discovery and emission (`emit` over the whole set did
+not complete; a 500-function subset emits in 0.2 s). The translated path is correct but slower than
+the interpreter in the current configuration because most calls still fall through to it. That is
+the remaining M2 work, and the next lever for frame rate.
 
-**Next:** an instruction-level differential tracer (per-instruction trace hook in emitted
-code + the same hook in the interpreter, compared from a captured entry state). That is
-the only tool that can localise the remaining fault, and it retires the whole class.
-`docs/UPSTREAM-REPORT.md` specifies it.
+**Next:** close emission over the full discovery set, then re-measure the translated path's speed.
+The instruction-level differential tracer built during the investigation stays as the tool for any
+new divergence; it is described in `docs/UPSTREAM-REPORT.md`.
 
 ### M2b — boot-state analysis
 

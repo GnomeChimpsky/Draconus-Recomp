@@ -4,8 +4,9 @@ A native Windows x64 static recompilation of **Draconus: Cult of the Wyrm**
 (Dreamcast, 2000, developed by Treyarch and published by Crave Entertainment; USA V1.000,
 `F888` / `T-402`), built on [`dream-recomp`](https://github.com/phobos665/dream-recomp).
 
-The game is playable: movies, menus, gameplay and input all work. It runs on the
-development interpreter for now, at about a quarter of real time.
+The game is playable: movies, menus, gameplay and input all work. Both execution paths now run the
+game correctly; the interpreter is quicker today because more of the binary is still intercepted by
+it, and closing that gap is a translation-coverage task.
 
 The game's SH-4 code is translated ahead of time into C++, and the Dreamcast hardware
 (file system, controllers, video, sound, memory card) is replaced by native code. The
@@ -40,16 +41,21 @@ Then edit `engine\games\draconus\draconus.toml` → `[disc] image` to point at y
 dump, and run `.\play-draconus.bat`. See `docs/09-TOOLING.md` for the Vulkan SDK and SDL3
 requirements, and `docs/LEGAL.md` for what you must supply.
 
-## Reproducing the translated-path fault
+**Note:** the engine fixes recorded in `docs/ENGINE-CHANGES.md` (patches 001–007) are local
+changes against the pinned commit; `setup.ps1` does not re-apply them yet, so a fresh clone gets
+the pristine engine. Add them by hand from the ledger until a patch step lands.
+
+## Checking the translated path
 
 ```powershell
 tools\repro-translated-path.ps1
 ```
 
-One command, no changes: runs the machine-translated path (which stops at guest frame 54) under
-the diagnostics and prints the exception entries, the task-switch decision, the SPC write that
-carries the bad value, and the stores into the handler's saved context. This is the artifact to
-attach to `docs/UPSTREAM-REPORT.md` when reporting it upstream.
+One command, no changes: runs the machine-translated path under the diagnostics and prints the
+exception entries, the task-switch decision, the SPC writes and the handler's saved-context stores.
+The expected result is now a clean run (`stop: frame limit`, `task-switching RTEs: 0`); before patch
+007 it stopped at frame 54 with `0x60000040`. The history and the root cause are in
+`docs/ENGINE-CHANGES.md`.
 
 ## Graphical launcher
 
@@ -89,14 +95,15 @@ missing or was never imported.
 ```powershell
 .\play-draconus.bat                              # window, interpreter path
 .\play-draconus.bat -Scale 2                     # 1280x960
-.\play-draconus.bat -Translated                  # the incomplete translated path
+.\play-draconus.bat -Translated                  # machine-translated path
 .\play-draconus.bat --max-frames 600 --rtc-seed 1000000 --screenshot-at 500
 ```
 
-The machine-translated path stops after about 54 frames at guest `0x60000040`. That is a
-known, traced defect in the runtime's task switch, not a crash of the build:
-`docs/ENGINE-CHANGES.md` has the chain, and the differential harness shows the translated
-code itself agreeing with the interpreter (`0 disagreements` over the run).
+Both paths run the game. The interpreter is the default because it is faster today (about 0.25x
+real time against the translated path's 0.15x): most calls still fall through to the development
+interpreter, and the translated build pays an interpreter entry per call. The translated path is
+the one to develop — it is correct (600 and 1,800 frames deterministic, counters identical to the
+interpreter) and it gets faster as translation coverage grows.
 
 Controls: arrows = d-pad, `Z` `X` `A` `S` = A, B, X, Y, Enter = Start, `Q`/`W` = triggers,
 `F1` rebinds, `F10` frame counter, `F12` screenshot, Escape quits.
@@ -127,24 +134,21 @@ gameplay and responds to input — menu navigation and character movement both w
 owner's own disc, deterministically. Translation covers 89.7 % of code bytes (3,285
 functions).
 
-Two things are not solved yet. **Speed:** the launcher uses the development interpreter, which
-runs at 0.22-0.25x real time (~13 fps at 60 Hz, `docs/09-TOOLING.md`). **The translated path:**
-it stops at frame 54 on a task-switch defect (`ldc.l @r15+,sr` reading a pointer where a saved
-SR belongs, at `0x8C233756`), so the fast path is not usable yet. Audio works in menus and
-gameplay but not on the title screen, and Flycast visual comparison has started.
-
-The development interpreter path (`--interpret`) is what the launcher uses. The *translated*
-path reaches 54 frames and then stops: a task switch resumes on a corrupted context
-(`ldc.l @r15+,sr` reading a pointer where a saved SR belongs, at `0x8C233756`). The chain is
-traced end to end in `docs/ENGINE-CHANGES.md`, and three engine fixes have been contributed
-along the way: hook dispatch at the interpreter's fetch boundary, an instruction-level
-tracer, and a `--replay` false-positive fix that lets the differential harness report
-**0 disagreements over a whole 400-frame run**, exonerating the code generator. What remains
-is the runtime's interrupt/task-switch path.
+**Speed** is the open problem: the launcher defaults to the development interpreter, which runs at
+about 0.25x real time (~15 fps at 60 Hz, `docs/09-TOOLING.md`). The machine-translated path used to
+stop at frame 54 and now runs clean — 1,800 frames, 0 task switches, counters identical to the
+interpreter — but it is slower in this configuration (0.15x) because most calls still go through the
+interpreter. Making it fast is a translation-coverage task, not a runtime one.
 
 Audio works in menus and gameplay but not on the title screen, and the title's silence is
 unexplained (`docs/13-M6-AUDIO-BASELINE.md`). Visual comparison against Flycast has started:
 the title screen matches apart from VMU state and aspect (`docs/14-M3-M6-FLYCAST-REFERENCE.md`).
+
+The engine fixes developed here are listed in `docs/UPSTREAM-REPORT.md`: hook dispatch at the
+interpreter's fetch boundary, an instruction-level tracer, a `--replay` false-positive fix that
+lets the differential harness report **0 disagreements** (2.45 million calls over 120 frames), and
+the handler-entry stop-address fix that closed the translated-path fault. The full chain and the
+dead ends are in `docs/ENGINE-CHANGES.md`.
 
 The earlier retail boot failure was a bug in this project's own multi-sector disc reader,
 fixed and regression-tested. See `docs/11-M2-RESULTS.md`.

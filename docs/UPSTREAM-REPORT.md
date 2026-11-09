@@ -4,7 +4,63 @@ Status: **ready to file**. Project: a static recompilation of *Draconus: Cult of
 (Dreamcast, Treyarch/Crave, 2000; product `F888`, licence `T-402`, V1.000).
 Engine: `phobos665/dream-recomp` `main` as of 2026-10-29, MSVC 19.44, Windows x64.
 
-Two items are offered: **one fix** (A) and **one unresolved disagreement** (B).
+Two fixes are offered: **A2** is the one that closed this title's translated-path fault (a handler
+entry must stop at its RTE, not at the interrupted code's PR), and **A** is the earlier hook-dispatch
+fix. **B** is the `--replay` false positive, now root-caused and fixed. Sections C and D are the
+investigation that led to A2 and are kept as evidence; the fault they describe no longer reproduces.
+
+---
+
+## A2. Fix (closes the fault): a handler entry must stop at its RTE, not at PR
+
+**Symptom.** The translated path stopped after 54 frames with an `rte` restoring
+`0x60000040` into PC. It ran 600 frames (deterministic) if the exception handlers were forced
+through the interpreter (`DREAM_HANDLER_INTERP`), which localised the defect to the handler entry
+path but not to any instruction of the handler.
+
+**Cause.** `System::on_untranslated` ran interpreted code until it returned to `c.pr`. That is right
+for an ordinary call and wrong when the untranslated code is an exception handler: a handler does
+not return through PR, and when the VBR+0x600 stub hands the body to the interpreter, PR still
+belongs to the interrupted code.
+
+It only matters on a **nested delivery**. The VBlank handler calls an ISR with `jsr @r14`, so PR is
+that call's return address. An interrupt delivered inside the ISR makes a nested handler whose own
+`jsr @r14` sets PR to the same value, so the interpreted run stopped at the ISR's `rts`, abandoned
+the handler before its epilogue, and left its saved context on the guest stack. The outer handler's
+epilogue then popped one slot out of step: SR landed in SPC, and the `rte` was classified as a task
+switch to an implausible address.
+
+**Patch.** `System::enter_exception` marks the handler entry; `on_untranslated` consumes the mark
+and passes stop address 0 (stop only at the RTE):
+
+```cpp
+// system.h
+bool handler_entry_ = false;
+
+// enter_exception, around the entry call
+handler_entry_ = true;
+sh4::call_indirect(c, m, handler);
+handler_entry_ = false;
+
+// on_untranslated
+const bool handler_entry = handler_entry_;
+handler_entry_ = false;
+const std::uint32_t return_to = handler_entry ? 0u : c.pr;
+```
+
+That is the stop address the `--interpret` path already used in `enter_exception`
+(`devinterp::run(c, m, 0, iopt, nullptr)`), which is why it was immune.
+
+**Measured effect.** 54 frames with a fault -> **600 frames and 1,800 frames, deterministic, no
+fault, `task-switching RTEs: 0`**, and the guest state matches the interpreter: at 600 frames,
+34,022 TA chunks, 508 list inits, 503 renders, 504 frame swaps, identical Maple counters, and
+1,967,764,531 cycles against the interpreter's 1,967,764,490. `--replay` still reports 0
+disagreements (2,448,650 calls over 120 frames).
+
+**Regression test.** `runtime/tests/test_system.cpp`, "system: a nested handler's interpreted run
+ends at its RTE, not at a stale PR". It builds a handler at an unregistered vector that pushes a
+register, calls an ISR whose return address equals the stale PR, marks completion and RTEs. All six
+assertions pass with the patch; reverting the one line fails four of them.
 
 ---
 
@@ -238,6 +294,12 @@ confounded because the two runs take different paths from the first interrupt
 (`r15 = 0x8C00F350 / `0x8C00F31C`, `spc = 0x0C22B502 / 0x8C22B540`).
 
 ## D. The remaining fault: the runtime's guest-task-switch path
+
+> **Resolved 2026-11-10 by A2.** The task switch was never a property of the guest: it was the
+> classifier reacting to a handler whose context frame had been left on the stack by an early
+> stop. With A2 there are zero task-switching RTEs and the run is clean. The analysis below is kept
+> because it is the evidence that led to A2, and because its closing question is still worth a
+> maintainer's answer for titles that *do* switch tasks inside a handler.
 
 **Reproduce in one command:** `tools\repro-translated-path.ps1` runs the translated path under
 the diagnostics and prints the exception entries, the switch decision, the SPC writes, the writes

@@ -107,9 +107,9 @@ class Launcher(tk.Tk):
         box.grid(row=1, column=0, columnspan=4, sticky="ew", **pad)
         ttk.Label(box, text="Window scale").pack(side="left")
         ttk.Spinbox(box, from_=1, to=4, width=3, textvariable=self.scale).pack(side="left", padx=6)
-        ttk.Radiobutton(box, text="Interpreter (works)", variable=self.translated,
+        ttk.Radiobutton(box, text="Interpreter (faster today)", variable=self.translated,
                         value=False).pack(side="left", padx=8)
-        ttk.Radiobutton(box, text="Translated (incomplete)", variable=self.translated,
+        ttk.Radiobutton(box, text="Translated (slower, correct)", variable=self.translated,
                         value=True).pack(side="left")
 
         ttk.Button(frm, text="Play", command=self.play).grid(row=2, column=0, columnspan=4,
@@ -153,9 +153,9 @@ class Launcher(tk.Tk):
             messagebox.showerror("Launch", str(exc))
             return
         self.status.set(
-            "Running.\n" + ("Translated path: expect a stop at guest 0x60000040 after ~54 "
-                            "frames (docs/ENGINE-CHANGES.md)." if self.translated.get() else
-                            "Interpreter path: the working configuration."))
+            "Running.\n" + ("Translated path: correct but slower until more of the game is "
+                            "translated (docs/ENGINE-CHANGES.md)." if self.translated.get() else
+                            "Interpreter path: the faster configuration today."))
 
 
 def selftest() -> int:

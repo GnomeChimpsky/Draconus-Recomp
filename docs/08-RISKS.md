@@ -34,18 +34,18 @@ of this size.
 patches; BlueStingerRecomp (MIT) is a fallback donor for runtime pieces. If `emit`
 cannot be made to scale, translate in chunks or improve the emitter upstream first.
 
-## 2b. Translated↔interpreted boundary and task switching (current blocker)
+## 2b. Translated↔interpreted boundary and task switching — **resolved (2026-11-10)**
 
-**What:** the mixed build (3,285 translated functions + interpreter) faults at
-`0x8C001006` after 29 frames; pure interpretation runs 1,800 frames without a fault.
-`DREAM_TRACE_NONLOCAL` shows the last interrupt returning with `pr` unchanged but
-`r15` moved by `0x15C` — the game's scheduler switching tasks — while the engine
-reports `task-switching RTEs: 0`. The next instruction fetch then lands on the
-unpopulated hook page.
+**What it was:** the mixed build faulted after 29 frames at `0x8C001006` (a hook marker fetched as
+code), then after 54 frames at `0x60000040`. Two runtime defects, not an emitter one: hook markers
+must be dispatched at the interpreter's fetch boundary (patch 003), and an exception handler's
+interpreted run must stop at its RTE rather than at `c.pr`, which belongs to the interrupted code
+(patch 007). The 54-frame "task switch" was the classifier reacting to the second defect.
 
-**Mitigation:** isolate the switching function with `DREAM_INTERP_FUNCS`, compare its
-translated and interpreted behaviour, and report the emitter/hook-dispatch defect
-upstream. Until then the working configuration is `--interpret`.
+**State:** the translated path runs 600 and 1,800 frames deterministically with guest counters
+identical to the interpreter's and `--replay` reporting 0 disagreements. The remaining cost is
+translation coverage: the translated build is slower than the interpreter until more calls are
+native. Details in `docs/ENGINE-CHANGES.md`; the fix is written up in `docs/UPSTREAM-REPORT.md`.
 
 ## 3. Disc structures — **resolved, and a lesson** (was: medium)
 

@@ -1,16 +1,17 @@
-# Reproduce the translated-path fault and print the evidence in one command.
+# Reproduce the translated-path diagnostics and print the evidence in one command.
 #
 #   tools\repro-translated-path.ps1
 #
-# Runs the machine-translated path (which stops at guest frame 54) under the diagnostics added
-# during this investigation and prints the lines that matter. Needs engine\build-render to exist
-# and the disc configured (tools\import-disc.bat). Nothing is modified.
+# Runs the machine-translated path under the diagnostics added during this investigation and prints
+# the exception entries, the task-switch decision, the SPC writes and the stores into the handler's
+# saved context. Needs engine\build-render to exist and the disc configured (tools\import-disc.bat).
+# Nothing is modified.
 #
-# Expected on this title (Draconus: Cult of the Wyrm, USA V1.000):
-#   * stop: fault, pc 0x60000040, 54 frames
-#   * task-switching RTEs: 1
-#   * a nested exception (nesting 2) immediately before the switch
-#   * ldc.l @r15+,spc loading 0x60000040 (an SR value) from the handler's stack
+# Expected on this title (Draconus: Cult of the Wyrm, USA V1.000) since patch 007:
+#   * stop: frame limit, no fault, task-switching RTEs: 0
+#   * no switch line, no SPC write with an SR value
+# Before patch 007 this stopped at guest 0x60000040 after 54 frames with one task switch; the
+# root cause and the evidence are in docs/ENGINE-CHANGES.md.
 param(
     [int]$Frames = 60
 )
@@ -47,7 +48,7 @@ $out | Select-String -Pattern "^exc:" | Select-Object -Last 3 | ForEach-Object {
 $out | Select-String -Pattern "^switch:" | ForEach-Object { $_.Line }
 
 Write-Host ""
-Write-Host "=== SPC writes (the bad one is ldc.l loading 0x60000040) ==="
+Write-Host "=== SPC writes (a fault would leave an SR value here) ==="
 $out | Select-String -Pattern "^spc-write" | Select-Object -Last 4 | ForEach-Object { $_.Line }
 
 Write-Host ""
@@ -55,7 +56,7 @@ Write-Host "=== writes into the handler's saved pr/spc/ssr slots ==="
 $out | Select-String -Pattern "^watch:" | Select-Object -Last 6 | ForEach-Object { $_.Line }
 
 Write-Host ""
-Write-Host "=== outcome ==="
+Write-Host "=== outcome (expected since patch 007: frame limit, 0 switches) ==="
 $out | Select-String -Pattern "^stop:|^guest:|^task-switching|^fault" | ForEach-Object { $_.Line }
 
 Write-Host ""

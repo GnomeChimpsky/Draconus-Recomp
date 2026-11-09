@@ -1,30 +1,58 @@
 # Handover — state of the project
 
-Written 2026-11-06, at the end of the session that built the disc tooling, proved the boot,
-rendered the game, and reduced the remaining translated-path fault to one instruction.
+Updated 2026-11-10, after the translated-path fault was found and fixed. The project's records are
+elsewhere: `docs/ENGINE-CHANGES.md` is the running ledger with every trace and dead end,
+`docs/UPSTREAM-REPORT.md` is the engine-side report, and `docs/07-ROADMAP.md` is the milestone plan
+this is measured against. This file is the pick-up point.
 
 ## What works
 
 | Thing | Command | Evidence |
 |---|---|---|
 | Disc validation and extraction | `python -m dracdisc verify "<own dump>.gdi"` | 15 tests; byte-identical to the engine's `dcdisc` |
-| Play the game | `.\play-draconus.bat` | movies, menus, gameplay and input all work; deterministic (interpreter path, 0.22x) |
+| Play the game | `.\play-draconus.bat` | movies, menus, gameplay, input; deterministic |
+| Play the machine-translated path | `.\play-draconus.bat -Translated` | **600 frames and 1,800 frames, no fault, 0 task switches** |
 | Determinism check | `--rtc-seed 1000000` twice | identical cycles, GD-ROM sectors, TA chunks |
-| Instruction tracing | `DREAM_TRACE_INSNS=lo:hi:FILE` | 855k-instruction windows diffed |
-| Function differential | `--replay` (+ hooks build) | 2,458,232 calls, **0 disagreements** |
-| Within-run differential | `DREAM_REPLAY_TRACE=prefix` + `DREAM_REPLAY_DUMP=addr` | `prefix.a.txt` vs `prefix.b.txt` |
+| Translated vs interpreted parity | same 600-frame run | identical PVR/Maple counters; 41 cycles apart in 1.97 billion |
+| Instruction tracing | `DREAM_TRACE_INSNS=lo:hi:FILE` | filtered by range, cycle window and in-range index |
+| Function differential | `--replay` (+ replay build) | 2,448,650 calls compared, **0 disagreements** |
+| Engine test suite | `ctest` in `engine/build-test` | 6/6 (76 runtime cases incl. the new regression) |
 
-## What does not work
+The translated path stops being a curiosity and becomes the build to develop: it is now correct, but
+in this configuration it is **slower** than the interpreter (600 frames in 68 s against 38 s). Most of
+the title is still intercepted by the development interpreter, and the translated build pays a
+`devinterp::run` for every call it cannot make natively. Translation coverage, not the runtime, is the
+next speed lever.
 
-The **translated** path stops at frame 54 (`0x60000040`). It is a task-context restore at
-`0x8C233756` (`ldc.l @r15+,sr`) reading a pointer instead of a saved SR. The code generator
-is exonerated (`--replay` is clean), so the defect is in the runtime's interrupt/task-switch
-path. Full chain in `docs/ENGINE-CHANGES.md`, entry point for an engine author in
-`docs/UPSTREAM-REPORT.md`.
+## The fault that was fixed (2026-11-10)
+
+The translated path used to stop at frame 54 with `unmapped read 0x60000040`. The cause was
+`System::on_untranslated`: it ran interpreted code until it returned to `c.pr`, which is wrong for an
+exception-handler entry because a handler does not return through PR — at that moment PR still
+belongs to the interrupted code.
+
+It only bit on a **nested** delivery. The VBlank handler runs an ISR through `jsr @r14`; an interrupt
+delivered inside that ISR leaves PR equal to the ISR return address. The nested handler's own
+`jsr @r14` sets PR to the same value, so its interpreted run stopped at the ISR's `rts`, abandoned the
+handler before its epilogue, and left the handler's saved context on the guest stack. The outer
+handler's epilogue then popped one slot out of step, loaded an SR value into SPC, and the `rte`
+became a "task switch" to `0x60000040`.
+
+The fix (patch 007) marks the handler entry in `enter_exception` and makes `on_untranslated` use stop
+address 0 — stop at the handler's RTE — exactly what the `--interpret` path always did. Six
+assertions in `runtime/tests/test_system.cpp` pin it; the test fails four of them with the line
+reverted. Full evidence in `docs/ENGINE-CHANGES.md`.
+
+**What this retires:** the task-switch theory (the single switch was this corruption being
+misclassified; there are 0 now), the emitter/cycle-accounting suspects, and the need for
+`DREAM_HANDLER_INTERP`. It also means the interpreter path's "0 task switches" was never a fidelity
+gap of this title — it was the correct schedule.
+
+**What it does not fix:** speed. The translated build is still mostly interpreter. See below.
 
 ## Engine state (local, not committed)
 
-`engine/` is fetched by `setup.ps1` at commit `51ca2766` and carries five local changes:
+`engine/` is fetched by `setup.ps1` and carries seven local changes, all validated:
 
 | # | What | Upstream? |
 |---|---|---|
@@ -33,67 +61,55 @@ path. Full chain in `docs/ENGINE-CHANGES.md`, entry point for an engine author i
 | 003 | Hook markers dispatched at the interpreter's fetch boundary | yes — bug fix |
 | 004 | `--trace-insns` instruction-level tracer + interpreter hook | yes — feature |
 | 005 | `--replay` skips stateful HLE calls (no more false positives) | yes — bug fix |
+| 006 | SR-write rule | maybe |
+| 007 | **Exception-handler entry stops at the RTE, not at the interrupted code's PR** | **yes — fixes the 54-frame fault** |
 
 Build trees: `engine/build-render` (playable, Vulkan + SDL3), `engine/build-replay`
-(`--replay-hooks --trace-insns`), `engine/build-trace` (tracer only, no renderer).
+(`--replay-hooks`), `engine/build-test` (tests). Build them from a Developer Command Prompt (or call
+`vcvars64.bat` first) — `cl` needs the MSVC include paths.
 
-## State at the end of the translated-path investigation (2026-11-10)
+## Next phase
 
-The game is **playable** on the interpreter path (movies, menus, gameplay, input) at 0.22-0.25x real
-time. The translated path has been advanced from "faults at 29 frames" to "runs 600 frames" but only
-in a slow configuration, and the remaining defect is localised:
+Order is by value per unit of risk, not by size:
 
-| configuration | frames | speed | note |
-|---|---|---|---|
-| `--interpret` | 600+ | 0.22x | the shipping default |
-| handlers interpreted (`DREAM_HANDLER_INTERP=1`, translated build) | **600**, deterministic | 0.14x | proves the defect is in the handler path |
-| precise pending-aware polls | 59 | 0.5x | correct but insufficient |
-| standard translated | 54 | - | fault `0x60000040` |
+1. **Interactive check of the translated path.** All evidence so far is headless runs with a fixed
+   seed. Launch `-Translated` with `--window`, play through the movies and into gameplay, and confirm
+   the window, input and pacing behave as the interpreter path does. Record it; this is the gate that
+   turns "runs" into "playable".
+2. **HLE host-state harness** (the one item still open from the previous list). Patch 005 covers
+   GD-ROM. Timers, the RNG and Maple are device state, and the memory journal already refuses to
+   compare any call that touches a device register — so the remaining gap is narrower than the old
+   note implied: check which HLE paths mutate host state *without* a device access (the flash
+   syscall's program/erase path is the concrete suspect) and mark those with
+   `hle::note_side_effect()`.
+3. **Translation coverage (the speed lever).** The full-set discovery/emission blocker in
+   `docs/11-M2-RESULTS.md` is now the only thing between this build and a usable frame rate. The
+   translated path is correct and slow; making it fast is a translation problem.
+4. **M3 visual parity and M6 audio.** Flycast is installed and boots the disc; driving it and
+   capturing is in `docs/14-M3-M6-FLYCAST-REFERENCE.md`. Audio still reaches a WAV file rather than
+   the speakers, and the title screen is silent (`docs/13-M6-AUDIO-BASELINE.md`).
 
-**Localised defect:** the relocated exception stub at `0x8C000600`-`0x8C000628` (20 instructions,
-copied there by the game at boot). When it runs as *emitted code* the handler's saved context is
-corrupted; when the same bytes run under `devinterp` the run is clean. Its instructions are faithful
-(self-modified literal re-read from memory, INTEVT read, `jmp @r1`), the handler reaches its `rte`,
-and `call_translated` inside handlers is ruled out. What remains is how that stub is *entered and
-counted* — the next measurement is one invocation's twenty `(pc, cycles)` pairs from each engine,
-extracted with a hard cap (three attempts dumped every invocation and were unusable — do not repeat
-that).
+## Owner items
 
-**Engine changes carried (all validated, none of which fix this fault):** 001 present-mode guard,
-002 diagnostics, 003 hook dispatch fix, 004 tracer, 005 replay host-state fix, 006 SR-write rule,
-plus delay-slot tracing, cycle-phase alignment, flush-before-call, post-call poll and the
-pending-aware poll.
-
-## Next three tasks, in order
-
-1. **Fix the harness limitation for HLE reads.** Patch 005 covers GD-ROM. Timers, RNG and
-   Maple still change host state; instrument them the same way (`hle::note_side_effect()`)
-   so `--replay` stays trustworthy as more of the game runs.
-2. **Task-switch investigation.** Read `engine/docs/emitter-design.md` ("Non-local returns"),
-   then instrument `System::on_rte` and `sh4::resume_at` to log `frame_pcs`/`frame_sps`
-   against `c.spc`/`c.r[15]` for the single switch in the run. The failing restore is at
-   `0x8C233756`; the resumed task's stack is what to watch.
-3. **Flycast reference (M3/M6).** Flycast is installed and boots the disc; how to drive and
-   capture it is in `docs/14-M3-M6-FLYCAST-REFERENCE.md`. Visual reference works, audio
-   capture does not (no recording option), so M6's spectra gate needs a loopback recorder.
-
-4. **Launcher/disc import (M8).** Both halves exist: `tools/launcher.py` (GUI over verify/configure/play, `--selftest`), `tools/import-disc.bat` (scriptable), and the import half: `tools/import-disc.bat` verifies a
-   dump and writes the config. What is missing is the graphical launcher (pick a dump, pick
-   the disc, show settings) and the configuration UI. Then **visual parity (M3)** — Flycast is
-   not installed here, so that needs a reference capture from elsewhere. Both are independent of the fault. Flycast
-   is not installed here, so M3 needs a reference capture from another machine or a
-   screenshot comparison against known-good footage.
+`docs/owner-tasks.md` is the live list. Ones that matter soonest: delete the four zero-byte CHDs and
+the stray `flycast/` folder in the checkout; an Apple Developer account for a macOS release build
+(WP3.6 will need it).
 
 ## Things that cost time and should not be repeated
 
-* `GdiImage.read` originally read a multi-sector request contiguously and returned ECC as
-  data; that caused days of misdiagnosis. Fixed and regression-tested
-  (`tools/draconus-disc/tests/test_dracdisc.py`).
-* `--replay`'s disagreement on `fn_0c22caa4` was a harness false positive, not a bug. Do not
+* `GdiImage.read` originally read a multi-sector request contiguously and returned ECC as data; that
+  caused days of misdiagnosis. Fixed and regression-tested (`tools/draconus-disc/tests`).
+* `--replay`'s old disagreement on `fn_0c22caa4` was a harness false positive, not a bug. Do not
   re-investigate it; patch 005 fixes the cause.
 * Cross-run trace comparison does not work: the engines diverge from the first interrupt
-  (`r15`/`spc` differ). Always use the within-run differential.
-* The translator emits in P0 (`0x0C...`); the guest runs in P1 (`0x8C...`). Ranges for
-  tracing must be masked to `0x1FFFFFFF`.
-* `tempfile.mkdtemp` directories cannot be deleted under this sandbox; use a directory
-  inside the workspace.
+  (`r15`/`spc` differ). Always use the within-run differential, or a range/window filter.
+* The translator emits in P0 (`0x0C...`); the guest runs in P1 (`0x8C...`). Ranges for tracing must be
+  masked to `0x1FFFFFFF`.
+* An instruction trace of "every handler invocation" is unusable. Filter with
+  `DREAM_TRACE_IDX_TO`, `DREAM_TRACE_FROM`/`TO`, or a narrow PC range — that is how the four-byte
+  imbalance was found in one run.
+* `tempfile.mkdtemp` directories cannot be deleted under this sandbox; use a directory inside the
+  workspace.
+* A control must remove the thing under suspicion. `DREAM_HANDLER_INTERP` moved the fault only
+  because it replaced the handler entry path; the earlier check "does the nested run return early?"
+  came out negative because it looked at non-nested invocations, which do end at their RTE.

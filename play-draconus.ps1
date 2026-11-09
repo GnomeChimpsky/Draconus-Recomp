@@ -1,14 +1,14 @@
 # Launch Draconus from the recompiled build.
 #
-#   .\play-draconus.ps1                    # window, interpreter path (what works today)
+#   .\play-draconus.ps1                    # window, interpreter path (faster today)
 #   .\play-draconus.ps1 -Scale 2           # 1280x960 window
-#   .\play-draconus.ps1 -Translated        # try the machine-translated path (incomplete)
+#   .\play-draconus.ps1 -Translated        # machine-translated path (correct, slower today)
 #   .\play-draconus.ps1 --max-frames 600   # extra args pass straight through
 #
-# The interpreter path is the default because the machine-translated path still stops at
-# guest 0x60000040 after 54 frames (docs/ENGINE-CHANGES.md). It is not a crash of the build:
-# the translated code checks out against the engine's differential harness, and the defect is
-# in the runtime's task switch.
+# Both paths run the game (docs/ENGINE-CHANGES.md, patch 007). The interpreter is the default
+# because it is about 0.25x real time against the translated path's 0.15x: most calls still fall
+# through to it, and the translated build pays an interpreter entry per call. Closing that gap is
+# a translation-coverage task.
 param(
     [switch]$Translated,
     [ValidateRange(1, 4)][int]$Scale = 1,
@@ -53,19 +53,18 @@ if ($Extra) { $arguments += $Extra }
 
 Write-Host ("launching " + $exe)
 if (-not $Translated) {
-    Write-Host "path: interpreter (working)"
+    Write-Host "path: interpreter (faster today)"
 } else {
-    Write-Host "path: translated (incomplete - expect a stop at 0x60000040 after ~54 frames)"
+    Write-Host "path: translated (correct; still slower until more code is translated)"
 }
 
 & $exe @arguments
 $code = $LASTEXITCODE
 
-# A translated run that stops is expected today. Say so instead of leaving a bare exit code.
-if ($Translated -and $code -ne 0) {
+# Any non-zero exit is a real failure now: the translated path no longer stops at frame 54.
+if ($code -ne 0) {
     Write-Host ""
-    Write-Host "the translated path stopped, as expected today."
-    Write-Host "play with the working path by dropping -Translated;"
-    Write-Host "the fault and everything ruled out so far: docs\ENGINE-CHANGES.md"
+    Write-Host "the build exited with code $code"
+    Write-Host "diagnostics and history: docs\ENGINE-CHANGES.md"
 }
 exit $code
