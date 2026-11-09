@@ -1267,6 +1267,28 @@ difference remains, but the mechanism is now proven: **a poll must be able to se
 not yet flushed**. The follow-up is to apply the same pending-aware check to the entry and back-edge
 polls (harmless where pending is zero) and re-measure.
 
+### The new stop is the same corruption, later (2026-11-09)
+
+The precise-poll build stops five frames later, but the shape is identical:
+
+```
+exc:    vec 0x600 pc 0x8c233122 r15 0x8c48273c nesting 2
+switch: spc 0x60000140 sp 0x8c482740 frame_pc 0x8c22aa68 frame_sp 0x8c482838
+```
+
+`0x60000140` is an SR value (MD|RB|0x140) sitting in the SPC slot — the same "saved context
+overwritten by a nested delivery" corruption, at a later point and a different stack address. So the
+precise clock fixed the *first* delivery ordering difference and exposed the next one; it did not
+remove the class.
+
+**Speed of the precise build:** 0.5x real time at 59 frames (host 1.82 s for 0.89 s guest) — about
+twice the interpreter's 0.22x, but far from playable, because a pool of `deliver_irq` checks per
+instruction is expensive.
+
+**Next:** re-run the polling comparison against the interpreter now that polls are precise; the next
+crossing that differs is the next delivery-ordering bug. The instrument is already in place
+(`DREAM_TRACE_POLL`, `DREAM_TRACE_SWITCH`).
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
