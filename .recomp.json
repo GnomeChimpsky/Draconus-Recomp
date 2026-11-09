@@ -1,0 +1,14 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Draconus: Cult of the Wyrm",
+  "wikidata": "Q3038681",
+  "system": "Dreamcast",
+  "type": "recomp",
+  "original": { "region": "USA", "revision": "1.0" },
+  "project": "Draconus-Recomp",
+  "status": "in-progress",
+  "targets": ["Windows", "Linux", "Steam Deck"],
+  "toolchain": "Dream-recomp",
+  "approach": "Static recompilation",
+  "maintainers": [{ "GnomeChimpsky": "GnomeChimpsky", "link": "https://github.com/GnomeChimpsky/" }],
+ }
