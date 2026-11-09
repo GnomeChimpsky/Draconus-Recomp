@@ -983,6 +983,34 @@ the runtime keeps executing the HLE hook and the exception handler on the *old* 
 fix is on the runtime side: it must not run handler/hook work on a stack another context is using,
 or must not let a context switch leave the exception frame behind.
 
+### Re-corrected: they **are** in lockstep, and the tracer had the bug (2026-11-09)
+
+Tracing both engines from boot with a translate-everything build
+(`--trace-insns 0x8C000000:0x8C300000`) and normalising the P0/P1 alias gives the answer:
+
+```
+instructions compared: 1,666,115
+result: identical
+```
+
+**The engines execute the same guest instruction stream from boot.** The earlier "18,073 of 18,099
+cycles differ" result was an artefact: those window traces began at different instructions because
+the cycle filter engaged at different points, so the comparison was between different parts of the
+stream. Both the "lockstep" claim and its "correction" were wrong for instrumentation reasons.
+
+**A real tracer bug was found and fixed while establishing this:** emitted code did not trace
+delay-slot instructions (`emit_delayed` emitted code but no hook), and the interpreter's inline
+delay-slot execution (line 955, `mc.fetch(pc + 2)`) bypassed its hook too. A traced loop therefore
+recorded two instructions per iteration where three execute, and any comparison drifted by one
+entry per loop iteration. Both sides now trace delay slots.
+
+**What remains impractical:** comparing the fault window (from 146 M cycles) requires aligning both
+streams by instruction index from boot, which is ~120 M traced instructions per side (~20 GB). That
+is not a viable technique. The genuine next tool is a **checkpointed state hash** — let both engines
+run, and every N instructions record a hash of `(pc, r0-r15, sr, t, pc-regs)`; compare checkpoints
+to find the first divergence in bounded memory. That is a small change to the tracer and settles the
+question without dumping streams.
+
 ### CORRECTION (2026-11-09 evening): they are **not** in lockstep
 
 The prior entry concluded the engines are in lockstep because they report equal cycles at frame
