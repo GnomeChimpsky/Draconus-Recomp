@@ -1229,6 +1229,44 @@ None of them changes the fault, and the 352-cycle offset at the **first** interr
 rather than only at deliveries: the first poll where the two clocks differ by less than a block's
 pending cost identifies the instruction whose cost is still being counted at the wrong moment.
 
+## BREAKTHROUGH: stale-clock polls confirmed, and fixed (2026-11-09)
+
+The first differing deadline crossing was:
+
+```
+deadline 5,120,015
+  translated crosses at pc 0c23ebe0, cycles 5,120,035   (20 late)
+  interpreted crosses at pc 0c17bb18, cycles 5,120,019   (4 late)
+```
+
+Both PCs are in translated functions, but `0x0C17BB18` is an **interior** instruction: the
+interpreter polls there, and emitted code does not (it polls at entries and back-edges only). And
+even the dense-poll build faulted — because a poll only *reads* `c.cycles`, which is advanced in
+bursts at flushes, so a dense poll still sees a **stale clock** (short by the block's pending cost)
+and crosses the deadline late.
+
+**Fix:** make the dense poll pending-aware — the emitted check adds the cost already emitted since
+the last flush, and consumes it when it fires:
+
+```cpp
+if (c.cycles + <pending> >= c.next_event) { c.cycles += <pending>; c.pc = ...; deliver_irq(...); }
+```
+
+**Effect (measured, deterministic across runs):**
+
+| build | result |
+|---|---|
+| before | fault `0x60000040`, **54 frames**, 148,710,312 cycles |
+| pending-aware dense polls | fault `0x60000140`, **59 frames**, 177,955,635 cycles |
+
+Five more frames and a different fault address — the first time any change has moved this fault.
+The interpreter path is unaffected (120 frames, identical counters).
+
+**Next:** the new stop is a different address (`0x60000140`), so at least one more delivery-ordering
+difference remains, but the mechanism is now proven: **a poll must be able to see the cycles it has
+not yet flushed**. The follow-up is to apply the same pending-aware check to the entry and back-edge
+polls (harmless where pending is zero) and re-measure.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
