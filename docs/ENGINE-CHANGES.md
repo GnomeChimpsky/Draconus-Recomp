@@ -1407,6 +1407,30 @@ observed corruption exactly: `pr`/`spc`/`ssr` popping one slot out of step.
 modes, and check whether the nested run in the translated build returns early (`Stop::Returned`)
 rather than at the `rte`.
 
+### The handler reaches its RTE; the difference is the unit's own execution (2026-11-09)
+
+Two hypotheses tested with new diagnostics (`DREAM_TRACE_HANDLER`, `DREAM_HANDLER_NO_NATIVE`):
+
+1. **"The nested run returns early at PR."** Measured false:
+   `untranslated: target 0x8c233648 ended Rte` — the handler body runs to its `rte` correctly in the
+   translated build too.
+2. **"The handler calls translated functions natively, unlike `--interpret`."** Disabling
+   `call_translated` inside handlers (`nesting > 0`) changes nothing: still `0x60000040`, 54 frames.
+
+So the only execution difference left on this path is **the translated unit's own 0x38 bytes**
+(`0x8C000600`–`0x8C000628`), which `--interpret` runs through `devinterp` and the translated build
+runs as emitted code. Its instructions were read and are faithful; what remains is how it is
+*counted and entered*:
+
+* its emitted body totals **19 cycles** (`c.cycles += 19` before the `jmp`, plus `+1` for the delay
+  slot = 20) against the interpreter's 20 one-cycle instructions — a candidate off-by-one at a
+  delivery boundary, which is exactly the class that moved the fault before;
+* the wrapper's entry does `if (c.cycles >= c.next_event) { c.pc = ...; deliver_irq(...); }` — a poll
+  *inside* exception entry, which the `devinterp` path reaches at a slightly different point.
+
+**Best state remains:** handlers interpreted → 600 frames, deterministic, 0.14x.
+**Standard translated:** 54 frames, fault `0x60000040`.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
