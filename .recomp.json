@@ -10,5 +10,5 @@
   "targets": ["Windows", "Linux", "Steam Deck"],
   "toolchain": "Dream-recomp",
   "approach": "Static recompilation",
-  "maintainers": [{ "GnomeChimpsky": "GnomeChimpsky", "link": "https://github.com/GnomeChimpsky/" }],
- }
+  "maintainers": [{ "GnomeChimpsky": "GnomeChimpsky", "link": "https://github.com/GnomeChimpsky/" }]
+}
