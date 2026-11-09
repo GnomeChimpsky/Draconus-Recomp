@@ -1384,6 +1384,29 @@ it is tiny (about twenty instructions), it is the only code whose execution diff
 modes on this path, and the machinery to compare it (`DREAM_TRACE_INSNS` with a narrow range,
 `DREAM_TRACE_CALL_AT`) already exists.
 
+### The handler unit's code is faithful; its *entry* is what differs (2026-11-09)
+
+The generated relocation unit was read line by line against the disassembly — nops, `mov.l r1,@-r15`,
+`mova`, the self-modified literal store, `shll16/shl11`-style INTEVT computation, the
+`mov.l 0xc00062c,r0` **memory re-read** (not folded), and `jmp @r1`. All faithful.
+
+What differs between the modes is how the handler is *entered*:
+
+| mode | entry path |
+|---|---|
+| `--interpret` | `devinterp::run(c, m, /*return_to=*/0, iopt, nullptr)` — one run from `VBR+0x600` to the `rte` |
+| translated | `sh4::call_indirect(c, m, 0x8C000600)` → the translated unit → `call_indirect(0x8C233648)` → **`on_untranslated` → a nested `devinterp::run` with `return_to = c.pr`** |
+
+So in the translated build the handler body runs inside a nested interpreter run whose stop address is
+the *interrupted task's* PR, while in `--interpret` it runs with `return_to = 0` (stop only at the
+`rte`). If the handler's body ever reaches that PR, the nested run returns early, mid-handler — leaving
+the handler's saved context on the stack and the delivery frame half-unwound. That matches the
+observed corruption exactly: `pr`/`spc`/`ssr` popping one slot out of step.
+
+**This is the next thing to verify:** log `c.pr` and the `return_to` at the handler entry in both
+modes, and check whether the nested run in the translated build returns early (`Stop::Returned`)
+rather than at the `rte`.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
