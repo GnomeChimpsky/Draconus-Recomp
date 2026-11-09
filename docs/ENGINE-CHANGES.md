@@ -1206,6 +1206,29 @@ before every poll (and before every call, since a callee entry is a poll).
 **Tooling note:** `DREAM_TRACE_HASH` now prints `cycles` with each checkpoint, and
 `DREAM_TRACE_IRQ` logs every delivery with `pc cycles now intevt sr`.
 
+### Flush-before-call tried (2026-11-09): correct, but not the cause
+
+Because a callee's entry is a poll, the emitter now flushes pending cycles immediately before every
+call (tail calls and `jsr`/`bsr`, direct and indirect): seven sites, verified in the generated code.
+The change is right on its own terms — a callee can no longer start with the caller's cost missing
+from the clock.
+
+**Result: no behavioural change.** The translated path still faults at `0x60000040`, 54 frames,
+148,710,312 cycles. So the 352-cycle delivery offset does not come from unflushed call cost either.
+
+### Where the cycle work stands
+
+Three changes have been made to the emitter's clock, all correct and all kept:
+
+1. the delay-slot cycle is counted after the slot (phase),
+2. flush-before-call at every call site,
+3. nothing regressed: flush points agree exactly over the first 1,000,001 instructions.
+
+None of them changes the fault, and the 352-cycle offset at the **first** interrupt (39,374,652 vs
+39,375,004) is still unexplained. The remaining measurement is to log `cycles` at **every poll**
+rather than only at deliveries: the first poll where the two clocks differ by less than a block's
+pending cost identifies the instruction whose cost is still being counted at the wrong moment.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
