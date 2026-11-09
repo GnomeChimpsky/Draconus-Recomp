@@ -1,4 +1,4 @@
-# DraconusRecomp
+# Draconus-Recomp
 
 A native Windows x64 static recompilation of **Draconus: Cult of the Wyrm**
 (Dreamcast, 2000, developed by Treyarch and published by Crave Entertainment; USA V1.000,
