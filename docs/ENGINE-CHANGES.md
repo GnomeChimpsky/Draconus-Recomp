@@ -1522,8 +1522,24 @@ interrupted PC not restored, source not acknowledged). Both directions were run.
 
 001 present-mode guard, 002 diagnostics, 003 hook dispatch at the interpreter fetch boundary, 004
 instruction tracer, 005 replay host-state skip, 006 SR-write rule, **007 handler-entry stop address**,
-plus delay-slot tracing, cycle-phase alignment, flush-before-call, the post-call poll and the
-pending-aware poll. 007 is the one that fixes the fault and is worth offering upstream.
+**008 flash host-state marking**, plus delay-slot tracing, cycle-phase alignment, flush-before-call,
+the post-call poll and the pending-aware poll. 007 is the one that fixes the fault and is worth
+offering upstream.
+
+## HLE host-state marking completed for flash (2026-11-10)
+
+The replay harness cannot undo host state a syscall changes outside guest memory. GD-ROM was already
+marked (patch 005). Flash was the remaining gap: `FLASHROM_WRITE` and `FLASHROM_DELETE` program and
+erase the flash bytes through `Flash`, which writes the buffer directly instead of going through
+`DcMemory::store`, so the journal never sees those stores and a replay would program the device twice
+(flash writes only clear bits, so the second run observes a different device).
+
+Both cases now call `hle::note_side_effect()`. Measured effect on this title: none yet — the run makes
+no flash writes in 120 frames, and `--replay` stays at 0 disagreements with the same counters
+(2,448,650 compared, 150,897 skipped, 71 host-state). Timers and Maple need no marking: both are MMIO
+devices, and any comparison that touches a device register is already abandoned
+(`journal_saw_device`), so the old handover's "timers, RNG and Maple still change host state" was
+narrower than it read.
 
 ## Validation against the engine's own tests (2026-11-06)
 

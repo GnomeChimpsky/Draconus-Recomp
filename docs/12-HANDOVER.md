@@ -63,6 +63,7 @@ gap of this title — it was the correct schedule.
 | 005 | `--replay` skips stateful HLE calls (no more false positives) | yes — bug fix |
 | 006 | SR-write rule | maybe |
 | 007 | **Exception-handler entry stops at the RTE, not at the interrupted code's PR** | **yes — fixes the 54-frame fault** |
+| 008 | Flash `FLASHROM_WRITE`/`FLASHROM_DELETE` mark a replay host-state side effect | yes |
 
 Build trees: `engine/build-render` (playable, Vulkan + SDL3), `engine/build-replay`
 (`--replay-hooks`), `engine/build-test` (tests). Build them from a Developer Command Prompt (or call
@@ -76,16 +77,10 @@ Order is by value per unit of risk, not by size:
    seed. Launch `-Translated` with `--window`, play through the movies and into gameplay, and confirm
    the window, input and pacing behave as the interpreter path does. Record it; this is the gate that
    turns "runs" into "playable".
-2. **HLE host-state harness** (the one item still open from the previous list). Patch 005 covers
-   GD-ROM. Timers, the RNG and Maple are device state, and the memory journal already refuses to
-   compare any call that touches a device register — so the remaining gap is narrower than the old
-   note implied: check which HLE paths mutate host state *without* a device access (the flash
-   syscall's program/erase path is the concrete suspect) and mark those with
-   `hle::note_side_effect()`.
-3. **Translation coverage (the speed lever).** The full-set discovery/emission blocker in
+2. **Translation coverage (the speed lever).** The full-set discovery/emission blocker in
    `docs/11-M2-RESULTS.md` is now the only thing between this build and a usable frame rate. The
    translated path is correct and slow; making it fast is a translation problem.
-4. **M3 visual parity and M6 audio.** Flycast is installed and boots the disc; driving it and
+3. **M3 visual parity and M6 audio.** Flycast is installed and boots the disc; driving it and
    capturing is in `docs/14-M3-M6-FLYCAST-REFERENCE.md`. Audio still reaches a WAV file rather than
    the speakers, and the title screen is silent (`docs/13-M6-AUDIO-BASELINE.md`).
 
