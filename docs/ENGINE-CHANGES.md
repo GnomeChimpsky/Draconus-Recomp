@@ -1431,6 +1431,28 @@ runs as emitted code. Its instructions were read and are faithful; what remains 
 **Best state remains:** handlers interpreted → 600 frames, deterministic, 0.14x.
 **Standard translated:** 54 frames, fault `0x60000040`.
 
+### Handler path: what is proven, and what is next (2026-11-09)
+
+Proven by measurement:
+
+* forcing exception handlers through the interpreter makes the translated path run **600 frames,
+  deterministic, no fault** (`DREAM_HANDLER_INTERP`);
+* the handler body reaches its `rte` correctly in the translated build too (`ended Rte`), so it is
+  not an early return;
+* disabling `call_translated` inside handlers changes nothing;
+* the relocated unit's instructions are faithful (self-modified literal re-read from memory,
+  INTEVT read, `jmp @r1`).
+
+So the only remaining execution difference is **the unit's own emitted body** versus `devinterp`
+executing the same twenty instructions. Comparing their cycle accounting requires a *filtered*
+extraction per invocation (the previous attempt dumped every invocation and was unusable); the next
+session should extract only the first invocation's twenty (pc, cycles) pairs from each trace and
+diff those.
+
+**State:** translated path 54 frames standard, 59 frames with precise polls, **600 frames with
+handlers interpreted** (0.14x, slower than the interpreter's 0.22x because handlers run every
+VBlank).
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
