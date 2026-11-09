@@ -1313,6 +1313,29 @@ task in `emit.cpp` (`emit_instruction`, `emit_delayed`, `irq_check_if_backedge`)
 **Best state so far:** precise polls without the extra cycle — **59 frames** at 0.5x real time,
 fault `0x60000140` (same corruption class as before, later).
 
+### Derivation of poll sites (2026-11-09)
+
+Comparing the two engines' poll sites line by line:
+
+| site | interpreter | emitted code |
+|---|---|---|
+| function entry | `interpreter.cpp:878` | yes |
+| taken backward branch | `:944` (BT/BF), `:1056` (delayed jump) | yes (`irq_check_if_backedge`) |
+| after a native call returns | `:924`, `:1045`, `:1051`, `:1076` | **was missing** |
+| function return | `:1090+` | via the caller's site |
+
+The one genuine omission was the post-call poll, now added after `jsr`/`bsr` (direct and indirect),
+using the return address as the resume point. **It did not change the fault** (still 54 frames in the
+standard build), because in this run the calls that matter are tail jumps, which have no
+return-to-caller poll.
+
+So the site table is now aligned as far as the code allows, and the remaining difference is not a
+missing site: it is the **clock value** at a shared site, i.e. the dense pending-aware comparison
+from the previous entry (59 frames) remains the best result.
+
+**Best state: 59 frames** (precise pending-aware polls), 0.5x, fault `0x60000140`.
+**Standard build: 54 frames**, now with the post-call poll (harmless, architecturally correct).
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
