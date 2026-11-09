@@ -1099,6 +1099,43 @@ shape of every difference observed so far.
 VBlank) and see whether the estimates drift. If they do, the fix is in the per-block cycle model,
 and `--irq-dense`/`--no-irq` are both red herrings.
 
+## FOUND: the difference is *when* an interrupt is delivered (2026-11-09)
+
+Checkpoint hashing over `(pc, r15, t, sr)` — added as `DREAM_TRACE_HASH=file:interval`, with
+instruction-index filtering (`DREAM_TRACE_IDX_FROM/TO`) so both engines can be compared by stream
+position rather than by wall-clock cycle — found the first behavioural divergence:
+
+| checkpoint | result |
+|---|---|
+| 4,300,000 | differs, but only in `r0` (`0x0C232D40` vs `0x8C232D40`) — the `mova` P0/P1 alias, **benign** (confirmed: re-translating with `link_address = 0x8C010000` gives identical behaviour) |
+| **38,500,000** | first divergence in `(pc, r15, t, sr)` |
+
+Narrowed to the exact instruction (stream index 38,437,570):
+
+```
+translated   pc 0c000600  sr 70000000   <- entered the exception handler (VBR+0x600)
+interpreted  pc 0c22b502  sr 40000000   <- still executing normal code
+```
+
+**The engines deliver the same interrupt at different guest instructions.** Everything observed
+over this investigation follows from that: the translated run's handler runs at a point where the
+guest's stack holds a partially-built context, the nested delivery overwrites the saved
+`pr`/`spc`/`ssr`, the `rte` restores `SPC = 0x60000040`, and the run faults. The interpreter simply
+takes the same interrupt at a different instruction and never enters that window.
+
+**Cause:** the emitted code advances `cycles` by per-block **estimates** while the interpreter
+counts exactly; the two clocks differ by a few cycles around the deadline (measured earlier as
+±tens, oscillating), so a delivery that falls between those values lands on different instructions.
+
+**Implication:** this is not a stack bug, a task-switch bug, or a polling bug — it is a **cycle
+accounting difference at interrupt-delivery boundaries**. Fixing it means making the two engines
+agree on `cycles` exactly (emitter estimates derived from the same table the interpreter uses), or
+making delivery independent of the small difference (deliver on a guest *instruction* basis).
+
+**Tools added:** `DREAM_TRACE_HASH=path:interval` (FNV-1a over pc/r15/t/sr per checkpoint),
+`DREAM_TRACE_IDX_FROM/TO` (compare by instruction index), and the delay-slot trace fix that made
+any of this comparable.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
