@@ -1136,6 +1136,27 @@ making delivery independent of the small difference (deliver on a guest *instruc
 `DREAM_TRACE_IDX_FROM/TO` (compare by instruction index), and the delay-slot trace fix that made
 any of this comparable.
 
+### Cycle-phase alignment tried (2026-11-09)
+
+The first block already disagreed on cycles (translated 16, interpreted 15 at instruction 15),
+because the emitter flushed the delay slot's cycle **before** executing the slot while the
+interpreter counts it when it executes. The emitter was changed to count the branch before the
+slot and the slot after it, matching the interpreter's phase (verified in the generated code:
+`c.cycles += 15` before the slot, `c.cycles += 1` after).
+
+**Result: no behavioural change.** The translated path still faults at `0x60000040`, 54 frames,
+148,710,312 cycles — the identical total. So the phase was not what moves the interrupt.
+
+Also re-verified: the earlier poll-density test was valid (the dense build really does carry polls
+before 91 % of instructions: 276,129 polls for 302,381 instructions), so poll placement is genuinely
+not the cause.
+
+**Where the delivery difference must therefore live:** not in the per-instruction cost table, not in
+poll placement, and not in the phase. That leaves the *scheduling* of the next event
+(`next_event`) and the exact poll at a callee entry — emitted code polls at function entry, and the
+interpreter's equivalent poll sits at a different point in its own loop. Comparing `next_event` and
+`cycles` at the divergent instruction (0x0C176FE8 → handler vs 0x0C176FEA) is the next measurement.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
