@@ -1289,6 +1289,30 @@ instruction is expensive.
 crossing that differs is the next delivery-ordering bug. The instrument is already in place
 (`DREAM_TRACE_POLL`, `DREAM_TRACE_SWITCH`).
 
+### The poll offset is not a constant (2026-11-09)
+
+Two variants of the pending-aware poll, same build otherwise:
+
+| variant | result |
+|---|---|
+| `c.cycles + pending` | fault `0x60000140`, **59 frames** (kept) |
+| `c.cycles + pending + 1` (counting the polled instruction too) | fault `0x60000040`, **47 frames** (reverted) |
+
+Adding the current instruction's cost made it *worse*, so the offset is not a constant that can be
+tuned: the interpreter adds the instruction's cycle in its fetch loop before the poll runs, but the
+emitter's `pending_cycles_` at the poll site does not correspond to the same moment in every case
+(polls are emitted at several different points: function entry, back-edge after the slot, and the
+dense per-instruction site).
+
+**The right next step is derivation, not another knob:** tabulate, for each poll site, exactly which
+instructions' costs `pending_cycles_` contains at that point, compare that with the interpreter's
+`cycles` at the same instruction, and make the emitted check match per site. That is a code-reading
+task in `emit.cpp` (`emit_instruction`, `emit_delayed`, `irq_check_if_backedge`) against
+`interpreter.cpp` (the fetch loop's `c.cycles += 1` and the delayed-branch path's extra `+1`).
+
+**Best state so far:** precise polls without the extra cycle — **59 frames** at 0.5x real time,
+fault `0x60000140` (same corruption class as before, later).
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
