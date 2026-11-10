@@ -16,6 +16,7 @@ this is measured against. This file is the pick-up point.
 | Translated vs interpreted parity | same 600-frame run | identical PVR/Maple counters; 41 cycles apart in 1.97 billion |
 | Instruction tracing | `DREAM_TRACE_INSNS=lo:hi:FILE` | filtered by range, cycle window and in-range index |
 | Function differential | `--replay` (+ replay build) | 2,448,650 calls compared, **0 disagreements** |
+| Fresh clone | `setup.ps1 -SkipBuild`, `import-disc`, `setup.ps1` | engine patched, dump extracted, built, **600 frames clean** |
 | Engine test suite | `ctest` in `engine/build-test` | 6/6 (76 runtime cases incl. the new regression) |
 
 The translated path stops being a curiosity and becomes the build to develop: it is now correct, but

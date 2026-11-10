@@ -76,17 +76,22 @@ foreach ($game in Get-ChildItem (Join-Path $root "game") -Directory) {
 # The engine is fetched pristine; the project's changes are in patches/ (docs/ENGINE-CHANGES.md).
 # Re-running is safe: a patch that is already in the tree is recognised and left alone. The patch
 # paths are relative to the repository root, so apply from there with --directory=engine.
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    throw "git is required to apply the engine patches (patches/)"
+}
 Push-Location $root
 try {
     foreach ($patch in Get-ChildItem (Join-Path $root "patches") -Filter *.patch -ErrorAction SilentlyContinue |
              Sort-Object Name) {
-        & git apply --check --directory=engine $patch.FullName 2>$null
+        # A patch that does not match makes git write to stderr; run it through cmd so Windows
+        # PowerShell 5.1 does not turn that into a terminating NativeCommandError.
+        & cmd /c "git apply --check --directory=engine `"$($patch.FullName)`" 2>nul"
         if ($LASTEXITCODE -eq 0) {
-            & git apply --directory=engine $patch.FullName
+            & cmd /c "git apply --directory=engine `"$($patch.FullName)`" 2>nul"
             if ($LASTEXITCODE -ne 0) { throw "could not apply $($patch.Name)" }
             Write-Host "applied engine patch: $($patch.Name)"
         } else {
-            & git apply --reverse --check --directory=engine $patch.FullName 2>$null
+            & cmd /c "git apply --reverse --check --directory=engine `"$($patch.FullName)`" 2>nul"
             if ($LASTEXITCODE -eq 0) {
                 Write-Host "engine patch already applied: $($patch.Name)"
             } else {
