@@ -57,6 +57,15 @@ The expected result is now a clean run (`stop: frame limit`, `task-switching RTE
 007 it stopped at frame 54 with `0x60000040`. The history and the root cause are in
 `docs/ENGINE-CHANGES.md`.
 
+To compare the two execution paths against each other — same seed, same scripted input, windowed,
+counters and screenshot:
+
+```powershell
+tools\parity-check.ps1
+```
+
+It passes when the stop reason, frame count, PVR/Maple counters and the screenshot are identical.
+
 ## Graphical launcher
 
 ```powershell

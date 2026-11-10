@@ -16,6 +16,7 @@ this is measured against. This file is the pick-up point.
 | Translated vs interpreted parity | same 600-frame run | identical PVR/Maple counters; 41 cycles apart in 1.97 billion |
 | Instruction tracing | `DREAM_TRACE_INSNS=lo:hi:FILE` | filtered by range, cycle window and in-range index |
 | Function differential | `--replay` (+ replay build) | 2,448,650 calls compared, **0 disagreements** |
+| Windowed parity | `tools\parity-check.ps1` | window renders; input recording and screenshot byte-identical to the interpreter |
 | Fresh clone | `setup.ps1 -SkipBuild`, `import-disc`, `setup.ps1` | engine patched, dump extracted, built, **600 frames clean** |
 | Engine test suite | `ctest` in `engine/build-test` | 6/6 (76 runtime cases incl. the new regression) |
 
@@ -51,6 +52,43 @@ gap of this title — it was the correct schedule.
 
 **What it does not fix:** speed. The translated build is still mostly interpreter. See below.
 
+## Windowed session parity (2026-11-10)
+
+The translated path was exercised in a window with scripted input and compared against the
+interpreter. One command, about four minutes:
+
+```
+tools\parity-check.ps1
+stop     ok    stop: frame limit
+frames   ok    1100 vs 1100
+PVR      ok    287,744 TA chunks, 961 list inits, 956 renders, 957 frame swaps
+Maple    ok    1,079 transfers, 4,316 frames, 1,078 pad polls
+cycles   info  3,635,956,129 vs 3,635,956,168 (39 apart in 18.2 s)
+irqs     info  57,629 vs 57,650 (21 more, 0.04%)
+shot     ok    byte-identical at presented 900 (guest 987)
+PARITY OK
+```
+
+The window opens and draws on the GPU (`NVIDIA RTX 3080, drawing at 640x480`; 22 textures decoded,
+0 failed). Scripted presses reach the Maple controller identically: the recorded controller state is
+byte-identical in both runs (`start` at guest 1000, released at 1008), and screenshots after that
+press — guest 1587 and 2387, the title menu fading in — are byte-identical too.
+
+Two method findings, recorded so they are not re-discovered:
+
+* `--screenshot-at N` counts *presented* frames and captures the game's last rendered frame. Under
+  `--present-mode immediate` the emulator runs several frames ahead of the presenter, so a shot
+  labelled guest 987 can hold a later frame — one such pair differed because the shot caught the
+  menu fade after the press. With the default vsync pacing the pair is byte-identical. Compare
+  paced runs, or compare at a point where the screen is not changing.
+* The write hash is per frame, and a write that lands either side of a frame tick (the two engines
+  charge slightly different instruction costs) makes individual frames differ even when the write
+  sequence is identical. The first 1.1 million writes — frames 0 to 4 — are identical field by
+  field; the per-frame hash differences are boundary shifts, not state differences.
+
+Not covered: feel. The check cannot judge pacing or responsiveness, and the translated path runs at
+0.15x, so a human session is still worth doing with that expectation.
+
 ## Engine state (local, not committed)
 
 `engine/` is fetched by `setup.ps1` and carries eight local changes, all validated:
@@ -74,10 +112,10 @@ Build trees: `engine/build-render` (playable, Vulkan + SDL3), `engine/build-repl
 
 Order is by value per unit of risk, not by size:
 
-1. **Interactive check of the translated path.** All evidence so far is headless runs with a fixed
-   seed. Launch `-Translated` with `--window`, play through the movies and into gameplay, and confirm
-   the window, input and pacing behave as the interpreter path does. Record it; this is the gate that
-   turns "runs" into "playable".
+1. **Human play-through of the translated path.** `tools\parity-check.ps1` proves the window,
+   scripted input and the rendered frames match the interpreter; what it cannot judge is feel —
+   pacing, menu responsiveness, movie sync. Run `-Translated` with a window and go through the intro
+   and into gameplay, expecting slow motion (0.15x).
 2. **Translation coverage (the speed lever).** The full-set discovery/emission blocker in
    `docs/11-M2-RESULTS.md` is now the only thing between this build and a usable frame rate. The
    translated path is correct and slow; making it fast is a translation problem.
