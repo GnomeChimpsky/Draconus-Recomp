@@ -86,11 +86,13 @@ Order is by value per unit of risk, not by size:
 
 ## Owner items
 
-Nothing here blocks the next phase. The ones that matter soonest: the local engine patches are not
-re-applied by `setup.ps1`, so a fresh clone builds the pristine engine (README says so; a patch step
-is the natural next repository task). Also outstanding: delete the zero-byte CHDs and the stray
-`flycast/` folder in the checkout, and an Apple Developer account for a macOS release build (WP3.6
-will need it).
+Nothing here blocks the next phase. Outstanding: delete the zero-byte CHDs and the stray `flycast/`
+folder in the checkout, and an Apple Developer account for a macOS release build (WP3.6 will need
+it).
+
+The fresh-clone path is now closed: `setup.ps1` applies the engine patches from `patches/` after
+fetching the pinned commit, keeps an already-imported disc image when re-run, and extracts the boot
+executable from that dump when it is missing. Verified end to end on a clean clone.
 
 ## Things that cost time and should not be repeated
 

@@ -1,0 +1,1224 @@
+diff --git a/runtime/CMakeLists.txt b/runtime/CMakeLists.txt
+index 5980e74..554297c 100644
+--- a/runtime/CMakeLists.txt
++++ b/runtime/CMakeLists.txt
+@@ -3,6 +3,7 @@
+ # helpers emitted code calls, and the address space (mem/).
+ add_library(dream_runtime STATIC
+   src/fenv.cpp
++  src/trace.cpp
+   src/sh4/abi_bare.cpp
+   src/sh4/fsca.cpp
+   src/mem/dc_memory.cpp
+@@ -18,6 +19,7 @@ add_library(dream_runtime STATIC
+   src/system.cpp
+   src/gdrom/disc.cpp
+   src/hle/flash.cpp
++  src/hle/side_effects.cpp
+   src/hle/bios.cpp
+   src/maple/maple.cpp
+   src/aica/arm7.cpp
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index 9dff7cd..936f6f1 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -1300,6 +1300,7 @@ int main(int argc, char** argv) {
+         else if (!std::strcmp(argv[i], "--screenshot-presented"))
+             shot_presented = true;
+         else if (!std::strcmp(argv[i], "--present-mode") && i + 1 < argc) {
++#ifdef DREAM_WITH_RENDERER
+             const char* m = argv[++i];
+             using PM = dream::render::vk::Window::PresentMode;
+             if (!std::strcmp(m, "mailbox"))
+@@ -1312,6 +1313,13 @@ int main(int argc, char** argv) {
+                 std::fprintf(stderr, "unknown present mode %s: vsync, mailbox or immediate\n", m);
+                 return 2;
+             }
++#else
++            // Renderer-free build: PresentMode lives in the Vulkan backend, which is
++            // not compiled. Report the option instead of failing to compile the whole
++            // launcher (ENGINE-CHANGES 001).
++            std::fprintf(stderr, "--present-mode needs a build with the Vulkan renderer\n");
++            return 2;
++#endif
+         } else if (!std::strcmp(argv[i], "--bindings") && i + 1 < argc) {
+             bindings_file = argv[++i];
+             bindings_file_set = true;
+@@ -2102,12 +2110,13 @@ int main(int argc, char** argv) {
+     if (dream::devinterp::replay()) {
+         dream::devinterp::set_replay(nullptr);
+         std::printf(
+-            "replay: %llu calls compared, %llu skipped (device writes %llu, interrupts %llu, "
++            "replay: %llu calls compared, %llu skipped (device writes %llu, host state %llu, interrupts %llu, "
+             "non-local returns %llu, too long %llu), %zu disagreements\n",
+             static_cast<unsigned long long>(replay.compared),
+-            static_cast<unsigned long long>(replay.skipped_device + replay.skipped_interrupt +
++            static_cast<unsigned long long>(replay.skipped_device + replay.skipped_host_state + replay.skipped_interrupt +
+                                             replay.skipped_nonlocal + replay.skipped_too_long),
+             static_cast<unsigned long long>(replay.skipped_device),
++                    static_cast<unsigned long long>(replay.skipped_host_state),
+             static_cast<unsigned long long>(replay.skipped_interrupt),
+             static_cast<unsigned long long>(replay.skipped_nonlocal),
+             static_cast<unsigned long long>(replay.skipped_too_long), replay.divergences().size());
+diff --git a/runtime/include/dream/runtime/devinterp/replay.h b/runtime/include/dream/runtime/devinterp/replay.h
+index 25a6812..d91c6f1 100644
+--- a/runtime/include/dream/runtime/devinterp/replay.h
++++ b/runtime/include/dream/runtime/devinterp/replay.h
+@@ -65,7 +65,7 @@ public:
+     bool stop_on_divergence = true;
+ 
+     std::uint64_t compared = 0, skipped_device = 0, skipped_interrupt = 0, skipped_nonlocal = 0,
+-                  skipped_too_long = 0;
++                  skipped_too_long = 0, skipped_host_state = 0, allowed_device = 0;
+     // Calls that arrived in a floating-point mode other than the one the function was compiled for.
+     // This needs no replay at all: the emitter's assumption travels with the hook and is checked
+     // against FPSCR on the way in, so one run names every function the inference got wrong.
+diff --git b/runtime/include/dream/runtime/hle/side_effects.h b/runtime/include/dream/runtime/hle/side_effects.h
+new file mode 100644
+index 0000000..1123498
+--- /dev/null
++++ b/runtime/include/dream/runtime/hle/side_effects.h
+@@ -0,0 +1,13 @@
++#pragma once
++
++namespace dream::hle {
++
++// Some HLE calls change state the replay journal cannot restore: the GD-ROM driver consumes
++// sectors and advances its file position, timers count, the RNG advances, Maple polls. A
++// comparison that re-runs a call which reached one of these observes different host state, so
++// the call has to be skipped rather than reported as a disagreement.
++void note_side_effect() noexcept;
++// Returns true if a side effect was noted since the last call, and clears the flag.
++bool take_side_effect() noexcept;
++
++}  // namespace dream::hle
+diff --git a/runtime/include/dream/runtime/sh4/ops.h b/runtime/include/dream/runtime/sh4/ops.h
+index 2c8ccb4..932f833 100644
+--- a/runtime/include/dream/runtime/sh4/ops.h
++++ b/runtime/include/dream/runtime/sh4/ops.h
+@@ -9,6 +9,7 @@
+ #include "dream/runtime/fenv.h"
+ #include "dream/runtime/memory.h"
+ #include "dream/runtime/sh4/ctx.h"
++#include "dream/runtime/trace.h"
+ 
+ namespace dream::sh4 {
+ 
+@@ -194,6 +195,7 @@ inline std::uint32_t cmp_str(std::uint32_t a, std::uint32_t b) noexcept {
+ 
+ // LDC Rm,SR: writes SR, swapping register banks if RB changes, and refreshes the cached T.
+ inline void write_sr(Ctx& c, std::uint32_t v) noexcept {
++    trace::sr_write(c, v);
+     const bool old_rb = (c.sr & SR_RB) != 0, new_rb = (v & SR_RB) != 0;
+     if (old_rb != new_rb) {
+         for (int i = 0; i < 8; ++i) {
+diff --git a/runtime/include/dream/runtime/system.h b/runtime/include/dream/runtime/system.h
+index cdb4e69..a35027e 100644
+--- a/runtime/include/dream/runtime/system.h
++++ b/runtime/include/dream/runtime/system.h
+@@ -81,6 +81,11 @@ public:
+ private:
+     void enter_exception(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t vector_offset);
+     void arm_next_poll(sh4::Ctx& c) noexcept;
++    // Set while an exception's handler entry is being entered, consumed by the first
++    // on_untranslated it reaches. The interpreted run it starts must end at the handler's RTE:
++    // its stop address is not PR, which still belongs to the interrupted code and, for a nested
++    // delivery inside a handler's ISR, is exactly where the handler's own call returns to.
++    bool handler_entry_ = false;
+ };
+ 
+ }  // namespace dream
+diff --git b/runtime/include/dream/runtime/trace.h b/runtime/include/dream/runtime/trace.h
+new file mode 100644
+index 0000000..9bc0c25
+--- /dev/null
++++ b/runtime/include/dream/runtime/trace.h
+@@ -0,0 +1,39 @@
++#pragma once
++
++#include <cstdint>
++
++namespace dream::sh4 {
++struct Ctx;
++}
++
++namespace dream::trace {
++
++// Instruction-level differential tracing.
++//
++// `DREAM_TRACE_INSNS=lo:hi:FILE` records every executed guest instruction whose address is in
++// [lo, hi) to FILE, one line per instruction. Translated code only carries the call when it was
++// generated with `--trace-insns lo:hi`; interpreted code checks the same range at run time. The
++// two runs can then be diffed to the first instruction where the engines part, which is what the
++// function-level replay harness cannot localise.
++//
++// Off and effectively free unless the variable is set.
++bool enabled() noexcept;
++
++// Within-run differential: the replay harness opens a file for the translated execution, closes
++// it, then opens another for the interpreted execution of the same call. Overrides the env var.
++bool begin_file(const char* path) noexcept;
++void end_file() noexcept;
++void insn(const sh4::Ctx& c, std::uint32_t pc) noexcept;
++
++// DREAM_TRACE_SSR=1 logs every write to SSR with its origin and the writing PC. Used to find
++// which path produces a corrupt SSR (the open fault restores PC from it).
++void ssr_write(const char* tag, std::uint32_t pc, std::uint32_t value) noexcept;
++
++// DREAM_TRACE_SR=1 logs every write to SR with the PC in c.pc (the current instruction when the
++// interpreter runs, the last transfer when emitted code runs) and the value written.
++void sr_write(const sh4::Ctx& c, std::uint32_t value) noexcept;
++
++// DREAM_TRACE_SPC=1 logs every write to SPC with its origin and the writing PC.
++void spc_write(const char* tag, std::uint32_t pc, std::uint32_t value) noexcept;
++
++}  // namespace dream::trace
+diff --git a/runtime/src/devinterp/interpreter.cpp b/runtime/src/devinterp/interpreter.cpp
+index 32d1026..7590397 100644
+--- a/runtime/src/devinterp/interpreter.cpp
++++ b/runtime/src/devinterp/interpreter.cpp
+@@ -1,4 +1,5 @@
+ #include "dream/runtime/devinterp/interpreter.h"
++#include "dream/runtime/trace.h"
+ 
+ #include <cmath>
+ #include <cstdint>
+@@ -66,9 +67,16 @@ struct Machine {
+     }
+ 
+     void poll() {
++        // SH-4: an interrupt is not accepted immediately after an instruction that writes SR
++        // (LDC Rm,SR / LDC.L @Rm+,SR / RTE); the next instruction always executes first.
++        if (suppress_poll) {
++            suppress_poll = false;
++            return;
++        }
+         if (c.cycles >= c.next_event)
+             sh4::deliver_irq(c, m);
+     }
++    bool suppress_poll = false;
+ 
+     // ---- FPU: the mode is read from FPSCR at run time (the emitter resolves it statically) ----
+     void exec_fp(std::uint32_t pc, const Instr& ins) {
+@@ -603,6 +611,7 @@ struct Machine {
+             case Op::NOP:
+                 break;
+             case Op::LDC_SR:
++                suppress_poll = true;
+                 write_sr(c, rm);
+                 break;
+             case Op::LDC_GBR:
+@@ -612,10 +621,12 @@ struct Machine {
+                 c.vbr = rm;
+                 break;
+             case Op::LDC_SSR:
+-                c.ssr = rm;
++                trace::ssr_write("ldc", pc, rm);
++        c.ssr = rm;
+                 break;
+             case Op::LDC_SPC:
+-                c.spc = rm;
++                trace::spc_write("ldc", pc, rm);
++        c.spc = rm;
+                 break;
+             case Op::LDC_DBR:
+                 c.dbr = rm;
+@@ -624,6 +635,7 @@ struct Machine {
+                 bank = rm;
+                 break;
+             case Op::LDC_L_SR:
++                suppress_poll = true;
+                 write_sr(c, m.read32(rm));
+                 rm += 4;
+                 break;
+@@ -636,11 +648,13 @@ struct Machine {
+                 rm += 4;
+                 break;
+             case Op::LDC_L_SSR:
+-                c.ssr = m.read32(rm);
++                trace::ssr_write("ldc.l", pc, m.read32(rm));
++        c.ssr = m.read32(rm);
+                 rm += 4;
+                 break;
+             case Op::LDC_L_SPC:
+-                c.spc = m.read32(rm);
++                trace::spc_write("ldc.l", pc, m.read32(rm));
++        c.spc = m.read32(rm);
+                 rm += 4;
+                 break;
+             case Op::LDC_L_DBR:
+@@ -857,6 +871,10 @@ Stop run(Ctx& c, ::dream::Memory& m, std::uint32_t return_to, const Options& opt
+     Stats& st = stats ? *stats : local;
+     ++st.runs;
+     Machine mc{c, m, opt, st, return_to};
++    static const std::uint32_t watch_call_at = [] {
++        const char* s = std::getenv("DREAM_TRACE_CALL_AT");
++        return s ? static_cast<std::uint32_t>(std::strtoul(s, nullptr, 0)) : 0u;
++    }();
+     mc.poll();  // a translated function polls at entry; so does an interpreted one
+     // Calls translated code; true when it ended in a non-local return that redirected c.pc.
+     auto native = [&](sh4::GuestFn fn) -> bool {
+@@ -870,10 +888,43 @@ Stop run(Ctx& c, ::dream::Memory& m, std::uint32_t return_to, const Options& opt
+             return true;
+         }
+     };
++    // DREAM_TRACE_BALANCE=1 pairs every interpreted call with its return and reports any call
++    // whose stack pointer differs on return, naming the unbalanced function directly. This is the
++    // region the differential harness cannot see: an interpreted callee runs the same code in both
++    // engines, so a defect there is invisible to a translated-vs-interpreted comparison.
++    static const bool trace_balance = std::getenv("DREAM_TRACE_BALANCE") != nullptr;
++    struct CallRec {
++        std::uint32_t pc, target, r15, ret;
++    };
++    std::vector<CallRec> balance;
++    struct BalanceReport {
++        std::uint64_t paired = 0, unbalanced = 0;
++        ~BalanceReport() {
++            if (trace_balance)
++                std::fprintf(stderr, "balance: paired %llu, unbalanced %llu\n",
++                             static_cast<unsigned long long>(paired),
++                             static_cast<unsigned long long>(unbalanced));
++        }
++    } report;
++
+     for (;;) {
+         if (opt.max_instructions && st.instructions >= opt.max_instructions)
+             return Stop::StepLimit;
+         const std::uint32_t pc = c.pc;
++        if (dream::trace::enabled()) dream::trace::insn(c, pc);
++        // A hook marker has no guest code behind it. If control arrives *on* one -- a task
++        // resumed on the syscall vector after a scheduler switch, or a hook that left PC
++        // there -- dispatch it instead of fetching the marker as an instruction (it is 0xFF).
++        if (pc >= opt.native_lo && pc < opt.native_hi) {
++            if (sh4::GuestFn fn = sh4::find_function(pc, &m)) {
++                ++st.native_calls;
++                c.pc = pc;
++                if (!native(fn))
++                    c.pc = c.pr;
++                mc.poll();
++                continue;
++            }
++        }
+         const Instr ins = mc.fetch(pc);
+         ++st.instructions;
+         c.cycles += 1;
+@@ -902,6 +953,8 @@ Stop run(Ctx& c, ::dream::Memory& m, std::uint32_t return_to, const Options& opt
+         // Delayed branch: the branch's operands are read before the slot runs (target, condition,
+         // PR for calls), the slot executes at pc+2, then control transfers. Mirrors emit_delayed().
+         const Instr slot = mc.fetch(pc + 2);
++        if (trace::enabled())
++            trace::insn(c, pc + 2);  // the delay slot is an instruction and must be traced too
+         ++st.instructions;
+         c.cycles += 1;
+         enum class Flow { Jump, Call, Ret, Rte } flow = Flow::Jump;
+@@ -968,7 +1021,9 @@ Stop run(Ctx& c, ::dream::Memory& m, std::uint32_t return_to, const Options& opt
+         switch (flow) {
+             case Flow::Rte:
+                 return Stop::Rte;  // unreachable: handled above
+-            case Flow::Jump: {
++            case Flow::Jump:
++                if (watch_call_at && pc == watch_call_at)
++                    std::fprintf(stderr, "jump-at 0x%08x -> 0x%08x r15 0x%08x\n", pc, t, c.r[15]); {
+                 if (!taken) {
+                     c.pc = pc + 4;
+                     break;
+@@ -980,7 +1035,8 @@ Stop run(Ctx& c, ::dream::Memory& m, std::uint32_t return_to, const Options& opt
+                     return Stop::Returned;
+                 const bool computed = ins.op == Op::JMP || ins.op == Op::BRAF || ins.op == Op::RTE;
+                 if (computed && native_ok_for(opt, t)) {
+-                    if (sh4::GuestFn fn = sh4::find_function(t, &m)) {
++                    if (const char* hv = std::getenv("DREAM_TRACE_HOOK")) { (void)hv; if (t >= 0x8C001000u && t < 0x8C00100Cu) std::fprintf(stderr, "hook: interp 0x%08x from pc 0x%08x pr 0x%08x r15 0x%08x\n", t, pc, c.pr, c.r[15]); }
++                        if (sh4::GuestFn fn = sh4::find_function(t, &m)) {
+                         // Tail call into translated code: it returns to its PR, which is where the
+                         // interpreted function would have returned to.
+                         ++st.native_calls;
+@@ -1001,9 +1057,18 @@ Stop run(Ctx& c, ::dream::Memory& m, std::uint32_t return_to, const Options& opt
+                     mc.poll();
+                 break;
+             }
++
+             case Flow::Call:
++                if (trace_balance && balance.size() < 4096)
++                    balance.push_back({pc, t, c.r[15], pc + 4});
++                // DREAM_TRACE_CALL_AT=0xADDR names the target of the call at that address, so an
++                // unbalanced callee can be identified at its call site.
++                if (watch_call_at && pc == watch_call_at)
++                    std::fprintf(stderr, "call-at 0x%08x -> 0x%08x r15 0x%08x pr 0x%08x\n", pc, t,
++                                 c.r[15], c.pr);
+                 if (native_ok_for(opt, t)) {
+-                    if (sh4::GuestFn fn = sh4::find_function(t, &m)) {
++                    if (const char* hv = std::getenv("DREAM_TRACE_HOOK")) { (void)hv; if (t >= 0x8C001000u && t < 0x8C00100Cu) std::fprintf(stderr, "hook: interp 0x%08x from pc 0x%08x pr 0x%08x r15 0x%08x\n", t, pc, c.pr, c.r[15]); }
++                        if (sh4::GuestFn fn = sh4::find_function(t, &m)) {
+                         ++st.native_calls;
+                         c.pc = pc;
+                         if (!native(fn))
+@@ -1016,6 +1081,19 @@ Stop run(Ctx& c, ::dream::Memory& m, std::uint32_t return_to, const Options& opt
+                 break;
+             case Flow::Ret:
+                 sh4::trace_return(c, m, pc);
++                if (trace_balance && !balance.empty() && t == balance.back().ret) {
++                    const CallRec& r = balance.back();
++                    if (c.r[15] != r.r15)
++                        std::fprintf(stderr,
++                                     "unbalanced: call 0x%08x -> 0x%08x r15 in 0x%08x out 0x%08x "
++                                     "(%+d)\n",
++                                     r.pc, r.target, r.r15, c.r[15],
++                                     static_cast<int>(c.r[15] - r.r15));
++                    ++report.paired;
++                    if (c.r[15] != r.r15)
++                        ++report.unbalanced;
++                    balance.pop_back();
++                }
+                 if (t == return_to)
+                     return Stop::Returned;
+                 c.pc = t;
+diff --git a/runtime/src/devinterp/replay.cpp b/runtime/src/devinterp/replay.cpp
+index fbe78bd..753b87a 100644
+--- a/runtime/src/devinterp/replay.cpp
++++ b/runtime/src/devinterp/replay.cpp
+@@ -3,13 +3,35 @@
+ 
+ #include <algorithm>
+ #include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ 
+ #include "dream/runtime/devinterp/interpreter.h"
+ #include "dream/runtime/sh4/abi.h"
++#include "dream/runtime/trace.h"
++#include "dream/runtime/hle/side_effects.h"
+ 
+ namespace dream::devinterp {
+ 
++namespace {
++// DREAM_REPLAY_DUMP=0x<addr> dumps the state the harness recorded at the function's entry and the
++// state its interpreter replay starts from, so a false positive can be told apart from a real
++// divergence.
++std::uint32_t dump_fn() {
++    static const std::uint32_t v = [] {
++        const char* s = std::getenv("DREAM_REPLAY_DUMP");
++        return s ? static_cast<std::uint32_t>(std::strtoul(s, nullptr, 0)) : 0u;
++    }();
++    return v;
++}
++void dump_ctx(const char* tag, std::uint32_t fn, const sh4::Ctx& c) {
++    std::fprintf(stderr,
++                 "dump %-13s fn 0x%08x pc 0x%08x pr 0x%08x sr 0x%08x fpscr 0x%08x t %u r15 0x%08x "
++                 "r4 0x%08x r5 0x%08x\n",
++                 tag, fn, c.pc, c.pr, c.sr, c.fpscr, c.t, c.r[15], c.r[4], c.r[5]);
++}
++}  // namespace
++
+ namespace {
+ Replay* g_replay = nullptr;
+ 
+@@ -23,14 +45,33 @@ std::string differs(const char* name, std::uint64_t translated, std::uint64_t in
+ }
+ }  // namespace
+ 
++
++namespace {
++// DREAM_REPLAY_TRACE=<prefix> + DREAM_REPLAY_DUMP=<addr>: within-run differential. The translated
++// execution of that one function is traced to <prefix>.a.txt, then the interpreter replay of the
++// same call — from the same entry state and the same memory — to <prefix>.b.txt. The two files can
++// then be diffed instruction by instruction, which cross-run traces cannot do because the engines
++// take different paths once interrupts start arriving.
++bool trace_wanted(std::uint32_t function) {
++    const char* prefix = std::getenv("DREAM_REPLAY_TRACE");
++    return prefix && *prefix && dump_fn() == function;
++}
++void trace_open(std::uint32_t function, const char* suffix) {
++    const char* prefix = std::getenv("DREAM_REPLAY_TRACE");
++    if (!prefix || !*prefix)
++        return;
++    char path[512];
++    std::snprintf(path, sizeof path, "%s%s", prefix, suffix);
++    dream::trace::begin_file(path);
++}
++}  // namespace
++
+ Replay* replay() noexcept {
+     return g_replay;
+ }
+ void set_replay(Replay* r) noexcept {
+     g_replay = r;
+-}
+-
+-bool Replay::wanted(std::uint32_t function) const {
++}bool Replay::wanted(std::uint32_t function) const {
+     if (only.empty())
+         return true;
+     return std::find(only.begin(), only.end(), function) != only.end();
+@@ -63,12 +104,27 @@ void Replay::enter_impl(std::uint32_t function) {
+     if (replaying_)
+         return;
+     ++depth_;
++    // DREAM_REPLAY_CHILDREN=1 lists the functions called inside a comparison. Nested calls are
++    // not compared themselves, so this is how a disagreeing parent's call tree is discovered; each
++    // child can then be compared on its own with --replay-only <child>.
++    if (active_ != 0) {
++        static const bool trace_children = std::getenv("DREAM_REPLAY_CHILDREN") != nullptr;
++        if (trace_children)
++            std::fprintf(stderr, "replay-child: parent 0x%08x child 0x%08x\n", active_, function);
++    }
+     // The first function a run enters is the program's entry point, which does not return until the
+     // run is over. A comparison waiting for it would never complete and would journal the whole
+     // run, so one that grows past a bound is abandoned and the next call entered is compared
+     // instead. That is what makes "compare everything" reach the functions that matter: the deep,
+     // short ones.
+-    if (active_ != 0 && memory_.journal.size() > kJournalLimit) {
++    // DREAM_REPLAY_JOURNAL_LIMIT raises the bound on how much a comparison may record. The
++    // default is deliberately small so that "compare everything" reaches short calls; raising it
++    // lets a long call be compared at the cost of a bigger replay.
++    static const std::size_t journal_limit = [] {
++        const char* s = std::getenv("DREAM_REPLAY_JOURNAL_LIMIT");
++        return s ? static_cast<std::size_t>(std::strtoull(s, nullptr, 0)) : kJournalLimit;
++    }();
++    if (active_ != 0 && memory_.journal.size() > journal_limit) {
+         ++skipped_too_long;
+         // Remember it, so the run stops trying the same never-returning function over and over.
+         // A handful of attempts blacklists the entry point and the main loop, and everything short
+@@ -84,15 +140,19 @@ void Replay::enter_impl(std::uint32_t function) {
+         return;  // known not to return within the journal's bound
+     active_ = function;
+     entry_ = ctx_;
++    if (dump_fn() == function) dump_ctx("entry", function, entry_);
++    if (trace_wanted(function)) trace_open(function, ".a.txt");
+     entry_interrupts_ = interrupts ? *interrupts : 0;
+     memory_.journal.clear();
+     memory_.journal_saw_device = false;
++    hle::take_side_effect();  // start the call with no host-state side effect pending
+     memory_.journaling = true;
+ }
+ 
+ void Replay::exit(std::uint32_t function) {
+     if (replaying_)
+         return;
++    if (trace_wanted(function)) dream::trace::end_file();
+     if (depth_ > 0)
+         --depth_;
+     if (active_ != function)
+@@ -109,7 +169,21 @@ void Replay::exit(std::uint32_t function) {
+     }
+     // A device write cannot be undone and must not be repeated, so this call cannot be compared.
+     if (memory_.journal_saw_device) {
+-        ++skipped_device;
++        // Device writes cannot be undone, so a normal comparison skips the call. For a diagnostic
++        // run DREAM_REPLAY_ALLOW_DEVICE=1 compares it anyway: the device sees the write twice,
++        // which is acceptable when the question is whether the registers diverge.
++        static const bool allow_device = std::getenv("DREAM_REPLAY_ALLOW_DEVICE") != nullptr;
++        if (!allow_device) {
++            ++skipped_device;
++            memory_.journal.clear();
++            return;
++        }
++        ++allowed_device;
++    }
++    // An HLE hook changed host state the journal cannot restore (the GD-ROM position, a timer, the
++    // RNG): re-running the call observes a different world, so it cannot be compared.
++    if (hle::take_side_effect()) {
++        ++skipped_host_state;
+         memory_.journal.clear();
+         return;
+     }
+@@ -133,6 +207,8 @@ void Replay::exit(std::uint32_t function) {
+ 
+     ctx_ = entry_;
+     ctx_.pc = function;
++    if (dump_fn() == function) dump_ctx("replay-start", function, ctx_);
++    if (trace_wanted(function)) trace_open(function, ".b.txt");
+     replaying_ = true;
+     Options opt;
+     opt.call_translated = true;  // callees are not what is under test here
+@@ -157,6 +233,7 @@ void Replay::exit(std::uint32_t function) {
+         unwound = true;
+     }
+     replaying_ = false;
++    if (trace_wanted(function)) dream::trace::end_file();
+     memory_.journaling = false;
+ 
+     if (unwound || stop != Stop::Returned || memory_.journal_saw_device) {
+diff --git a/runtime/src/hle/bios.cpp b/runtime/src/hle/bios.cpp
+index 55df238..7e0183e 100644
+--- a/runtime/src/hle/bios.cpp
++++ b/runtime/src/hle/bios.cpp
+@@ -1,4 +1,5 @@
+ #include "dream/runtime/hle/bios.h"
++#include "dream/runtime/hle/side_effects.h"
+ 
+ #include <algorithm>
+ #include <cstdio>
+@@ -256,12 +257,18 @@ void Bios::sys_flashrom(sh4::Ctx& c, ::dream::Memory& m) {
+             break;
+         }
+         case 2: {  // FLASHROM_WRITE: r4 offset, r5 src, r6 size; returns bytes written
++            // Flash bytes live in DcMemory::flash() but are written through Flash, not through
++            // DcMemory::store, so the replay journal cannot undo them. Re-running the call would
++            // program the device twice (flash writes only clear bits, so the second run sees a
++            // different device).
++            note_side_effect();
+             for (std::uint32_t i = 0; i < c.r[6]; ++i)
+                 flash_.program8(c.r[4] + i, m.read8(c.r[5] + i));
+             c.r[0] = c.r[6];
+             break;
+         }
+         case 3: {  // FLASHROM_DELETE: r4 offset inside the partition to erase
++            note_side_effect();
+             std::uint32_t off = 0, size = 0;
+             c.r[0] = 0xFFFFFFFFu;
+             for (unsigned p = 0; p < Flash::Count; ++p) {
+@@ -437,6 +444,9 @@ void Bios::gd_request(sh4::Ctx& c, ::dream::Memory& m) {
+ }
+ 
+ void Bios::sys_gdrom(sh4::Ctx& c, ::dream::Memory& m) {
++    // The GD-ROM driver consumes sectors and advances its position: a replay cannot see the
++    // same state twice.
++    note_side_effect();
+     c.cycles += kGdSyscallCycles;
+     if (c.r[6] == 0xFFFFFFFFu) {  // misc functions share the vector
+         ++counts["misc"];
+diff --git b/runtime/src/hle/side_effects.cpp b/runtime/src/hle/side_effects.cpp
+new file mode 100644
+index 0000000..5ec4b7a
+--- /dev/null
++++ b/runtime/src/hle/side_effects.cpp
+@@ -0,0 +1,20 @@
++// See dream/runtime/hle/side_effects.h.
++#include "dream/runtime/hle/side_effects.h"
++
++namespace dream::hle {
++
++namespace {
++bool g_pending = false;
++}
++
++void note_side_effect() noexcept {
++    g_pending = true;
++}
++
++bool take_side_effect() noexcept {
++    const bool v = g_pending;
++    g_pending = false;
++    return v;
++}
++
++}  // namespace dream::hle
+diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
+index 7d292b7..c901b9d 100644
+--- a/runtime/src/sh4/abi_bare.cpp
++++ b/runtime/src/sh4/abi_bare.cpp
+@@ -301,6 +301,10 @@ void run_guest(Ctx& c, ::dream::Memory& m, GuestFn entry) {
+ }
+ 
+ void call_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target) {
++    static const bool trace_hook = std::getenv("DREAM_TRACE_HOOK") != nullptr;
++    if (trace_hook && target >= 0x8C001000u && target < 0x8C00100Cu)
++        std::fprintf(stderr, "hook: call_indirect 0x%08x from pc 0x%08x pr 0x%08x r15 0x%08x\n",
++                     target, c.pc, c.pr, c.r[15]);
+     if (GuestFn fn = find_function(target, &m)) {
+         fn(c, m);
+         return;
+diff --git a/runtime/src/system.cpp b/runtime/src/system.cpp
+index b9813e7..3e05f23 100644
+--- a/runtime/src/system.cpp
++++ b/runtime/src/system.cpp
+@@ -1,4 +1,5 @@
+ #include "dream/runtime/system.h"
++#include "dream/runtime/trace.h"
+ 
+ #include <algorithm>
+ #include <cstdio>
+@@ -60,7 +61,9 @@ void System::arm_next_poll(sh4::Ctx& c) noexcept {
+ // SH-4 exception entry (SH7750 manual 5.x; Flycast Do_Interrupt): SSR/SPC/SGR saved, BL, MD and
+ // RB set (bank swap), then the handler at VBR + offset runs as a nested guest call until its RTE.
+ void System::enter_exception(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t vector_offset) {
++    trace::ssr_write("exception", c.pc, sh4::read_sr(c));
+     c.ssr = sh4::read_sr(c);
++    trace::spc_write("exception", c.pc, c.pc);
+     c.spc = c.pc;
+     c.sgr = c.r[15];
+     sh4::write_sr(c, c.ssr | sh4::SR_BL | sh4::SR_MD | sh4::SR_RB);
+@@ -70,6 +73,10 @@ void System::enter_exception(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t vect
+     max_nesting = std::max(max_nesting, nesting);
+     frame_pcs.push_back(c.spc);
+     frame_sps.push_back(c.sgr);
++    if (std::getenv("DREAM_TRACE_SWITCH"))
++        std::fprintf(stderr,
++                     "exc: vec 0x%03x pc 0x%08x spc 0x%08x r15 0x%08x nesting %u depth %zu\n",
++                     vector_offset, c.spc, c.spc, c.r[15], nesting, frame_pcs.size());
+     // A non-local return inside the handler unwinds through here: keep the frame books straight.
+     struct Frame {
+         System& s;
+@@ -95,7 +102,11 @@ void System::enter_exception(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t vect
+         }
+     } report{trace, c, pr_before, sp_before};
+ #ifdef DREAM_DEV_INTERPRETER
+-    if (interpret_all) {
++    // Experiment: run exception handlers through the interpreter in *both* modes. The translated
++    // build otherwise enters the handler through call_indirect, which runs the translated
++    // relocation unit at VBR+0x600 instead of interpreting the same bytes.
++    static const bool handler_interp = std::getenv("DREAM_HANDLER_INTERP") != nullptr;
++    if (interpret_all || handler_interp) {
+         devinterp::Options iopt;
+         iopt.call_translated = false;
+         iopt.native_lo = hle::Bios::kHookSystem;
+@@ -103,12 +114,22 @@ void System::enter_exception(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t vect
+         devinterp::run(c, m, 0, iopt, nullptr);  // the handler's RTE ends the run
+     } else
+ #endif
++    {
++        handler_entry_ = true;
+         sh4::call_indirect(c, m, handler);  // returns after the handler's RTE
++        handler_entry_ = false;
++    }
+ }
+ 
+ unsigned System::deliver_pending(sh4::Ctx& c, ::dream::Memory& m) {
+     unsigned delivered = 0;
+     while (auto sel = intc.select(sh4::read_sr(c))) {
++        if (std::getenv("DREAM_TRACE_IRQ"))
++            std::fprintf(stderr,
++                         "irq: pc 0x%08x cycles %llu now %llu intevt 0x%03x sr 0x%08x\n", c.pc,
++                         static_cast<unsigned long long>(c.cycles),
++                         static_cast<unsigned long long>(sched.now()), sel->intevt,
++                         sh4::read_sr(c));
+         memory.intevt = sel->intevt;
+         ++interrupts_delivered;
+         ++delivered;
+@@ -120,6 +141,13 @@ unsigned System::deliver_pending(sh4::Ctx& c, ::dream::Memory& m) {
+ }
+ 
+ void System::on_poll(sh4::Ctx& c, ::dream::Memory& m) {
++    // The moment a poll finds the deadline crossed is exactly where delivery timing is decided;
++    // logging it in both engines shows which instruction each one delivers on.
++    static const bool trace_poll = std::getenv("DREAM_TRACE_POLL") != nullptr;
++    if (trace_poll && c.cycles >= c.next_event)
++        std::fprintf(stderr, "poll: pc 0x%08x cycles %llu next %llu sr 0x%08x\n", c.pc,
++                     static_cast<unsigned long long>(c.cycles),
++                     static_cast<unsigned long long>(c.next_event), sh4::read_sr(c));
+     if (c.cycles > sched.now())
+         sched.advance_to(c.cycles);  // devices raise their interrupts here
+     deliver_pending(c, m);
+@@ -135,6 +163,12 @@ void System::on_trapa(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t imm) {
+ }
+ 
+ void System::on_rte(sh4::Ctx& c, ::dream::Memory& m) {
++    static const bool trace_hook = std::getenv("DREAM_TRACE_HOOK") != nullptr;
++    if (trace_hook)
++        std::fprintf(stderr,
++                     "rte: spc 0x%08x frame_pc 0x%08x r15 0x%08x frame_sp 0x%08x sr 0x%08x ssr 0x%08x\n",
++                     c.spc, frame_pcs.empty() ? 0u : frame_pcs.back(), c.r[15],
++                     frame_sps.empty() ? 0u : frame_sps.back(), sh4::read_sr(c), c.ssr);
+     const bool switched =
+         !frame_pcs.empty() && (c.spc != frame_pcs.back() || c.r[15] != frame_sps.back());
+     sh4::write_sr(c, c.ssr);
+@@ -144,7 +178,26 @@ void System::on_rte(sh4::Ctx& c, ::dream::Memory& m) {
+         // handler): the interrupted host frames belong to the suspended task. Drop them and let
+         // run_guest re-enter the resumed task at its SPC (docs/emitter-design.md, "Non-local
+         // returns"). The delivery frame's bookkeeping unwinds through enter_exception.
++        // DREAM_REPAIR_SWITCH=1: a switch whose SPC is not a plausible guest code address is
++        // corruption, not a task switch. Repair the frame from the interrupted context instead of
++        // resuming into nowhere, so the diagnostic can see how far the run then gets.
++        static const bool repair = std::getenv("DREAM_REPAIR_SWITCH") != nullptr;
++        const std::uint32_t p0 = c.spc & 0x1FFFFFFFu;
++        const bool plausible = p0 >= 0x0C000000u && p0 < 0x0C300000u;
++        if (repair && !plausible) {
++            std::fprintf(stderr,
++                         "repair: implausible spc 0x%08x at sp 0x%08x, resuming frame pc 0x%08x "
++                         "sp 0x%08x\n",
++                         c.spc, c.r[15], frame_pcs.back(), frame_sps.back());
++            c.pc = frame_pcs.back();
++            c.r[15] = frame_sps.back();
++            return;
++        }
+         ++task_switch_rtes;
++        if (std::getenv("DREAM_TRACE_SWITCH"))
++            std::fprintf(stderr,
++                         "switch: spc 0x%08x sp 0x%08x frame_pc 0x%08x frame_sp 0x%08x nesting %u\n",
++                         c.spc, c.r[15], frame_pcs.back(), frame_sps.back(), nesting);
+         if (first_switches.size() < 8)
+             first_switches.push_back({frame_pcs.back(), frame_sps.back(), c.spc, c.r[15]});
+         sh4::nonlocal_return(c, m, c.spc);
+@@ -159,11 +212,38 @@ void System::on_untranslated(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t targ
+         untranslated_sites.emplace_back(target, c.pc);
+ #ifdef DREAM_DEV_INTERPRETER
+     // Run the untranslated code from memory until it returns to the caller's PR (or RTEs, for an
+-    // exception handler), calling translated functions natively on the way.
+-    const std::uint32_t return_to = c.pr;
++    // exception handler), calling translated functions natively on the way. A handler entry is the
++    // exception: the handler's body does not return through PR, and PR at that moment belongs to
++    // the interrupted code. If the handler is entered from inside another handler's ISR, that PR is
++    // exactly where this handler's own ISR call returns to, so stopping there would end the handler
++    // half-way with its context frame still on the guest stack.
++    const bool handler_entry = handler_entry_;
++    handler_entry_ = false;
++    const std::uint32_t return_to = handler_entry ? 0u : c.pr;
+     c.pc = target;
+     devinterp::Stats st;
+-    devinterp::run(c, m, return_to, {}, &st);
++    // Declare the HLE hook page so the interpreter dispatches a marker it lands on instead of
++    // fetching it (see the fetch-time check in devinterp::run).
++    devinterp::Options iopt;
++    iopt.native_lo = hle::Bios::kHookSystem;
++    iopt.native_hi = hle::Bios::kHookGd2 + 2;
++    // Experiment: inside an exception handler, do not hand control to translated functions. The
++    // --interpret path runs handlers with call_translated=false; the translated build lets them
++    // call emitted code, and that is the only execution difference left on the handler path.
++    static const bool handler_no_native = std::getenv("DREAM_HANDLER_NO_NATIVE") != nullptr;
++    if (handler_no_native && nesting > 0)
++        iopt.call_translated = false;
++    static const bool trace_handler = std::getenv("DREAM_TRACE_HANDLER") != nullptr;
++    if (trace_handler)
++        std::fprintf(stderr, "untranslated: target 0x%08x return_to(pr) 0x%08x r15 0x%08x\n", target,
++                     return_to, c.r[15]);
++    const devinterp::Stop stop = devinterp::run(c, m, return_to, iopt, &st);
++    if (trace_handler)
++        std::fprintf(stderr, "untranslated: target 0x%08x ended %s pc 0x%08x r15 0x%08x\n", target,
++                     stop == devinterp::Stop::Returned ? "Returned(early)"
++                     : stop == devinterp::Stop::Rte    ? "Rte"
++                                                       : "StepLimit",
++                     c.pc, c.r[15]);
+     interpreter_runs += st.runs;
+     interpreted_instructions += st.instructions;
+     interpreter_native_calls += st.native_calls;
+diff --git b/runtime/src/trace.cpp b/runtime/src/trace.cpp
+new file mode 100644
+index 0000000..dc549be
+--- /dev/null
++++ b/runtime/src/trace.cpp
+@@ -0,0 +1,155 @@
++// See dream/runtime/trace.h.
++#include "dream/runtime/trace.h"
++
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++#include "dream/runtime/sh4/ctx.h"
++
++namespace dream::trace {
++
++namespace {
++
++std::uint64_t g_from = 0;  // DREAM_TRACE_FROM: ignore instructions before this guest cycle
++std::uint64_t g_to = ~0ull;
++std::uint64_t g_index = 0;        // instructions traced so far, identical in both engines
++std::uint64_t g_idx_from = 0, g_idx_to = ~0ull;
++std::uint64_t g_hash = 1469598103934665603ull;  // FNV-1a over (pc, r0-r15, sr, t)
++std::uint64_t g_hash_interval = 0;              // DREAM_TRACE_HASH: checkpoint every N
++FILE* g_hash_file = nullptr;  // DREAM_TRACE_TO: stop recording after this guest cycle
++
++struct Sink {
++    FILE* file = nullptr;
++    std::uint32_t lo = 0, hi = 0;
++
++    Sink() {
++        const char* spec = std::getenv("DREAM_TRACE_INSNS");
++        if (!spec || !*spec)
++            return;
++        char buf[512];
++        std::snprintf(buf, sizeof buf, "%s", spec);
++        char* first = std::strchr(buf, ':');
++        if (!first)
++            return;
++        char* second = std::strchr(first + 1, ':');
++        if (!second)
++            return;
++        *first = '\0';
++        *second = '\0';
++        // The range is given in either P0 (0x0C...) or P1 (0x8C...) form; the guest runs in P1.
++        lo = static_cast<std::uint32_t>(std::strtoul(buf, nullptr, 0)) & 0x1FFFFFFFu;
++        hi = static_cast<std::uint32_t>(std::strtoul(first + 1, nullptr, 0)) & 0x1FFFFFFFu;
++        file = std::fopen(second + 1, "w");
++        if (const char* f = std::getenv("DREAM_TRACE_FROM"))
++            g_from = std::strtoull(f, nullptr, 0);
++        if (const char* f = std::getenv("DREAM_TRACE_TO"))
++            g_to = std::strtoull(f, nullptr, 0);
++        if (const char* f = std::getenv("DREAM_TRACE_IDX_FROM"))
++            g_idx_from = std::strtoull(f, nullptr, 0);
++        if (const char* f = std::getenv("DREAM_TRACE_IDX_TO"))
++            g_idx_to = std::strtoull(f, nullptr, 0);
++        if (const char* f = std::getenv("DREAM_TRACE_HASH")) {
++            char buf[512];
++            std::snprintf(buf, sizeof buf, "%s", f);
++            char* colon = std::strrchr(buf, ':');
++            if (colon) {
++                *colon = 0;
++                g_hash_interval = std::strtoull(colon + 1, nullptr, 0);
++            } else {
++                g_hash_interval = 10000;
++            }
++            g_hash_file = std::fopen(buf, "w");
++        }
++    }
++
++    ~Sink() {
++        if (file)
++            std::fclose(file);
++    }
++};
++
++Sink g_sink;  // constructed at program start so the file exists even if emitted code
++              // never calls enabled() (a translated-only run has no trace hooks)
++Sink& sink() {
++    return g_sink;
++}
++
++}  // namespace
++
++bool begin_file(const char* path) noexcept {
++    Sink& s = sink();
++    if (s.file) {
++        std::fclose(s.file);
++        s.file = nullptr;
++    }
++    s.file = std::fopen(path, "w");
++    return s.file != nullptr;
++}
++
++void end_file() noexcept {
++    Sink& s = sink();
++    if (s.file) {
++        std::fclose(s.file);
++        s.file = nullptr;
++    }
++}
++
++bool enabled() noexcept {
++    return sink().file != nullptr;
++}
++
++void insn(const sh4::Ctx& c, std::uint32_t pc) noexcept {
++    Sink& s = sink();
++    if (!s.file || (pc & 0x1FFFFFFFu) < s.lo || (pc & 0x1FFFFFFFu) >= s.hi)
++        return;
++    const std::uint64_t idx = g_index++;
++    // Checkpoint hash: covers the same fields on both engines, so the first differing checkpoint
++    // names the instruction window where they part, in bounded memory.
++    // Normalise the P0/P1 alias, or the same instruction hashes differently in each engine.
++    g_hash = (g_hash ^ (pc & 0x1FFFFFFFu)) * 1099511628211ull;
++    // Only the stack pointer, not every register: a register that differs but never affects
++    // control flow or the stack is not a behavioural difference (MOVA's P0/P1 alias is one).
++    g_hash = (g_hash ^ c.r[15]) * 1099511628211ull;
++    g_hash = (g_hash ^ c.sr) * 1099511628211ull;
++    g_hash = (g_hash ^ (c.t ? 1u : 0u)) * 1099511628211ull;
++    if (g_hash_file && g_hash_interval && idx % g_hash_interval == 0)
++        std::fprintf(g_hash_file, "ck %llu %016llx %llu\n",
++                     static_cast<unsigned long long>(idx),
++                     static_cast<unsigned long long>(g_hash),
++                     static_cast<unsigned long long>(c.cycles));
++    if (idx < g_idx_from || idx > g_idx_to)
++        return;
++    if (c.cycles < g_from || c.cycles > g_to)
++        return;
++    // Every register, then the control state, so a divergence anywhere is caught at the instruction
++    // where it happens rather than at the next printed field.
++    std::fprintf(s.file, "%08x %llu", pc,
++                 static_cast<unsigned long long>(c.cycles));
++    for (int i = 0; i < 16; ++i) std::fprintf(s.file, " %08x", c.r[i]);
++    std::fprintf(s.file, " %u %08x %08x %08x %08x %08x %08x\n", c.t ? 1u : 0u, c.sr, c.spc, c.ssr,
++                 c.fpscr, c.pr, c.gbr);
++}
++
++void ssr_write(const char* tag, std::uint32_t pc, std::uint32_t value) noexcept {
++    static const bool on = std::getenv("DREAM_TRACE_SSR") != nullptr;
++    if (!on)
++        return;
++    std::fprintf(stderr, "ssr-write %-10s pc 0x%08x value 0x%08x\n", tag, pc, value);
++}
++
++void sr_write(const sh4::Ctx& c, std::uint32_t value) noexcept {
++    static const bool on = std::getenv("DREAM_TRACE_SR") != nullptr;
++    if (!on)
++        return;
++    std::fprintf(stderr, "sr-write pc 0x%08x value 0x%08x old 0x%08x\n", c.pc, value, c.sr);
++}
++
++void spc_write(const char* tag, std::uint32_t pc, std::uint32_t value) noexcept {
++    static const bool on = std::getenv("DREAM_TRACE_SPC") != nullptr;
++    if (!on)
++        return;
++    std::fprintf(stderr, "spc-write %-10s pc 0x%08x value 0x%08x\n", tag, pc, value);
++}
++
++}  // namespace dream::trace
+diff --git a/runtime/tests/test_system.cpp b/runtime/tests/test_system.cpp
+index 947fb1b..70fd0aa 100644
+--- a/runtime/tests/test_system.cpp
++++ b/runtime/tests/test_system.cpp
+@@ -234,6 +234,64 @@ TEST_CASE("system: interrupt delivery runs the VBR+0x600 handler as a nested cal
+     sh4::set_hooks(nullptr);
+ }
+ 
++TEST_CASE("system: a nested handler's interpreted run ends at its RTE, not at a stale PR") {
++    // Regression for the Draconus fault `0x60000040` (docs/ENGINE-CHANGES.md, patch 007).
++    //
++    // The general-exception vector is a translated stub that hands the body to the interpreter.
++    // on_untranslated used to run that body until PR, and PR at handler entry is not the handler's
++    // return address: it belongs to the interrupted code. When the interrupt is delivered inside
++    // another handler's ISR, PR is exactly the address the handler's own `jsr` returns to, so the
++    // body was abandoned at its call, its context frame still on the guest stack, and the guest's
++    // epilogue then popped SPC/SSR one slot out of step -- an SR value loaded into SPC, an `rte`
++    // to 0x60000040, and a run that stopped at frame 54.
++    //
++    // The handler here has the same shape: push a register, call an ISR, pop it, mark completion,
++    // acknowledge the source, RTE. Its call return address is forced to equal the stale PR.
++    System sys;
++    sys.install();
++    auto& c = sys.ctx;
++    auto& m = sys.memory;
++    // VBR 0x8C00F200 puts the general-exception handler at 0x8C00F800, which no test registers as
++    // a native function: the only way in is on_untranslated -> the interpreter.
++    c.vbr = 0x8C00F200u;
++    sh4::write_sr(c, 0x40000000u);
++    // The exception entry sets SR.RB, so the handler runs on register bank 1: that is where its
++    // arguments must be, exactly as the guest's own stub expects.
++    c.r_bank[1] = 0x8C100000u;  // where the handler records that it reached its epilogue
++    c.r_bank[3] = 0x8C00F820u;  // the ISR the handler calls
++    c.r_bank[4] = 0xA05F6900u;  // VBlank-in acknowledge register
++    c.r[15] = 0x8C010000u;
++    c.pc = 0x8C010100u;     // interrupted pc, must be restored by the handler's RTE
++    c.pr = 0x8C00F806u;     // stale PR == the return address of the handler's own `jsr` at 0xF802
++    const std::uint16_t handler[] = {
++        0x2F26,  // 0x8C00F800 mov.l r2,@-r15
++        0x430B,  // 0x8C00F802 jsr @r3        (return address 0x8C00F806)
++        0x0009,  // 0x8C00F804 nop           (delay slot)
++        0x62F6,  // 0x8C00F806 mov.l @r15+,r2
++        0xE001,  // 0x8C00F808 mov #1,r0
++        0x2102,  // 0x8C00F80A mov.l r0,@r1   (completion marker)
++        0xE008,  // 0x8C00F80C mov #8,r0
++        0x2402,  // 0x8C00F80E mov.l r0,@r4   (acknowledge VBlank-in)
++        0x002B,  // 0x8C00F810 rte
++        0x0009,  // 0x8C00F812 nop           (RTE's delay slot)
++    };
++    for (std::size_t i = 0; i < sizeof handler / sizeof handler[0]; ++i)
++        m.write16(0x8C00F800u + static_cast<std::uint32_t>(2 * i), handler[i]);
++    m.write16(0x8C00F820u, 0x000B);  // rts
++    m.write16(0x8C00F822u, 0x0009);  // nop
++    m.write32(0xA05F6930u, 0x8u);    // VBlank-in -> IRL9
++    c.cycles = sys.spg.line_cycles() * 261;
++    sh4::deliver_irq(c, m);
++    // The handler ran to its RTE: the marker was written, the interrupted context returned.
++    CHECK(m.read32(0x8C100000u) == 1u);
++    CHECK(c.r[15] == 0x8C010000u);
++    CHECK(c.pc == 0x8C010100u);
++    CHECK(sys.task_switch_rtes == 0);
++    CHECK(sys.interrupts_delivered == 1);
++    CHECK(!sys.holly.raised(holly::Irq::VBlankIn));
++    sh4::set_hooks(nullptr);
++}
++
+ TEST_CASE("system: TRAPA enters the general exception vector with TRA and EXPEVT set") {
+     System sys;
+     sys.install();
+diff --git a/translator/include/dream/translator/emit.h b/translator/include/dream/translator/emit.h
+index 86af1fe..5ada6ff 100644
+--- a/translator/include/dream/translator/emit.h
++++ b/translator/include/dream/translator/emit.h
+@@ -41,8 +41,19 @@ struct FunctionSpec {
+ };
+ 
+ struct EmitOptions {
++    // The address the guest actually runs at (cfg.link_address). PC-relative *addresses* (MOVA)
++    // must be materialised in this form, or a register ends up holding the P0 alias while the
++    // image's own pointers use the link form — the two are the same bytes but different values.
++    std::uint32_t link_base = 0;
+     bool fold_literals = true;  // MOV.L @(disp,PC) inside the image becomes a constant
++    // Poll for interrupts before every instruction instead of at function entries and loop
++    // back-edges. Slower, but it makes the delivery points match the interpreter's closely enough
++    // to test whether poll placement decides when a nested interrupt lands.
++    bool irq_dense = false;
+     bool trace = false;         // call trace_return() before every return
++    // Emit a dream::trace::insn() call before every instruction in [trace_lo, trace_hi).
++    // Used by the instruction-level differential tracer; an empty range emits nothing.
++    std::uint32_t trace_lo = 0, trace_hi = 0;
+     // Bracket each function's plain entry with a ReplayScope, so a development run can compare it
+     // against the interpreter with the same inputs (runtime/devinterp/replay.h). Development only:
+     // it costs a constructor and destructor per call even when no harness is installed.
+diff --git a/translator/src/emit/emit.cpp b/translator/src/emit/emit.cpp
+index 2ebdd71..cd47d8e 100644
+--- a/translator/src/emit/emit.cpp
++++ b/translator/src/emit/emit.cpp
+@@ -280,14 +280,16 @@ public:
+                         // landing one instruction into a prologue, or shared code): control
+                         // continues in that function, so tail-call it.
+                         out << "    // falls through into the function at " << hex(stop) << "\n";
+-                        out << "    " << call_target_expr(stop) << " return;\n";
++                        flush_cycles(out);
++    out << "    " << call_target_expr(stop) << " return;\n";
+                     } else {
+                         // Control continues at `stop`, which no function of this unit starts at:
+                         // hand it to the runtime (the miss handler interprets it in dev builds
+                         // and it shows up in the untranslated-target log either way).
+                         out << "    // falls off the end of the function range at " << hex(stop)
+                             << "\n";
+-                        out << "    c.pc = " << hexu(stop) << "; call_indirect(c, m, " << hexu(stop)
++                        flush_cycles(out);
++    out << "    c.pc = " << hexu(stop) << "; call_indirect(c, m, " << hexu(stop)
+                             << "); return;\n";
+                     }
+                 }
+@@ -875,6 +877,18 @@ private:
+         const Instr ins = at(pc);
+         ++result_.instructions;
+         out << "    // " << hex(pc) << ": " << sh4::format(ins, pc) << "\n";
++    if (opt_.irq_dense) {
++        // The clock is only advanced at flushes, so a poll must include the cost already emitted
++        // since the last flush — otherwise it reads a stale clock and crosses a deadline late.
++        const unsigned pending = pending_cycles_;
++        out << "    if (c.cycles + " << pending << " >= c.next_event) { c.cycles += " << pending
++            << "; c.pc = " << hexu(pc) << "; deliver_irq(c, m); }\n";
++        pending_cycles_ = 0;  // counted above; the next flush must not add it again
++    }
++    const std::uint32_t p0_pc = pc & 0x1FFFFFFFu;
++    if (opt_.trace_hi > opt_.trace_lo && p0_pc >= (opt_.trace_lo & 0x1FFFFFFFu) &&
++        p0_pc < (opt_.trace_hi & 0x1FFFFFFFu))
++        out << "    if (dream::trace::enabled()) dream::trace::insn(c, " << hexu(pc) << ");\n";
+         const FpMode before = mode_;
+         mode_ = transfer(mode_, current_block_start(pc), pc, ins);
+         (void)before;
+@@ -913,9 +927,20 @@ private:
+         auto emit_slot = [&] {
+             out << "        // " << hex(pc + 2) << ": " << sh4::format(slot, pc + 2)
+                 << " (delay slot)\n";
++            // The delay slot needs the same trace hook as any other instruction, or a traced loop
++            // records two entries per iteration instead of three and the stream drifts.
++            const std::uint32_t p0_slot = (pc + 2) & 0x1FFFFFFFu;
++            if (opt_.trace_hi > opt_.trace_lo && p0_slot >= (opt_.trace_lo & 0x1FFFFFFFu) &&
++                p0_slot < (opt_.trace_hi & 0x1FFFFFFFu))
++                out << "        if (dream::trace::enabled()) dream::trace::insn(c, "
++                    << hexu(pc + 2) << ");\n";
+             out << "        " << slot_code << "\n";
++            // Count the slot's cycle after it executes: the interpreter adds it in its fetch loop
++            // on the next iteration, and a one-cycle phase difference moves interrupt delivery.
++            ++pending_cycles_;
++            flush_cycles(out);
+         };
+-        pending_cycles_ += 2;
++        ++pending_cycles_;  // the branch
+         flush_cycles(out);
+         out << "    {\n";
+         switch (ins.op) {
+@@ -929,6 +954,7 @@ private:
+                     out << "        if (taken) { " << irq_check_if_backedge(t, pc) << "goto "
+                         << label(t) << "; }\n";
+                 } else {
++                    flush_cycles(out);
+                     out << "        if (taken) { " << call_target_expr(t) << " return; }\n";
+                 }
+                 break;
+@@ -940,6 +966,7 @@ private:
+                     out << "        " << irq_check_if_backedge(t, pc) << "goto " << label(t)
+                         << ";\n";
+                 } else {
++                    flush_cycles(out);  // a callee entry is a poll: give it the caller's full cost
+                     out << "        " << call_target_expr(t) << " return;\n";
+                 }
+                 break;
+@@ -948,7 +975,9 @@ private:
+                 const std::uint32_t t = sh4::pcrel_target(ins, pc);
+                 out << "        c.pr = " << hexu(pc + 4) << ";\n";
+                 emit_slot();
++                flush_cycles(out);  // a callee entry is a poll: give it the caller's full cost
+                 out << "        c.pc = " << hexu(pc) << "; " << call_target_expr(t) << "\n";
++                out << "    if (c.cycles >= c.next_event) { c.pc = " << hexu(pc + 4) << "; deliver_irq(c, m); }\n";
+                 break;
+             }
+             case Op::BSRF:
+@@ -962,6 +991,7 @@ private:
+                 if (constant && known_.count(direct)) {
+                     out << "        c.pr = " << hexu(pc + 4) << ";\n";
+                     emit_slot();
++                    flush_cycles(out);  // a callee entry is a poll: give it the caller's full cost
+                     out << "        c.pc = " << hexu(pc) << "; " << call_target_expr(direct)
+                         << "\n";
+                     ++result_.direct_calls;
+@@ -974,7 +1004,9 @@ private:
+                     out << "        const std::uint32_t target = " << R(ins.m) << ";\n";
+                 out << "        c.pr = " << hexu(pc + 4) << ";\n";
+                 emit_slot();
++                flush_cycles(out);  // a callee entry is a poll: give it the caller's full cost
+                 out << "        c.pc = " << hexu(pc) << "; call_indirect(c, m, target);\n";
++                out << "    if (c.cycles >= c.next_event) { c.pc = " << hexu(pc + 4) << "; deliver_irq(c, m); }\n";
+                 break;
+             }
+             case Op::BRAF:
+@@ -1251,7 +1283,14 @@ private:
+             case Op::MOV_L_PCREL:
+                 return rn + " = " + literal32(sh4::pcrel_target(ins, pc)) + ";";
+             case Op::MOVA:
+-                return r0 + " = " + hexu(sh4::pcrel_target(ins, pc)) + ";";
++            {
++                std::uint32_t addr = sh4::pcrel_target(ins, pc);
++                // Materialise the address in the form the guest runs at, matching the absolute
++                // pointers stored in the image.
++                if (opt_.link_base)
++                    addr = (addr & 0x1FFFFFFFu) | (opt_.link_base & 0xE0000000u);
++                return r0 + " = " + hexu(addr) + ";";
++            }
+             case Op::MOVT:
+                 return rn + " = c.t;";
+             case Op::MOV_B_S:
+@@ -1682,7 +1721,9 @@ EmitResult emit_unit(const Image& image, const std::vector<FunctionSpec>& functi
+         << ". Do not edit.\n"
+         << "#include <cstdint>\n#include \"dream/runtime/memory.h\"\n#include "
+            "\"dream/runtime/sh4/abi.h\"\n"
+-        << "#include \"dream/runtime/sh4/ctx.h\"\n#include \"dream/runtime/sh4/ops.h\"\n\n"
++        << "#include \"dream/runtime/sh4/ctx.h\"\n#include \"dream/runtime/sh4/ops.h\"\n"
++        << "#include \"dream/runtime/trace.h\"\n"
++        << "\n"
+         << "namespace dream::gen {\nusing namespace dream::sh4;\nusing dream::Memory;\n\n";
+     for (const auto& f : specs) {
+         hdr << "void " << f.name << "(dream::sh4::Ctx& c, dream::Memory& m);\n";
+diff --git a/translator/src/main.cpp b/translator/src/main.cpp
+index e451638..fc07f3b 100644
+--- a/translator/src/main.cpp
++++ b/translator/src/main.cpp
+@@ -168,8 +168,19 @@ int cmd_emit(int argc, char** argv) {
+             opt.replay_hooks = true;
+         else if (!std::strcmp(argv[i], "--trace"))
+             opt.trace = true;
++        else if (!std::strcmp(argv[i], "--trace-insns") && i + 1 < argc) {
++            // --trace-insns LO:HI: emit a dream::trace::insn() call before every instruction in
++            // the range. The differential tracer supplies the range and reads the file.
++            const char* spec = argv[++i];
++            char* end = nullptr;
++            opt.trace_lo = static_cast<std::uint32_t>(std::strtoul(spec, &end, 0));
++            if (end && *end == ':')
++                opt.trace_hi = static_cast<std::uint32_t>(std::strtoul(end + 1, nullptr, 0));
++        }
+         else if (!std::strcmp(argv[i], "--no-irq"))
+             opt.irq_checks = false;
++        else if (!std::strcmp(argv[i], "--irq-dense"))
++            opt.irq_dense = true;
+         else if (!std::strcmp(argv[i], "--functions") && i + 1 < argc) {
+             std::string err;
+             if (!dream::translator::load_functions_json(argv[++i], fns, err)) {
+@@ -412,7 +423,9 @@ int translate_view(const dream::translator::GameConfig& cfg, const dream::transl
+         const std::string suffix = "_" + (pos == std::string::npos ? stem : stem.substr(pos + 7));
+         for (auto& f : fns) f.name += suffix;
+     }
+-    const auto res = dream::translator::emit_unit(img, fns, opt);
++    dream::translator::EmitOptions emit_opt = opt;
++    emit_opt.link_base = cfg.link_address;  // MOVA materialises link-form addresses
++    const auto res = dream::translator::emit_unit(img, fns, emit_opt);
+     const auto base = out_dir / stem;
+     {
+         std::ofstream o(base.string() + ".cpp");
+@@ -459,6 +472,16 @@ int cmd_game(int argc, char** argv) {
+             opt.trace = true;
+         else if (!std::strcmp(argv[i], "--no-irq"))
+             opt.irq_checks = false;
++        else if (!std::strcmp(argv[i], "--irq-dense"))
++            opt.irq_dense = true;
++        else if (!std::strcmp(argv[i], "--trace-insns") && i + 1 < argc) {
++            // Same as in the emit parser: differential tracing range.
++            const char* spec = argv[++i];
++            char* end = nullptr;
++            opt.trace_lo = static_cast<std::uint32_t>(std::strtoul(spec, &end, 0));
++            if (end && *end == ':')
++                opt.trace_hi = static_cast<std::uint32_t>(std::strtoul(end + 1, nullptr, 0));
++        }
+         else
+             return usage(2);
+     }

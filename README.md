@@ -28,22 +28,22 @@ engine changes, and the next three tasks. The engine-side findings are in
 
 ## From a fresh clone
 
-This repository deliberately does **not** contain the engine. `setup.ps1` fetches it at a
-pinned commit, installs the title configuration over it, and builds:
+This repository deliberately does **not** contain the engine or any game data. `setup.ps1` fetches
+the engine at a pinned commit, applies the project's engine patches from `patches/` (ledgered in
+`docs/ENGINE-CHANGES.md`), installs the title configurations, and builds:
 
 ```powershell
 git clone <your fork> DraconusRecomp
 cd DraconusRecomp
-.\setup.ps1
+.\setup.ps1 -SkipBuild                              # fetch, patch, install
+tools\import-disc.bat "D:\dumps\draconus.gdi"       # verify + point the config at your dump
+.\setup.ps1                                         # extract the boot file, then build
 ```
 
-Then edit `engine\games\draconus\draconus.toml` → `[disc] image` to point at your own
-dump, and run `.\play-draconus.bat`. See `docs/09-TOOLING.md` for the Vulkan SDK and SDL3
-requirements, and `docs/LEGAL.md` for what you must supply.
-
-**Note:** the engine fixes recorded in `docs/ENGINE-CHANGES.md` (patches 001–007) are local
-changes against the pinned commit; `setup.ps1` does not re-apply them yet, so a fresh clone gets
-the pristine engine. Add them by hand from the ledger until a patch step lands.
+The first run says there is nothing to translate yet; the second extracts the boot executable from
+the dump you imported and builds. You need the Vulkan SDK and SDL3 — see `docs/09-TOOLING.md`; if
+SDL3 is not in `work\sdl3`, pass `-Sdl3Dir <path>\cmake`. `docs/LEGAL.md` covers what you must
+supply.
 
 ## Checking the translated path
 
