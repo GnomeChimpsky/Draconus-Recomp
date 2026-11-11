@@ -1675,8 +1675,11 @@ The title config now carries that exclusion.
 
 Whether the function's *translation* is wrong or the exclusion merely shifts interrupt timing is not
 settled. It is called only late in gameplay, and the differential replay at 8,940 functions is too
-slow without a checkpoint. The next measurement is `--replay-only 0x0C16CDF4` over a run that reaches
-the call; remove the exclusion when that is resolved.
+slow without a checkpoint. `--replay-only 0x0C16CDF4` over the crash run has now been tried and
+cannot help: the call is made once and the harness skips it as "too long" — the 2,000,000-instruction
+cap is exceeded, so the function loops far more than its size suggests. A harness that can compare it
+would need to raise that cap and accept the cost, or a checkpoint to start from. Remove the exclusion
+when the question is settled by some other means.
 
 ## Validation against the engine's own tests (2026-11-06)
 
