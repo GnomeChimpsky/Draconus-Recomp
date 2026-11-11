@@ -704,7 +704,7 @@ index 32d1026..7590397 100644
                      return Stop::Returned;
                  c.pc = t;
 diff --git a/runtime/src/devinterp/replay.cpp b/runtime/src/devinterp/replay.cpp
-index fbe78bd..753b87a 100644
+index fbe78bd..25e1f64 100644
 --- a/runtime/src/devinterp/replay.cpp
 +++ b/runtime/src/devinterp/replay.cpp
 @@ -3,13 +3,35 @@
@@ -852,7 +852,7 @@ index fbe78bd..753b87a 100644
          memory_.journal.clear();
          return;
      }
-@@ -133,6 +207,8 @@ void Replay::exit(std::uint32_t function) {
+@@ -133,11 +207,20 @@ void Replay::exit(std::uint32_t function) {
  
      ctx_ = entry_;
      ctx_.pc = function;
@@ -861,7 +861,20 @@ index fbe78bd..753b87a 100644
      replaying_ = true;
      Options opt;
      opt.call_translated = true;  // callees are not what is under test here
-@@ -157,6 +233,7 @@ void Replay::exit(std::uint32_t function) {
+     opt.catch_nonlocal = false;
+-    opt.max_instructions = 2'000'000;
++    // A call that loops more than this is abandoned rather than interpreted for ever; the default
++    // keeps the harness quick, and DREAM_REPLAY_MAX_INSNS raises it for one known-long function
++    // (0x0C16CDF4 needs more, and is the case the cap was hit on).
++    static const std::uint64_t replay_cap = [] {
++        const char* s = std::getenv("DREAM_REPLAY_MAX_INSNS");
++        return s ? std::strtoull(s, nullptr, 0) : std::uint64_t{2'000'000};
++    }();
++    opt.max_instructions = replay_cap;
+     Stop stop = Stop::StepLimit;
+     bool unwound = false;
+     try {
+@@ -157,6 +240,7 @@ void Replay::exit(std::uint32_t function) {
          unwound = true;
      }
      replaying_ = false;

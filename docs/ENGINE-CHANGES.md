@@ -1522,7 +1522,7 @@ interrupted PC not restored, source not acknowledged). Both directions were run.
 
 001 present-mode guard, 002 diagnostics, 003 hook dispatch at the interpreter fetch boundary, 004
 instruction tracer, 005 replay host-state skip, 006 SR-write rule, **007 handler-entry stop address**,
-**008 flash host-state marking**, **009 inlined RAM fast path**, **010 cached readback memory**, **011 `/bigobj` for large generated units** (plus
+**008 flash host-state marking**, **009 inlined RAM fast path**, **010 cached readback memory**, **011 `/bigobj` for large generated units**, **012 `DREAM_REPLAY_MAX_INSNS`** (plus
 the `DREAM_TRACE_UNTRANSLATED` and `DREAM_TRACE_FRAME_TIME` diagnostics), delay-slot tracing,
 cycle-phase alignment, flush-before-call, the post-call poll and the pending-aware poll. 007 fixes
 the fault; 009, 010 and the config seeds are the speed work.
@@ -1677,9 +1677,19 @@ Whether the function's *translation* is wrong or the exclusion merely shifts int
 settled. It is called only late in gameplay, and the differential replay at 8,940 functions is too
 slow without a checkpoint. `--replay-only 0x0C16CDF4` over the crash run has now been tried and
 cannot help: the call is made once and the harness skips it as "too long" — the 2,000,000-instruction
-cap is exceeded, so the function loops far more than its size suggests. A harness that can compare it
-would need to raise that cap and accept the cost, or a checkpoint to start from. Remove the exclusion
-when the question is settled by some other means.
+cap is exceeded, so the function loops far more than its size suggests. Raising the cap to 50,000,000
+(the new `DREAM_REPLAY_MAX_INSNS`) still ends in "too long": the call does not return inside the
+harness at all, so the differential replay cannot compare this function by construction. The
+workaround therefore stays, with its cause unproven, until a checkpointed harness or a different
+comparison exists.
+
+## Patch 012: the replay instruction cap is a knob (2026-11-11)
+
+The differential harness gives each compared call 2,000,000 interpreted instructions and then counts
+it as "too long". One function (`0x0C16CDF4`) runs past even 50,000,000 without returning, so it can
+never be compared by the harness as it stands. `DREAM_REPLAY_MAX_INSNS` overrides the cap for a run,
+which lets a future harness (or a checkpointed comparison) raise it without a rebuild; the default is
+unchanged.
 
 ## Validation against the engine's own tests (2026-11-06)
 
