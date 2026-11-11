@@ -53,6 +53,31 @@ known alias, not a behavioural difference.
 If a later scene is still slow, `tools\diagnose-speed.bat` runs the game with
 `DREAM_TRACE_UNTRANSLATED` and leaves `work\speed-report.txt` naming the hotspots.
 
+## Open defect (2026-11-11): a crash in gameplay on the pointer-discovery build
+
+The fast build (`pointers = true`, 8,940 functions) crashes in gameplay. It is deterministic and
+reproduces headless:
+
+```powershell
+draconus_boot --config games\draconus\draconus.toml --max-frames 5000 --rtc-seed 1000000 `
+              --press "start@1000,a@4000"
+```
+
+`fault: unimplemented instruction 0x0000 at 0x00000000`, frame 4,750 (79.07 s guest).
+
+The controls say it is a translation defect introduced by the pointer pass, not a runtime limit:
+
+* the interpreter runs the same input to frame 5,000 cleanly;
+* the pre-pointer build (3,285 functions) also runs it cleanly, to frame 5,000;
+* the trace ends with an `rte` whose saved frame is `{pc 0, sp 0}`, a switch to `0x0C16CDF4`, then an
+  emitted `rts` whose target is its own entry (`nonlocal: rts from 0x0c16cdf4 to 0x0c16cdf4`), then
+  a jump to 0. The shape is a context save/restore left one slot out of step, in code the pointer
+  pass added.
+
+Next: localise with the replay harness rebuilt from this config over the crashing input, or bisect by
+leaving pointer-origin functions out of the translation set. Until it is fixed, `-Interpret` is the
+stable path (0.25x), and reverting `pointers = false` gives back the stable 1.2x build.
+
 ## The fault that was fixed (2026-11-10)
 
 The translated path used to stop at frame 54 with `unmapped read 0x60000040`. The cause was
