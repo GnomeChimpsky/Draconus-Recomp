@@ -17,34 +17,41 @@ this is measured against. This file is the pick-up point.
 | Instruction tracing | `DREAM_TRACE_INSNS=lo:hi:FILE` | filtered by range, cycle window and in-range index |
 | Function differential | `--replay` (+ replay build) | 2,448,650 calls compared, **0 disagreements** (one P0/P1 alias in a newly seeded function) |
 | Windowed parity | `tools\parity-check.ps1` | window renders; input recording and screenshot byte-identical to the interpreter |
-| Speed | translated path | **1.0x windowed and 1.2x headless** at 1,800 frames; interpreter is 0.26x |
+| Speed | translated path | **3.7-3.9x headless, 1.0x windowed**; interpreter is 0.26x |
 | Fresh clone | `setup.ps1 -SkipBuild`, `import-disc`, `setup.ps1` | engine patched, dump extracted, built, **600 frames clean** |
 | Engine test suite | `ctest` in `engine/build-test` | 6/6 (76 runtime cases incl. the new regression) |
 
 **The translated path is now the fast one (2026-11-11).** It had been 0.15x — slower than the
-interpreter — because 29.7 million calls per 300 frames crossed into the development interpreter,
-99 per cent of them to `0x0C240710`, an empty function called ~98,000 times a frame. Seeding the
-fifteen hot targets from `--suggest-config` (plus the diagnostic that names them) removed that
-traffic, and inlining the RAM fast path in `DcMemory` removed most of the rest:
+interpreter — because most of the title's code was running in the development interpreter. Three
+things fixed it, in this order:
+
+1. **Seeds** from `--suggest-config`, which found a 99-per-cent hotspot: `0x0C240710`, an empty
+   function (`rts`) called ~98,000 times a frame (0.15x → 1.5x at 600 frames).
+2. **The RAM fast path** inlined in `DcMemory` (1.5x → 1.9x), and **cached host memory** for the
+   presenter's readback (windowed 0.8x → 1.0x).
+3. **`pointers = true`** — the real fix: pointer-table discovery had been off, so the title's
+   table-driven code was never translated. It finds 8,940 functions instead of 3,285, untranslated
+   calls drop from 3.3 million to 1,412 in a 5,000-frame scene, and the seeds become unnecessary
+   (removed).
 
 | configuration | 600 frames | 1,800 frames |
 |---|---|---|
 | interpreter | 0.26x | 0.22-0.26x |
-| translated, before | 0.15x | — |
-| translated, seeded | 1.5x | 1.04x |
-| translated, seeded + RAM fast path | **1.9x** | **1.2x** |
-| translated, windowed at scale 1 | 1.8x | **1.0x** |
+| translated, before any of this | 0.15x | — |
+| translated, seeds + RAM fast path | 1.9x | 1.2x |
+| translated, pointer tables (**current**) | **3.9x** | **3.7x** |
 
-With a window the same 1,800 frames run at **1.0x** (29.85 s for 29.86 guest seconds), and at 4x
-resolution too. The presenter had been reading the frame back out of write-combined memory at
-6.6 ms a frame; cached host memory removed it (patch 010), and `DREAM_TRACE_FRAME_TIME` is the
-diagnostic that found it.
+With a window the 1,800-frame run is **1.0x** (vsync-paced), and so is the heavier 5,000-frame menu
+scene; at 4x resolution too. The build now takes about five minutes and generates ~100 MB of C++.
 
-**Two cautions.** Do not seed `0x8C233648` (the relocated exception handler's body): translated, its
-`rte` no longer unwinds through `enter_exception` and the run faults at pc 0 at frame 22. And the
-`--replay` harness now reports one disagreement in the newly seeded `fn_0c011e64` — `r0 = 0x0C01214C`
-translated against `0x8C01214C` interpreted, the known P0/P1 segment alias, not a behavioural
-difference.
+**One caution.** Do not add `0x8C233648` as a seed: it is the relocated exception handler's body and,
+translated, its `rte` no longer unwinds through `enter_exception` (the run faults at pc 0 at frame
+22). Pointer discovery does not name it, so it stays interpreted on its own. The `--replay` harness
+also reports one disagreement in `fn_0c011e64` — `r0` differs only in the P0/P1 segment bits, the
+known alias, not a behavioural difference.
+
+If a later scene is still slow, `tools\diagnose-speed.bat` runs the game with
+`DREAM_TRACE_UNTRANSLATED` and leaves `work\speed-report.txt` naming the hotspots.
 
 ## The fault that was fixed (2026-11-10)
 

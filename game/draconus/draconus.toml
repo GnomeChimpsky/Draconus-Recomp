@@ -19,23 +19,19 @@ link_address = 0x0C010000                # P0 alias of the same RAM, what litera
 entry = 0x8C010000
 
 [functions]
-# Discovery measurements on this binary (2026-11-04, MSVC build, 1 core):
-#   call graph only     0.1 s ->     3 functions, 0.0 % of code bytes
-#   + pointer tables    0.6 s -> 14,913 functions, 26.1 % of code bytes
-#   + aggressive sweep  >15 min, no completion (superlinear on this title)
-# Full-set `emit` then took >300 s and produced no output file, while a 500-function
-# subset emits in 0.2 s -- so emission is the current blocking defect, not discovery.
-pointers = false
+# Discovery on this binary (2026-11-11): pointer tables are not optional. With `pointers = false`
+# discovery followed calls from the entry point and found 3,285 functions; this title reaches most
+# of its code through tables, so the rest ran in the development interpreter -- 0.15x on the title
+# screen, about 0.6x in menus, and slower in gameplay. With `pointers = true` it finds 8,940
+# functions (995,051 instructions, about 100 MB of generated C++) and the same scenes run at
+# 3.7-3.9x headless and 1.0x in a window. The build takes about five minutes.
+#
+# `sweep` stays off: it does not terminate on this title (docs/11-M2-RESULTS.md). `extra` seeds are
+# not needed with pointer tables on -- the hotspots seeded by hand on 2026-11-11 (an empty function
+# called ~98,000 times a frame, then the menu cluster) are all found by the table pass.
+pointers = true
 sweep = false
-# Seeds taken from --suggest-config, hottest first. They are the call targets a 300-frame run
-# reached that discovery had not found (2026-11-11). Without them the translated build crossed
-# into the development interpreter 29.7 million times in 300 frames and ran at 0.15x; with them
-# the boundaries drop to a few hundred calls a frame and the build runs at 1.2x (headless,
-# 1,800 frames). 0x0C240710 alone -- an empty function (`rts`) called ~98,000 times a frame --
-# was 99% of that boundary traffic.
-# Do not add 0x0C233648: it is the body of the relocated exception handler, and translating it
-# breaks the RTE unwinding (the run faults at pc 0 at frame 22).
-extra = [0x0C240710, 0x0C22BA92, 0x0C22BB58, 0x0C011B20, 0x0C011CC0, 0x0C1AEF4C, 0x0C15F6B4, 0x0C011E64, 0x0C22B9A4, 0x0C04F3C0, 0x0C0121D4, 0x0C0E4B8C, 0x0C0E4908, 0x0C1A8AD8]
+extra = []
 
 [[relocations]]
 # Detected by --suggest-config: the game copies 56 bytes from the image to the

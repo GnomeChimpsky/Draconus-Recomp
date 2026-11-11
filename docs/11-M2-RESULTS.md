@@ -4,6 +4,11 @@
 > faults recorded below were closed later: the hook-marker fault by patch 003, and the 54-frame
 > `0x60000040` fault by patch 007 (a handler entry stopping at the interrupted code's PR). Both paths
 > now run; the current state is `docs/12-HANDOVER.md` and the evidence is in `docs/ENGINE-CHANGES.md`.
+>
+> **Also superseded (2026-11-11): "emission is the blocker".** With pointer-table discovery on, the
+> translator emits 8,940 functions (995,051 instructions, ~100 MB of C++) in about five minutes and
+> the build runs at 3.7-3.9x real time. What never completed was the aggressive `sweep` pass, which
+> is still off; the full-set emission warning below was measured with a different configuration.
 
 Date: 2026-11-04/05. Engine: `phobos665/dream-recomp` 0.1.0, `main` as fetched (tree dated
 2026-10-29), MSVC 19.44, Ninja, `-DDREAM_DEV_INTERPRETER=ON -DDREAM_RENDERER=OFF`.

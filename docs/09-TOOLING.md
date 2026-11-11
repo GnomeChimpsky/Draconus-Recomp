@@ -119,24 +119,27 @@ files under `%LOCALAPPDATA%\Temp`, which this environment denies); one of them c
 
 | configuration | guest time | host time | speed |
 |---|---|---|---|
-| translated, headless, 600 frames | 9.84 s | 5.09 s | **1.9x** |
-| translated, headless, 1,800 frames | 29.86 s | 23.39 s | **1.2x** |
-| translated, window, 1,800 frames | 29.86 s | 29.85 s | **1.0x** |
-| translated, window, 600 frames at scale 4 | 9.84 s | 9.83 s | **1.0x** |
+| translated, headless, 600 frames | 9.84 s | 2.49 s | **3.9x** |
+| translated, headless, 1,800 frames | 29.86 s | 8.03 s | **3.7x** |
+| translated, window, 1,800 frames | 29.86 s | 29.9 s | **1.0x** (vsync) |
+| translated, window, 5,000 frames, menu scene | 83.24 s | 83.19 s | **1.0x** |
 | `--interpret`, headless, 600 frames | 9.84 s | 38 s | 0.26x |
 | `--interpret`, in-game with input, 900 frames | 14.84 s | 67.1 s | 0.22x |
 
-**The translated path is the fast path now.** On 2026-11-11 the title config was seeded with the
-fifteen call targets that took 99 per cent of the interpreter boundary traffic (one empty `rts`
-function alone was called ~98,000 times a frame), `DcMemory`'s RAM accesses were inlined ahead of the
-resolve/journal path, and the offscreen readback was moved to cached host memory — the presenter had
-been reading each frame out of write-combined memory at 6.6 ms a frame. Details in
-`docs/ENGINE-CHANGES.md`; `DREAM_TRACE_FRAME_TIME` is the diagnostic that found the last one.
+**The translated path is the fast path now.** The decisive change on 2026-11-11 was turning on
+pointer-table discovery (`pointers = true`): this title reaches most of its code through tables, and
+without it 3,285 functions were translated and the rest ran in the development interpreter. It now
+translates 8,940 functions (~100 MB of generated C++, about five minutes to build), and untranslated
+calls in a 5,000-frame scene fell from 3.3 million to 1,412. Inlining `DcMemory`'s RAM fast path and
+moving the presenter's readback to cached host memory did the rest. Details in
+`docs/ENGINE-CHANGES.md`; `DREAM_TRACE_FRAME_TIME` and `DREAM_TRACE_UNTRANSLATED` are the diagnostics
+that found the last two.
 
 `play-draconus.bat` defaults to the translated path; `-Interpret` selects the development
 interpreter, which is kept as the reference and the bring-up tool (about 0.25x).
 
 The levers in order of payoff:
 
-1. Translation coverage (M2 discovery/emission) — the only one left that matters for heavier scenes.
+1. Translation coverage for scenes the table pass does not reach — `tools\diagnose-speed.bat` names
+   what a slow scene is missing.
 2. Reduce the guest workload (not possible without changing the game).

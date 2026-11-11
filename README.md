@@ -5,8 +5,7 @@ A native Windows x64 static recompilation of **Draconus: Cult of the Wyrm**
 `F888` / `T-402`), built on [`dream-recomp`](https://github.com/phobos665/dream-recomp).
 
 The game is playable at real time, and the recompiled path is the fast one: 1.0x with a window and
-1.2x headless at 1,800 frames. The development interpreter remains as a reference and a bring-up
-tool.
+3.7-3.9x headless. The development interpreter remains as a reference and a bring-up tool.
 
 The game's SH-4 code is translated ahead of time into C++, and the Dreamcast hardware
 (file system, controllers, video, sound, memory card) is replaced by native code. The
@@ -136,16 +135,18 @@ python -m dracdisc extract  "<path to retail .gdi>" -o ..\..\work\extracted
 python -m unittest discover -s tests
 ```
 
-Status: **playable**. The retail game boots, plays its movies, shows its menus, loads into
-gameplay and responds to input — menu navigation and character movement both work — from the
-owner's own disc, deterministically. Translation covers 89.7 % of code bytes (3,285
-functions).
+Status: **playable at real time**. The retail game boots, plays its movies, shows its menus, loads
+into gameplay and responds to input — menu navigation and character movement both work — from the
+owner's own disc, deterministically. Translation now covers 8,940 functions (995,051 instructions),
+up from 3,285: pointer-table discovery is on, and it is what makes the recompiled path fast.
 
-**Speed** went from 0.15x to **1.0x in a window and 1.2x headless** at 1,800 frames by seeding the
-fifteen call targets that were taking 99 per cent of the interpreter boundary traffic, inlining the
-RAM fast path, and moving the presenter's readback out of write-combined memory
-(`docs/ENGINE-CHANGES.md`). Discovery and emission still do not scale to the whole binary, so scenes
-that reach untranslated code will pay for it until that is fixed.
+**Speed** went from 0.15x to **1.0x in a window and 3.7-3.9x headless**: the title config now turns
+on pointer-table discovery, which finds 8,940 functions instead of 3,285 — this game reaches most of
+its code through tables, so without it the translated build spent its time in the development
+interpreter. Inlining the RAM fast path and moving the presenter's readback out of write-combined
+memory finished the job (`docs/ENGINE-CHANGES.md`). Building now takes about five minutes because
+the generated C++ is ~100 MB; if a later scene is still slow, `tools\diagnose-speed.bat` names the
+hotspots.
 
 Audio works in menus and gameplay but not on the title screen, and the title's silence is
 unexplained (`docs/13-M6-AUDIO-BASELINE.md`). Visual comparison against Flycast has started:

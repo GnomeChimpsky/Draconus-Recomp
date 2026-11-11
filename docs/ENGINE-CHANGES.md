@@ -1634,6 +1634,26 @@ Counters unchanged, `tools\parity-check.ps1` still reports a byte-identical scre
 headless figure is within noise of the previous build (the cached readback is marginally slower to
 write from the GPU, which is why it is only used where the CPU reads).
 
+## Config: pointer-table discovery was off, and it was the real coverage fix (2026-11-11)
+
+The seed work above made the title screen and menus fast, but the title's code was still mostly
+missing. The config had `pointers = false`: discovery followed calls from the entry point only, which
+found 3,285 functions. This title reaches most of its code through data tables — function-pointer
+tables, jump tables, dispatch structures — so with the seeds in place a 5,000-frame menu scene still
+crossed into the interpreter **3.3 million times** and ran at 0.6x.
+
+Setting `pointers = true` finds **8,940 functions** (995,051 instructions, 62 switch tables, about
+100 MB of generated C++). The same 5,000-frame scene drops to **1,412 untranslated calls** and runs
+at **1.0x**; 1,800 frames headless go from 1.2x to **3.7x** and 600 frames to **3.9x**. Guest
+counters are unchanged (34,022 TA chunks / 504 swaps at 600; 704,111 / 1,680 at 1,800) and
+`tools\parity-check.ps1` still reports a byte-identical screenshot.
+
+The hand-added seeds become unnecessary once the table pass runs, so they were removed: the empty
+function at `0x0C240710` and the menu cluster are all found. The build takes about five minutes.
+
+**This corrects the M2 reading** (`docs/11-M2-RESULTS.md`): emitting the full set does complete — it
+was the aggressive `sweep` pass that never terminated, and `sweep` is still off.
+
 ## Windowed cost: what remains
 
 Nothing measurable, at native resolution: the window is at 1.0x for 1,800 frames and at 1.0x even at
