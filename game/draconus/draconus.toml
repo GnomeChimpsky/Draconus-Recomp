@@ -32,6 +32,12 @@ entry = 0x8C010000
 pointers = true
 sweep = false
 extra = []
+# Workaround (2026-11-11): do not translate 0x0C16CDF4 (the 4,914-byte FP function). With the pointer
+# pass on, the translated path faults at pc 0 about 79 s into the menu scene; interpreting this one
+# function removes it (20,000 frames clean, 2.2x) and the crash window is exactly where its
+# translation runs. The emitter question is still open: a differential replay of that call at the
+# crash point is the next measurement. Remove this line when that is resolved.
+exclude = [0x0C16CDF4]
 
 [[relocations]]
 # Detected by --suggest-config: the game copies 56 bytes from the image to the

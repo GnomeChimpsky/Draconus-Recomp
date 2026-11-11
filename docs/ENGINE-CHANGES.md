@@ -1661,6 +1661,23 @@ Nothing measurable, at native resolution: the window is at 1.0x for 1,800 frames
 change would remove that), but at 0.16 ms per present it no longer decides the frame rate. What
 remains for heavier scenes is emulation time (translation coverage), not the renderer.
 
+## The pointer-pass gameplay crash and the one-function workaround (2026-11-11)
+
+With `pointers = true` the translated build faulted at pc 0 about 79 s into the menu scene
+(`--press start@1000,a@4000`, frame 4,750, 79.07 s guest). The interpreter and the pre-pointer build
+ran the same input to frame 5,000 cleanly, so it was translated code. The crash trace ended with an
+`rte` to `0x0C16CDF4`, an emitted `rts` whose target was its own entry, then a jump to 0.
+
+Ruling out candidates by exclusion did not move the fault (the first suspect, `0x0C22B508`, changed
+nothing, and excluding interior pointer entries broke boot). One exclusion did: interpreting
+**`0x0C16CDF4`**, a 4,914-byte FP function, removes the crash — 20,000 frames of gameplay run clean.
+The title config now carries that exclusion.
+
+Whether the function's *translation* is wrong or the exclusion merely shifts interrupt timing is not
+settled. It is called only late in gameplay, and the differential replay at 8,940 functions is too
+slow without a checkpoint. The next measurement is `--replay-only 0x0C16CDF4` over a run that reaches
+the call; remove the exclusion when that is resolved.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

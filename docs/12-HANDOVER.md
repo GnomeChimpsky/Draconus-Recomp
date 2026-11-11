@@ -17,7 +17,7 @@ this is measured against. This file is the pick-up point.
 | Instruction tracing | `DREAM_TRACE_INSNS=lo:hi:FILE` | filtered by range, cycle window and in-range index |
 | Function differential | `--replay` (+ replay build) | 2,448,650 calls compared, **0 disagreements** (one P0/P1 alias in a newly seeded function) |
 | Windowed parity | `tools\parity-check.ps1` | window renders; input recording and screenshot byte-identical to the interpreter |
-| Speed | translated path | **3.7-3.9x headless, 1.0x windowed**; interpreter is 0.26x |
+| Speed | translated path | **4.2x at 600 frames, 3.9x at 1,800, 1.8x five minutes into gameplay; 1.0x windowed** |
 | Fresh clone | `setup.ps1 -SkipBuild`, `import-disc`, `setup.ps1` | engine patched, dump extracted, built, **600 frames clean** |
 | Engine test suite | `ctest` in `engine/build-test` | 6/6 (76 runtime cases incl. the new regression) |
 
@@ -39,7 +39,8 @@ things fixed it, in this order:
 | interpreter | 0.26x | 0.22-0.26x |
 | translated, before any of this | 0.15x | — |
 | translated, seeds + RAM fast path | 1.9x | 1.2x |
-| translated, pointer tables (**current**) | **3.9x** | **3.7x** |
+| translated, pointer tables (**current**) | **4.2x** | **3.9x** |
+| same, deeper gameplay (20,000 frames) | — | **1.8x** |
 
 With a window the 1,800-frame run is **1.0x** (vsync-paced), and so is the heavier 5,000-frame menu
 scene; at 4x resolution too. The build now takes about five minutes and generates ~100 MB of C++.
@@ -53,49 +54,40 @@ known alias, not a behavioural difference.
 If a later scene is still slow, `tools\diagnose-speed.bat` runs the game with
 `DREAM_TRACE_UNTRANSLATED` and leaves `work\speed-report.txt` naming the hotspots.
 
-## Open defect (2026-11-11): a crash in gameplay on the pointer-discovery build
+## The gameplay crash: worked around, emitter question open (2026-11-11)
 
-The fast build (`pointers = true`, 8,940 functions) crashes in gameplay. It is deterministic and
-reproduces headless:
+The fast build (`pointers = true`) used to crash in gameplay, deterministically:
 
 ```powershell
 draconus_boot --config games\draconus\draconus.toml --max-frames 5000 --rtc-seed 1000000 `
               --press "start@1000,a@4000"
 ```
 
-`fault: unimplemented instruction 0x0000 at 0x00000000`, frame 4,750 (79.07 s guest).
+`fault: unimplemented instruction 0x0000 at 0x00000000`, frame 4,750 (79.07 s guest). The controls
+said it was translated code, not a runtime limit: the interpreter and the pre-pointer build both ran
+the same input to frame 5,000 cleanly. The trace ended with an `rte` to `0x0C16CDF4`, then an emitted
+`rts` whose target was its own entry, then a jump to 0 — a context one slot out of step.
 
-The controls say it is a translation defect introduced by the pointer pass, not a runtime limit:
+**Workaround (shipped).** The title config excludes **one** function from translation:
 
-* the interpreter runs the same input to frame 5,000 cleanly;
-* the pre-pointer build (3,285 functions) also runs it cleanly, to frame 5,000;
-* the trace ends with an `rte` whose saved frame is `{pc 0, sp 0}`, a switch to `0x0C16CDF4`, then an
-  emitted `rts` whose target is its own entry (`nonlocal: rts from 0x0c16cdf4 to 0x0c16cdf4`), then
-  a jump to 0. The shape is a context save/restore left one slot out of step, in code the pointer
-  pass added.
+```toml
+[functions]
+exclude = [0x0C16CDF4]     # the 4,914-byte FP function the crash lands in
+```
 
-Next: localise with the replay harness rebuilt from this config over the crashing input, or bisect by
-leaving pointer-origin functions out of the translation set. Until it is fixed, `-Interpret` is the
-stable path (0.25x), and reverting `pointers = false` gives back the stable 1.2x build.
+With it interpreted, the crash is gone: **20,000 frames (5.5 minutes of gameplay) run clean**, the
+parity check still reports a byte-identical screenshot, and the speed is unaffected in the early
+scenes (4.2x at 600 frames, 3.9x at 1,800). Deeper gameplay settles at 1.8x over 20,000 frames.
 
-**Progress on the crash (2026-11-11, later).**
-
-* Excluding the first suspect, `0x0C22B508` (a function the pointer pass added; in the old build its
-  call fell through to the interpreter), does **not** move the fault: same frame, same cycle.
-* Comparing every guest store between the interpreter and the fast build, the first difference is at
-  a task/exception boundary: both runs have written the same stores, then the interpreter takes the
-  exception while the translated build does two more stores first, and the stack pointer at the
-  exception differs by 0x18-0x38. That is a stack imbalance, matching the crash's "one slot out of
-  step" shape, but it is also the window where the two engines' interrupt delivery already differs
-  by a few cycles, so it is not yet conclusive.
-* The full differential replay of the crashing run is still the direct route: it compares every
-  translated call against the interpreter and will name the first function that disagrees. It is
-  slow at this size (8,940 functions) — hours, not minutes.
-* The translator supports `[functions] exclude = [...]`; that is the knob for bisecting the
-  pointer-added set in ~13 five-minute builds if the replay does not finish first.
+**What is still open.** Whether `fn_0c16cdf4`'s *translation* is wrong or whether hiding it merely
+shifts interrupt timing is not proven. It is called only late in gameplay, so the differential replay
+of that call is expensive; the next measurement is `--replay-only 0x0C16CDF4` over a run that reaches
+it (the replay harness at this size needs a long run, or a checkpoint that does not exist yet). The
+config comment carries the same note; remove the exclusion when this is settled.
 
 Also fixed on the way: MSVC needs `/bigobj` for a 9,000-function generated unit, so
 `cmake/DreamAddGame.cmake` adds it to the game target (patch 011).
+
 
 ## The fault that was fixed (2026-11-10)
 

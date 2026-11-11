@@ -119,10 +119,11 @@ files under `%LOCALAPPDATA%\Temp`, which this environment denies); one of them c
 
 | configuration | guest time | host time | speed |
 |---|---|---|---|
-| translated, headless, 600 frames | 9.84 s | 2.49 s | **3.9x** |
-| translated, headless, 1,800 frames | 29.86 s | 8.03 s | **3.7x** |
+| translated, headless, 600 frames | 9.84 s | 2.30 s | **4.2x** |
+| translated, headless, 1,800 frames | 29.86 s | 7.54 s | **3.9x** |
 | translated, window, 1,800 frames | 29.86 s | 29.9 s | **1.0x** (vsync) |
 | translated, window, 5,000 frames, menu scene | 83.24 s | 83.19 s | **1.0x** |
+| translated, headless, 20,000 frames, gameplay | 333.5 s | 184.9 s | **1.8x** |
 | `--interpret`, headless, 600 frames | 9.84 s | 38 s | 0.26x |
 | `--interpret`, in-game with input, 900 frames | 14.84 s | 67.1 s | 0.22x |
 
