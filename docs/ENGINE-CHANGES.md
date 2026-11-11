@@ -1522,9 +1522,10 @@ interrupted PC not restored, source not acknowledged). Both directions were run.
 
 001 present-mode guard, 002 diagnostics, 003 hook dispatch at the interpreter fetch boundary, 004
 instruction tracer, 005 replay host-state skip, 006 SR-write rule, **007 handler-entry stop address**,
-**008 flash host-state marking**, **009 inlined RAM fast path** (plus the `DREAM_TRACE_UNTRANSLATED`
-diagnostic), delay-slot tracing, cycle-phase alignment, flush-before-call, the post-call poll and the
-pending-aware poll. 007 fixes the fault; 009 and the config seeds are the speed work.
+**008 flash host-state marking**, **009 inlined RAM fast path**, **010 cached readback memory** (plus
+the `DREAM_TRACE_UNTRANSLATED` and `DREAM_TRACE_FRAME_TIME` diagnostics), delay-slot tracing,
+cycle-phase alignment, flush-before-call, the post-call poll and the pending-aware poll. 007 fixes
+the fault; 009, 010 and the config seeds are the speed work.
 
 ## HLE host-state marking completed for flash (2026-11-10)
 
@@ -1602,12 +1603,43 @@ engine tests 6/6, `--replay` still clean except one *alias* disagreement: `fn_0c
 `r0 = 0x0C01214C` translated against `0x8C01214C` interpreted — the known P0/P1 segment alias, not
 a behavioural difference (mask it with `--mask-segment` when comparing writes).
 
-## Windowed cost: the remaining gap to comfortable 1.0x
+## Patch 010: the readback buffer was in write-combined memory (2026-11-11)
 
-Headless the build is 1.2x at 1,800 frames. With a window at scale 1 it is 0.8x (36.6 s for 29.86
-guest seconds), and the cost scales with resolution: the same 600 frames take 9.8 s at scale 1 and
-43.8 s at scale 4 (2560x1920). So the remaining per-frame cost is in the renderer's draw/present
-path, not in emulation. That is the next speed target for a windowed 60 fps.
+Headless the build ran at 1.2x at 1,800 frames; with a window it managed 0.8x, and the gap grew with
+resolution. A new `DREAM_TRACE_FRAME_TIME` diagnostic split a windowed frame:
+
+```
+window: 0.34 ms per draw, 6.71 ms per present (1679 / 1712)
+window: present split: begin 0.01, upload 6.62, draw 0.00, end 0.06 ms
+```
+
+The draw was 0.34 ms; the *present* was 6.71 ms and almost all of it was `Presenter::upload` — a
+`memcpy` of the frame out of `Offscreen::readback_`. That buffer is host-visible, and
+`HostBuffer::ensure` asked only for `HOST_VISIBLE | HOST_COHERENT`, which on this GPU resolves to
+the device-local host-visible heap (the BAR). Reading it from the CPU is write-combined: 1.2 MB at
+roughly 180 MB/s, 6.6 ms.
+
+`HostBuffer::ensure` now takes `cpu_reads`, which asks for `HOST_CACHED` first and falls back to the
+old type. The offscreen readback passes it; the presenter's staging buffer does not (the CPU only
+writes that one, where write-combining is an advantage).
+
+| measurement | before | after |
+|---|---|---|
+| present, 640x480 | 6.71 ms | **0.16 ms** |
+| windowed 1,800 frames | 36.28 s (0.8x) | **29.85 s (1.0x)** |
+| windowed 600 frames at scale 4 | 43.75 s | **9.83 s (1.0x)** |
+| headless 600 frames | 5.09 s | 5.35 s (1.8x) |
+
+Counters unchanged, `tools\parity-check.ps1` still reports a byte-identical screenshot, and the
+headless figure is within noise of the previous build (the cached readback is marginally slower to
+write from the GPU, which is why it is only used where the CPU reads).
+
+## Windowed cost: what remains
+
+Nothing measurable, at native resolution: the window is at 1.0x for 1,800 frames and at 1.0x even at
+4x resolution. The frame is still copied GPU → CPU → GPU to present (the study's "direct present"
+change would remove that), but at 0.16 ms per present it no longer decides the frame rate. What
+remains for heavier scenes is emulation time (translation coverage), not the renderer.
 
 ## Validation against the engine's own tests (2026-11-06)
 

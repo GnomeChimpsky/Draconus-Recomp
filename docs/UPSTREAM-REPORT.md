@@ -6,9 +6,10 @@ Engine: `phobos665/dream-recomp` `main` as of 2026-10-29, MSVC 19.44, Windows x6
 
 Two fixes are offered: **A2** is the one that closed this title's translated-path fault (a handler
 entry must stop at its RTE, not at the interrupted code's PR), and **A** is the earlier hook-dispatch
-fix. **A3** is the RAM fast path from the engine's own performance study, implemented and measured.
-**B** is the `--replay` false positive, now root-caused and fixed. Sections C and D are the
-investigation that led to A2 and are kept as evidence; the fault they describe no longer reproduces.
+fix. **A3** and **A4** are the performance changes — the RAM fast path and the cached readback
+memory — implemented and measured. **B** is the `--replay` false positive, now root-caused and
+fixed. Sections C and D are the investigation that led to A2 and are kept as evidence; the fault
+they describe no longer reproduces.
 
 ---
 
@@ -34,6 +35,32 @@ still clean apart from one known P0/P1 alias register value.
 virtual dispatch on the `Memory` interface — is not attempted here; emitted code still calls through
 the abstract interface, and the compiler may or may not devirtualise it per call site. A follow-up
 that template-binds emitted code to `DcMemory` would likely find more.
+
+---
+
+## A4. Measured: the offscreen readback wants cached host memory
+
+The engine's performance study (§4.4) measured the offscreen round trip as a real windowed cost but
+attributed it to the fence stall. On this title the stall was small; the *copy out* was not.
+
+`HostBuffer::ensure` asked for `HOST_VISIBLE | HOST_COHERENT`. On a discrete NVIDIA GPU that resolves
+to the device-local host-visible heap (BAR memory), which is write-combined: reading a 640x480 frame
+out of it ran at roughly 180 MB/s, **6.6 ms per presented frame** on an RTX 3080, and 73 ms at
+2560x1920. The GPU was idle for none of that; the CPU was simply reading uncached memory.
+
+**Patch.** `HostBuffer::ensure` takes a `cpu_reads` flag that asks for `HOST_CACHED` first and falls
+back to the old type. `Offscreen`'s readback passes it; transfer staging buffers do not.
+
+| measurement | before | after |
+|---|---|---|
+| present, 640x480 | 6.71 ms | **0.16 ms** |
+| windowed 1,800 frames | 36.28 s (0.8x) | **29.85 s (1.0x)** |
+| windowed 600 frames at scale 4 | 43.75 s | **9.83 s (1.0x)** |
+
+Screenshots are unchanged (byte-identical against the interpreter), and the headless figure is
+within noise. The `DREAM_TRACE_FRAME_TIME` diagnostic that split draw from present is part of the
+same patch; without it the cost looked like "the window is slow" rather than "the readback is
+uncached".
 
 ---
 

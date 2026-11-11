@@ -4,8 +4,8 @@ A native Windows x64 static recompilation of **Draconus: Cult of the Wyrm**
 (Dreamcast, 2000, developed by Treyarch and published by Crave Entertainment; USA V1.000,
 `F888` / `T-402`), built on [`dream-recomp`](https://github.com/phobos665/dream-recomp).
 
-The game is playable, and the recompiled path is the fast one: 1.2x real time headless, about 0.8x
-with a window at 1,800 frames. The development interpreter remains as a reference and a bring-up
+The game is playable at real time, and the recompiled path is the fast one: 1.0x with a window and
+1.2x headless at 1,800 frames. The development interpreter remains as a reference and a bring-up
 tool.
 
 The game's SH-4 code is translated ahead of time into C++, and the Dreamcast hardware
@@ -107,10 +107,10 @@ the disc path before starting and says so plainly if the dump is missing or was 
 .\play-draconus.bat --max-frames 600 --rtc-seed 1000000 --screenshot-at 500
 ```
 
-Both paths run the game; the translated one is about five times faster (1.2x real time headless,
-0.8x windowed at 1,800 frames, against the interpreter's 0.25x) and their guest state matches —
-same renders, same controller traffic, byte-identical screenshots. The renderer's per-frame draw
-cost is what keeps the windowed path just under real time; see `docs/12-HANDOVER.md`.
+Both paths run the game; the translated one is about five times faster (1.0x windowed, 1.2x
+headless at 1,800 frames, against the interpreter's 0.25x) and their guest state matches — same
+renders, same controller traffic, byte-identical screenshots. See `docs/12-HANDOVER.md` for the
+remaining work.
 
 Controls: arrows = d-pad, `Z` `X` `A` `S` = A, B, X, Y, Enter = Start, `Q`/`W` = triggers,
 `F1` rebinds, `F10` frame counter, `F12` screenshot, Escape quits.
@@ -141,11 +141,11 @@ gameplay and responds to input — menu navigation and character movement both w
 owner's own disc, deterministically. Translation covers 89.7 % of code bytes (3,285
 functions).
 
-**Speed** went from 0.15x to **1.2x real time headless** at 1,800 frames (0.8x windowed) by seeding
-the fifteen call targets that were taking 99 per cent of the interpreter boundary traffic and
-inlining the RAM fast path in the runtime (`docs/ENGINE-CHANGES.md`). The remaining windowed gap is
-the renderer's per-frame draw cost. Discovery and emission still do not scale to the whole binary,
-so scenes that reach untranslated code will pay for it until that is fixed.
+**Speed** went from 0.15x to **1.0x in a window and 1.2x headless** at 1,800 frames by seeding the
+fifteen call targets that were taking 99 per cent of the interpreter boundary traffic, inlining the
+RAM fast path, and moving the presenter's readback out of write-combined memory
+(`docs/ENGINE-CHANGES.md`). Discovery and emission still do not scale to the whole binary, so scenes
+that reach untranslated code will pay for it until that is fixed.
 
 Audio works in menus and gameplay but not on the title screen, and the title's silence is
 unexplained (`docs/13-M6-AUDIO-BASELINE.md`). Visual comparison against Flycast has started:

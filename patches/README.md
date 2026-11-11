@@ -5,7 +5,7 @@ against that commit, so a fresh clone builds the same engine this project was de
 
 | Patch | What it carries |
 |---|---|
-| `0001-engine-local-changes.patch` | The sum of ledger entries 001–009 in `docs/ENGINE-CHANGES.md`: the diagnostics and instruction tracer, the hook-dispatch fix, the replay host-state skip, the SR-write rule, the exception-handler stop address (the translated-path fault), the flash side-effect marking, and the inlined RAM fast path. |
+| `0001-engine-local-changes.patch` | The sum of ledger entries 001–010 in `docs/ENGINE-CHANGES.md`: the diagnostics and instruction tracer, the hook-dispatch fix, the replay host-state skip, the SR-write rule, the exception-handler stop address (the translated-path fault), the flash side-effect marking, the inlined RAM fast path, and cached host memory for the offscreen readback. Touches `runtime/`, `translator/` and `render/`. |
 
 `setup.ps1` applies each patch after fetching the engine, and is safe to re-run: a tree that
 already has the patch is detected with `git apply --reverse --check` and left alone.
@@ -14,7 +14,7 @@ already has the patch is detected with `git apply --reverse --check` and left al
 
 When the ledger changes, regenerate the file from two trees with the same layout: `a/` a pristine
 engine at the pinned commit, `b/` the working engine, both containing the changed source
-directories (`runtime/`, `translator/`).
+directories (`runtime/`, `translator/`, `render/`).
 
 ```powershell
 # a/ = freshly fetched engine; b/ = the checkout with the changes applied

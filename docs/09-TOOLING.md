@@ -121,25 +121,22 @@ files under `%LOCALAPPDATA%\Temp`, which this environment denies); one of them c
 |---|---|---|---|
 | translated, headless, 600 frames | 9.84 s | 5.09 s | **1.9x** |
 | translated, headless, 1,800 frames | 29.86 s | 23.39 s | **1.2x** |
-| translated, window, 1,800 frames | 29.86 s | 36.62 s | 0.8x |
+| translated, window, 1,800 frames | 29.86 s | 29.85 s | **1.0x** |
+| translated, window, 600 frames at scale 4 | 9.84 s | 9.83 s | **1.0x** |
 | `--interpret`, headless, 600 frames | 9.84 s | 38 s | 0.26x |
 | `--interpret`, in-game with input, 900 frames | 14.84 s | 67.1 s | 0.22x |
 
-**The translated path is the fast path now.** Two things changed on 2026-11-11: the title config
-seeds the fifteen call targets that took 99 per cent of the interpreter boundary traffic (one empty
-`rts` function alone was called ~98,000 times a frame), and `DcMemory`'s RAM accesses are inlined
-ahead of the resolve/journal path. Details in `docs/ENGINE-CHANGES.md`.
+**The translated path is the fast path now.** On 2026-11-11 the title config was seeded with the
+fifteen call targets that took 99 per cent of the interpreter boundary traffic (one empty `rts`
+function alone was called ~98,000 times a frame), `DcMemory`'s RAM accesses were inlined ahead of the
+resolve/journal path, and the offscreen readback was moved to cached host memory — the presenter had
+been reading each frame out of write-combined memory at 6.6 ms a frame. Details in
+`docs/ENGINE-CHANGES.md`; `DREAM_TRACE_FRAME_TIME` is the diagnostic that found the last one.
 
-`play-draconus.bat` now defaults to the translated path; `-Interpret` selects the development
+`play-draconus.bat` defaults to the translated path; `-Interpret` selects the development
 interpreter, which is kept as the reference and the bring-up tool (about 0.25x).
-
-With a window the build is at 0.8x at 1,800 frames: the remaining cost is the renderer's per-frame
-draw/present path, and it scales with resolution (the same 600 frames take 9.8 s at scale 1 and
-43.8 s at scale 4). Present mode itself is not the cost (vsync 19.4 s vs immediate 18.9 s on the old
-interpreter measurement).
 
 The levers in order of payoff:
 
-1. The renderer's per-frame cost — the only thing between 1.2x headless and 60 fps windowed.
-2. More translation coverage (M2 discovery/emission) for scenes the seed set does not reach.
-3. Reduce the guest workload (not possible without changing the game).
+1. Translation coverage (M2 discovery/emission) — the only one left that matters for heavier scenes.
+2. Reduce the guest workload (not possible without changing the game).

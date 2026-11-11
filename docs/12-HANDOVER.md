@@ -17,7 +17,7 @@ this is measured against. This file is the pick-up point.
 | Instruction tracing | `DREAM_TRACE_INSNS=lo:hi:FILE` | filtered by range, cycle window and in-range index |
 | Function differential | `--replay` (+ replay build) | 2,448,650 calls compared, **0 disagreements** (one P0/P1 alias in a newly seeded function) |
 | Windowed parity | `tools\parity-check.ps1` | window renders; input recording and screenshot byte-identical to the interpreter |
-| Speed | translated path, headless | **1.2x** at 1,800 frames (0.8x windowed); interpreter is 0.26x |
+| Speed | translated path | **1.0x windowed and 1.2x headless** at 1,800 frames; interpreter is 0.26x |
 | Fresh clone | `setup.ps1 -SkipBuild`, `import-disc`, `setup.ps1` | engine patched, dump extracted, built, **600 frames clean** |
 | Engine test suite | `ctest` in `engine/build-test` | 6/6 (76 runtime cases incl. the new regression) |
 
@@ -33,10 +33,12 @@ traffic, and inlining the RAM fast path in `DcMemory` removed most of the rest:
 | translated, before | 0.15x | — |
 | translated, seeded | 1.5x | 1.04x |
 | translated, seeded + RAM fast path | **1.9x** | **1.2x** |
+| translated, windowed at scale 1 | 1.8x | **1.0x** |
 
-Windowed at scale 1 the same 1,800 frames run at 0.8x (36.6 s for 29.86 guest seconds): the
-remaining per-frame cost is in the renderer's draw/present path, which scales with resolution
-(600 frames: 9.8 s at scale 1, 43.8 s at scale 4). That is the next speed target.
+With a window the same 1,800 frames run at **1.0x** (29.85 s for 29.86 guest seconds), and at 4x
+resolution too. The presenter had been reading the frame back out of write-combined memory at
+6.6 ms a frame; cached host memory removed it (patch 010), and `DREAM_TRACE_FRAME_TIME` is the
+diagnostic that found it.
 
 **Two cautions.** Do not seed `0x8C233648` (the relocated exception handler's body): translated, its
 `rte` no longer unwinds through `enter_exception` and the run faults at pc 0 at frame 22. And the
@@ -123,6 +125,7 @@ path the translated path is fast enough to judge now (1.2x headless, 0.8x window
 | 007 | **Exception-handler entry stops at the RTE, not at the interrupted code's PR** | **yes — fixes the 54-frame fault** |
 | 008 | Flash `FLASHROM_WRITE`/`FLASHROM_DELETE` mark a replay host-state side effect | yes |
 | 009 | **RAM loads/stores inlined ahead of the resolve/journal path** (+ `DREAM_TRACE_UNTRANSLATED`) | **yes — 1.5x → 1.9x** |
+| 010 | **Cached host memory for the offscreen readback** (+ `DREAM_TRACE_FRAME_TIME`) | **yes — windowed 0.8x → 1.0x** |
 
 Build trees: `engine/build-render` (playable, Vulkan + SDL3), `engine/build-replay`
 (`--replay-hooks`), `engine/build-test` (tests). Build them from a Developer Command Prompt (or call
@@ -134,15 +137,13 @@ The engine changes are in `patches/0001-engine-local-changes.patch`; `setup.ps1`
 
 Order is by value per unit of risk, not by size:
 
-1. **Windowed render cost.** Headless the build is 1.2x at 1,800 frames, windowed 0.8x, and the gap
-   scales with resolution (scale 1: 9.8 s per 600 frames, scale 4: 43.8 s). A 60 fps window needs
-   about 25 per cent off the renderer's per-frame draw/present path, which is now the dominant cost.
-2. **Human play-through.** With the speed fixed, judge feel — movie sync, menu responsiveness, input
-   latency — on the translated path with a window.
-3. **Translation coverage.** Still the long-term lever for heavier scenes: the full-set
-   discovery/emission blocker in `docs/11-M2-RESULTS.md` (the seeds cover what 300 frames reached,
-   not what later gameplay will).
-4. **M3 visual parity and M6 audio.** Flycast is installed and boots the disc; driving it and
+1. **Human play-through.** The build is at real time in a window; judge feel — movie sync, menu
+   responsiveness, input latency — and note anything that only shows up in play.
+2. **Translation coverage.** Still the long-term lever for heavier scenes: the full-set
+   discovery/emission blocker in `docs/11-M2-RESULTS.md` (the seeds cover what the first 300 frames
+   reached, not what later gameplay will). `DREAM_TRACE_UNTRANSLATED` names what a new scene is
+   missing.
+3. **M3 visual parity and M6 audio.** Flycast is installed and boots the disc; driving it and
    capturing is in `docs/14-M3-M6-FLYCAST-REFERENCE.md`. Audio still reaches a WAV file rather than
    the speakers, and the title screen is silent (`docs/13-M6-AUDIO-BASELINE.md`).
 
