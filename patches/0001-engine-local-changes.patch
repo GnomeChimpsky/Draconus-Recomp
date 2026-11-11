@@ -1,3 +1,20 @@
+diff --git a/cmake/DreamAddGame.cmake b/cmake/DreamAddGame.cmake
+index 0b18bd2..57da442 100644
+--- a/cmake/DreamAddGame.cmake
++++ b/cmake/DreamAddGame.cmake
+@@ -95,6 +95,12 @@ function(dream_add_game id)
+ 
+   add_executable(${id}_boot ${DREAM_ROOT}/runtime/boot/boot_main.cpp ${_units})
+   target_link_libraries(${id}_boot PRIVATE dream::runtime dream::translator)
++  # A title translated with discovery closed is one enormous generated unit: 9,000 functions is more
++  # than MSVC's default object-file section limit, and a --replay-hooks build crosses it even
++  # sooner. /bigobj is the documented answer and costs nothing at run time.
++  if(MSVC)
++    target_compile_options(${id}_boot PRIVATE /bigobj)
++  endif()
+   # --window needs the Vulkan backend, which is optional (render/CMakeLists.txt returns early when
+   # Vulkan, SDL3 or glslc are missing). Without it the launcher still builds and runs headless, and
+   # --window says this build has no renderer rather than doing nothing.
 diff --git a/render/include/dream/render/vk/resources.h b/render/include/dream/render/vk/resources.h
 index eaee9e3..3476772 100644
 --- a/render/include/dream/render/vk/resources.h

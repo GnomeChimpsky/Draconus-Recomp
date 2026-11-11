@@ -78,6 +78,25 @@ Next: localise with the replay harness rebuilt from this config over the crashin
 leaving pointer-origin functions out of the translation set. Until it is fixed, `-Interpret` is the
 stable path (0.25x), and reverting `pointers = false` gives back the stable 1.2x build.
 
+**Progress on the crash (2026-11-11, later).**
+
+* Excluding the first suspect, `0x0C22B508` (a function the pointer pass added; in the old build its
+  call fell through to the interpreter), does **not** move the fault: same frame, same cycle.
+* Comparing every guest store between the interpreter and the fast build, the first difference is at
+  a task/exception boundary: both runs have written the same stores, then the interpreter takes the
+  exception while the translated build does two more stores first, and the stack pointer at the
+  exception differs by 0x18-0x38. That is a stack imbalance, matching the crash's "one slot out of
+  step" shape, but it is also the window where the two engines' interrupt delivery already differs
+  by a few cycles, so it is not yet conclusive.
+* The full differential replay of the crashing run is still the direct route: it compares every
+  translated call against the interpreter and will name the first function that disagrees. It is
+  slow at this size (8,940 functions) — hours, not minutes.
+* The translator supports `[functions] exclude = [...]`; that is the knob for bisecting the
+  pointer-added set in ~13 five-minute builds if the replay does not finish first.
+
+Also fixed on the way: MSVC needs `/bigobj` for a 9,000-function generated unit, so
+`cmake/DreamAddGame.cmake` adds it to the game target (patch 011).
+
 ## The fault that was fixed (2026-11-10)
 
 The translated path used to stop at frame 54 with `unmapped read 0x60000040`. The cause was

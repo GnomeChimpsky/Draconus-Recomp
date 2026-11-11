@@ -1522,7 +1522,7 @@ interrupted PC not restored, source not acknowledged). Both directions were run.
 
 001 present-mode guard, 002 diagnostics, 003 hook dispatch at the interpreter fetch boundary, 004
 instruction tracer, 005 replay host-state skip, 006 SR-write rule, **007 handler-entry stop address**,
-**008 flash host-state marking**, **009 inlined RAM fast path**, **010 cached readback memory** (plus
+**008 flash host-state marking**, **009 inlined RAM fast path**, **010 cached readback memory**, **011 `/bigobj` for large generated units** (plus
 the `DREAM_TRACE_UNTRANSLATED` and `DREAM_TRACE_FRAME_TIME` diagnostics), delay-slot tracing,
 cycle-phase alignment, flush-before-call, the post-call poll and the pending-aware poll. 007 fixes
 the fault; 009, 010 and the config seeds are the speed work.
