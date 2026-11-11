@@ -25,11 +25,17 @@ entry = 0x8C010000
 #   + aggressive sweep  >15 min, no completion (superlinear on this title)
 # Full-set `emit` then took >300 s and produced no output file, while a 500-function
 # subset emits in 0.2 s -- so emission is the current blocking defect, not discovery.
-# For M2 bring-up we translate the entry stub only and let the development
-# interpreter run the rest (ADR 2), then seed from --suggest-config.
 pointers = false
 sweep = false
-extra = []
+# Seeds taken from --suggest-config, hottest first. They are the call targets a 300-frame run
+# reached that discovery had not found (2026-11-11). Without them the translated build crossed
+# into the development interpreter 29.7 million times in 300 frames and ran at 0.15x; with them
+# the boundaries drop to a few hundred calls a frame and the build runs at 1.2x (headless,
+# 1,800 frames). 0x0C240710 alone -- an empty function (`rts`) called ~98,000 times a frame --
+# was 99% of that boundary traffic.
+# Do not add 0x0C233648: it is the body of the relocated exception handler, and translating it
+# breaks the RTE unwinding (the run faults at pc 0 at frame 22).
+extra = [0x0C240710, 0x0C22BA92, 0x0C22BB58, 0x0C011B20, 0x0C011CC0, 0x0C1AEF4C, 0x0C15F6B4, 0x0C011E64, 0x0C22B9A4, 0x0C04F3C0, 0x0C0121D4, 0x0C0E4B8C, 0x0C0E4908, 0x0C1A8AD8]
 
 [[relocations]]
 # Detected by --suggest-config: the game copies 56 bytes from the image to the

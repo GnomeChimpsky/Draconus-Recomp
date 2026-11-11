@@ -1522,9 +1522,9 @@ interrupted PC not restored, source not acknowledged). Both directions were run.
 
 001 present-mode guard, 002 diagnostics, 003 hook dispatch at the interpreter fetch boundary, 004
 instruction tracer, 005 replay host-state skip, 006 SR-write rule, **007 handler-entry stop address**,
-**008 flash host-state marking**, plus delay-slot tracing, cycle-phase alignment, flush-before-call,
-the post-call poll and the pending-aware poll. 007 is the one that fixes the fault and is worth
-offering upstream.
+**008 flash host-state marking**, **009 inlined RAM fast path** (plus the `DREAM_TRACE_UNTRANSLATED`
+diagnostic), delay-slot tracing, cycle-phase alignment, flush-before-call, the post-call poll and the
+pending-aware poll. 007 fixes the fault; 009 and the config seeds are the speed work.
 
 ## HLE host-state marking completed for flash (2026-11-10)
 
@@ -1540,6 +1540,74 @@ no flash writes in 120 frames, and `--replay` stays at 0 disagreements with the 
 devices, and any comparison that touches a device register is already abandoned
 (`journal_saw_device`), so the old handover's "timers, RNG and Maple still change host state" was
 narrower than it read.
+
+## The 99% boundary: an empty function called 98,000 times a frame (2026-11-11)
+
+The translated path was 0.15x, slower than the interpreter's 0.26x. A 300-frame run reported
+**29,705,083 untranslated call targets**, and a new diagnostic (`DREAM_TRACE_UNTRANSLATED`) showed
+where they went:
+
+```
+untranslated top targets (159 distinct):
+  0x8c240710  29454325 calls
+  0x8c22ba92  200458 calls
+  0x8c233648  13701 calls
+  ...
+```
+
+`0x0C240710` is two instructions, `rts` / `nop` — an empty function. The game calls it about
+**98,000 times per frame** (5.9 million per guest second, the same rate the engine's Crazy Taxi
+study measured for indirect calls generally), and every call crossed from emitted code into
+`devinterp::run` and back. That one function was 99.2 per cent of the boundary traffic.
+
+Seeding it in the config (`[functions] extra`) removed essentially all of it:
+
+| build | 600 frames, host | speed | untranslated calls |
+|---|---|---|---|
+| translated, before | 66.76 s | 0.15x | 29.7 M per 300 frames |
+| + seed `0x0C240710` | 7.12 s | **1.3x** | 308 k per 600 frames |
+| + 13 more hot seeds | 6.48 s | **1.5x** | — |
+
+The remaining hot entries after that were *resume* addresses inside already-translated functions
+(handled by `resume_at`, not full interpreter runs), plus the handler body at `0x8C233648`.
+
+**Do not seed `0x8C233648`.** It is the body of the relocated exception handler. Translated, its
+`rte` no longer unwinds through `enter_exception`'s interpreter run, and the run faults at pc 0 at
+frame 22. It stays interpreted (the 20-instruction stub at `0x8C000600` remains translated).
+
+The seed list is in `game/draconus/draconus.toml` with the reasoning; it is the output of
+`--suggest-config` plus the diagnostic above.
+
+## Patch 009: the RAM fast path, inlined (2026-11-11)
+
+The engine's own study (`engine/docs/cpu-performance-study.md`) measured the out-of-line memory
+resolve at 56 per cent of a fully translated profile. `DcMemory::read*/write*` were virtual calls
+into a non-inlined `resolve()` that re-derived the address region on every access.
+
+The eight accessors are now inline in `dc_memory.h`: an area-3 test, a mask and a memcpy for main
+RAM, with the existing out-of-line bodies kept as `*_slow` for everything else (devices, store
+queues, CCN registers, the replay journal, the write hash, the watch). The fast path is skipped
+whenever `journaling` or `tracing_writes()` is armed, so the differential harness and `--write-hash`
+see every store they did before.
+
+Measured, same config and seed:
+
+| frames | before | after | speed |
+|---|---|---|---|
+| 600 | 6.48 s | 5.09 s | 1.5x → **1.9x** |
+| 1,800 | 28.72 s | 23.39 s | 1.04x → **1.2x** |
+
+Counters unchanged at both lengths (34,022 TA chunks / 504 swaps at 600; 704,111 / 1,680 at 1,800),
+engine tests 6/6, `--replay` still clean except one *alias* disagreement: `fn_0c011e64` returns
+`r0 = 0x0C01214C` translated against `0x8C01214C` interpreted — the known P0/P1 segment alias, not
+a behavioural difference (mask it with `--mask-segment` when comparing writes).
+
+## Windowed cost: the remaining gap to comfortable 1.0x
+
+Headless the build is 1.2x at 1,800 frames. With a window at scale 1 it is 0.8x (36.6 s for 29.86
+guest seconds), and the cost scales with resolution: the same 600 frames take 9.8 s at scale 1 and
+43.8 s at scale 4 (2560x1920). So the remaining per-frame cost is in the renderer's draw/present
+path, not in emulation. That is the next speed target for a windowed 60 fps.
 
 ## Validation against the engine's own tests (2026-11-06)
 

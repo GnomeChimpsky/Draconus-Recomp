@@ -82,7 +82,7 @@ class Launcher(tk.Tk):
         self.minsize(640, 380)
         self.image = tk.StringVar(value=self._initial_image())
         self.scale = tk.IntVar(value=1)
-        self.translated = tk.BooleanVar(value=False)
+        self.translated = tk.BooleanVar(value=True)
         self.status = tk.StringVar(value="Pick a .gdi dump, or use the one already configured.")
         self._build()
 
@@ -107,9 +107,9 @@ class Launcher(tk.Tk):
         box.grid(row=1, column=0, columnspan=4, sticky="ew", **pad)
         ttk.Label(box, text="Window scale").pack(side="left")
         ttk.Spinbox(box, from_=1, to=4, width=3, textvariable=self.scale).pack(side="left", padx=6)
-        ttk.Radiobutton(box, text="Interpreter (faster today)", variable=self.translated,
+        ttk.Radiobutton(box, text="Interpreter (reference)", variable=self.translated,
                         value=False).pack(side="left", padx=8)
-        ttk.Radiobutton(box, text="Translated (slower, correct)", variable=self.translated,
+        ttk.Radiobutton(box, text="Translated (fast)", variable=self.translated,
                         value=True).pack(side="left")
 
         ttk.Button(frm, text="Play", command=self.play).grid(row=2, column=0, columnspan=4,
@@ -153,9 +153,9 @@ class Launcher(tk.Tk):
             messagebox.showerror("Launch", str(exc))
             return
         self.status.set(
-            "Running.\n" + ("Translated path: correct but slower until more of the game is "
-                            "translated (docs/ENGINE-CHANGES.md)." if self.translated.get() else
-                            "Interpreter path: the faster configuration today."))
+            "Running.\n" + ("Translated path: the fast configuration (docs/ENGINE-CHANGES.md)."
+                            if self.translated.get() else
+                            "Interpreter path: slower, kept as the reference."))
 
 
 def selftest() -> int:

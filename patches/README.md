@@ -5,7 +5,7 @@ against that commit, so a fresh clone builds the same engine this project was de
 
 | Patch | What it carries |
 |---|---|
-| `0001-engine-local-changes.patch` | The sum of ledger entries 001–008 in `docs/ENGINE-CHANGES.md`: the diagnostics and instruction tracer, the hook-dispatch fix, the replay host-state skip, the SR-write rule, the exception-handler stop address (the translated-path fault), and the flash side-effect marking. |
+| `0001-engine-local-changes.patch` | The sum of ledger entries 001–009 in `docs/ENGINE-CHANGES.md`: the diagnostics and instruction tracer, the hook-dispatch fix, the replay host-state skip, the SR-write rule, the exception-handler stop address (the translated-path fault), the flash side-effect marking, and the inlined RAM fast path. |
 
 `setup.ps1` applies each patch after fetching the engine, and is safe to re-run: a tree that
 already has the patch is detected with `git apply --reverse --check` and left alone.

@@ -6,8 +6,34 @@ Engine: `phobos665/dream-recomp` `main` as of 2026-10-29, MSVC 19.44, Windows x6
 
 Two fixes are offered: **A2** is the one that closed this title's translated-path fault (a handler
 entry must stop at its RTE, not at the interrupted code's PR), and **A** is the earlier hook-dispatch
-fix. **B** is the `--replay` false positive, now root-caused and fixed. Sections C and D are the
+fix. **A3** is the RAM fast path from the engine's own performance study, implemented and measured.
+**B** is the `--replay` false positive, now root-caused and fixed. Sections C and D are the
 investigation that led to A2 and are kept as evidence; the fault they describe no longer reproduces.
+
+---
+
+## A3. Measured: the RAM fast path from `docs/cpu-performance-study.md`
+
+The study proposed inlining a mask-and-index fast path for main RAM ahead of `DcMemory::resolve()`
+and measured 3.5x -> 5.8x on Crazy Taxi. This is that change, taken as far as the current accessor
+interface allows, with the project's validation.
+
+**Patch.** The eight `DcMemory` accessors are inline in `dc_memory.h`: an area-3 test
+(`(a & 0x1C000000) == 0x0C000000`), a mask and a memcpy. The previous bodies remain as `*_slow` for
+everything else — device dispatch, store queues, CCN registers, the replay journal, the write hash
+and the write watch. The fast path is skipped whenever `journaling || tracing_writes()`, so the
+differential harness and `--write-hash` see every store exactly as before; that is the one
+correctness rule the change must not break, and it is covered by the existing replay runs.
+
+**Measured on Draconus (Windows x64, MSVC 19.44, RTX 3080 host):** 600 frames 6.48 s -> 5.09 s
+(1.5x -> 1.9x), 1,800 frames 28.72 s -> 23.39 s (1.04x -> 1.2x). Guest counters unchanged in both
+(length-for-length TA chunks, list inits, renders, swaps, interrupts); engine tests 6/6; `--replay`
+still clean apart from one known P0/P1 alias register value.
+
+**Caveat.** This reproduces the *inline* half of the study's finding. The other half — removing the
+virtual dispatch on the `Memory` interface — is not attempted here; emitted code still calls through
+the abstract interface, and the compiler may or may not devirtualise it per call site. A follow-up
+that template-binds emitted code to `DcMemory` would likely find more.
 
 ---
 

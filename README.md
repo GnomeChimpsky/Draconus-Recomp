@@ -4,9 +4,9 @@ A native Windows x64 static recompilation of **Draconus: Cult of the Wyrm**
 (Dreamcast, 2000, developed by Treyarch and published by Crave Entertainment; USA V1.000,
 `F888` / `T-402`), built on [`dream-recomp`](https://github.com/phobos665/dream-recomp).
 
-The game is playable: movies, menus, gameplay and input all work. Both execution paths now run the
-game correctly; the interpreter is quicker today because more of the binary is still intercepted by
-it, and closing that gap is a translation-coverage task.
+The game is playable, and the recompiled path is the fast one: 1.2x real time headless, about 0.8x
+with a window at 1,800 frames. The development interpreter remains as a reference and a bring-up
+tool.
 
 The game's SH-4 code is translated ahead of time into C++, and the Dreamcast hardware
 (file system, controllers, video, sound, memory card) is replaced by native code. The
@@ -97,22 +97,20 @@ it. The dump stays where it is; nothing is copied.
 .\play-draconus.bat
 ```
 
-That launches the recompiled build with a window, using the development interpreter for
-game logic. It verifies the disc path before starting and says so plainly if the dump is
-missing or was never imported.
+That launches the recompiled build with a window, running the machine-translated code. It verifies
+the disc path before starting and says so plainly if the dump is missing or was never imported.
 
 ```powershell
-.\play-draconus.bat                              # window, interpreter path
+.\play-draconus.bat                              # window, translated path
 .\play-draconus.bat -Scale 2                     # 1280x960
-.\play-draconus.bat -Translated                  # machine-translated path
+.\play-draconus.bat -Interpret                   # the development interpreter, for comparison
 .\play-draconus.bat --max-frames 600 --rtc-seed 1000000 --screenshot-at 500
 ```
 
-Both paths run the game. The interpreter is the default because it is faster today (about 0.25x
-real time against the translated path's 0.15x): most calls still fall through to the development
-interpreter, and the translated build pays an interpreter entry per call. The translated path is
-the one to develop — it is correct (600 and 1,800 frames deterministic, counters identical to the
-interpreter) and it gets faster as translation coverage grows.
+Both paths run the game; the translated one is about five times faster (1.2x real time headless,
+0.8x windowed at 1,800 frames, against the interpreter's 0.25x) and their guest state matches —
+same renders, same controller traffic, byte-identical screenshots. The renderer's per-frame draw
+cost is what keeps the windowed path just under real time; see `docs/12-HANDOVER.md`.
 
 Controls: arrows = d-pad, `Z` `X` `A` `S` = A, B, X, Y, Enter = Start, `Q`/`W` = triggers,
 `F1` rebinds, `F10` frame counter, `F12` screenshot, Escape quits.
@@ -143,11 +141,11 @@ gameplay and responds to input — menu navigation and character movement both w
 owner's own disc, deterministically. Translation covers 89.7 % of code bytes (3,285
 functions).
 
-**Speed** is the open problem: the launcher defaults to the development interpreter, which runs at
-about 0.25x real time (~15 fps at 60 Hz, `docs/09-TOOLING.md`). The machine-translated path used to
-stop at frame 54 and now runs clean — 1,800 frames, 0 task switches, counters identical to the
-interpreter — but it is slower in this configuration (0.15x) because most calls still go through the
-interpreter. Making it fast is a translation-coverage task, not a runtime one.
+**Speed** went from 0.15x to **1.2x real time headless** at 1,800 frames (0.8x windowed) by seeding
+the fifteen call targets that were taking 99 per cent of the interpreter boundary traffic and
+inlining the RAM fast path in the runtime (`docs/ENGINE-CHANGES.md`). The remaining windowed gap is
+the renderer's per-frame draw cost. Discovery and emission still do not scale to the whole binary,
+so scenes that reach untranslated code will pay for it until that is fixed.
 
 Audio works in menus and gameplay but not on the title screen, and the title's silence is
 unexplained (`docs/13-M6-AUDIO-BASELINE.md`). Visual comparison against Flycast has started:
@@ -155,9 +153,9 @@ the title screen matches apart from VMU state and aspect (`docs/14-M3-M6-FLYCAST
 
 The engine fixes developed here are listed in `docs/UPSTREAM-REPORT.md`: hook dispatch at the
 interpreter's fetch boundary, an instruction-level tracer, a `--replay` false-positive fix that
-lets the differential harness report **0 disagreements** (2.45 million calls over 120 frames), and
-the handler-entry stop-address fix that closed the translated-path fault. The full chain and the
-dead ends are in `docs/ENGINE-CHANGES.md`.
+lets the differential harness report **0 disagreements** (2.45 million calls over 120 frames), the
+handler-entry stop-address fix that closed the translated-path fault, and the inlined RAM fast
+path. The full chain and the dead ends are in `docs/ENGINE-CHANGES.md`.
 
 The earlier retail boot failure was a bug in this project's own multi-sector disc reader,
 fixed and regression-tested. See `docs/11-M2-RESULTS.md`.

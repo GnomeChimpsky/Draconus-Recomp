@@ -15,16 +15,34 @@ this is measured against. This file is the pick-up point.
 | Determinism check | `--rtc-seed 1000000` twice | identical cycles, GD-ROM sectors, TA chunks |
 | Translated vs interpreted parity | same 600-frame run | identical PVR/Maple counters; 41 cycles apart in 1.97 billion |
 | Instruction tracing | `DREAM_TRACE_INSNS=lo:hi:FILE` | filtered by range, cycle window and in-range index |
-| Function differential | `--replay` (+ replay build) | 2,448,650 calls compared, **0 disagreements** |
+| Function differential | `--replay` (+ replay build) | 2,448,650 calls compared, **0 disagreements** (one P0/P1 alias in a newly seeded function) |
 | Windowed parity | `tools\parity-check.ps1` | window renders; input recording and screenshot byte-identical to the interpreter |
+| Speed | translated path, headless | **1.2x** at 1,800 frames (0.8x windowed); interpreter is 0.26x |
 | Fresh clone | `setup.ps1 -SkipBuild`, `import-disc`, `setup.ps1` | engine patched, dump extracted, built, **600 frames clean** |
 | Engine test suite | `ctest` in `engine/build-test` | 6/6 (76 runtime cases incl. the new regression) |
 
-The translated path stops being a curiosity and becomes the build to develop: it is now correct, but
-in this configuration it is **slower** than the interpreter (600 frames in 68 s against 38 s). Most of
-the title is still intercepted by the development interpreter, and the translated build pays a
-`devinterp::run` for every call it cannot make natively. Translation coverage, not the runtime, is the
-next speed lever.
+**The translated path is now the fast one (2026-11-11).** It had been 0.15x — slower than the
+interpreter — because 29.7 million calls per 300 frames crossed into the development interpreter,
+99 per cent of them to `0x0C240710`, an empty function called ~98,000 times a frame. Seeding the
+fifteen hot targets from `--suggest-config` (plus the diagnostic that names them) removed that
+traffic, and inlining the RAM fast path in `DcMemory` removed most of the rest:
+
+| configuration | 600 frames | 1,800 frames |
+|---|---|---|
+| interpreter | 0.26x | 0.22-0.26x |
+| translated, before | 0.15x | — |
+| translated, seeded | 1.5x | 1.04x |
+| translated, seeded + RAM fast path | **1.9x** | **1.2x** |
+
+Windowed at scale 1 the same 1,800 frames run at 0.8x (36.6 s for 29.86 guest seconds): the
+remaining per-frame cost is in the renderer's draw/present path, which scales with resolution
+(600 frames: 9.8 s at scale 1, 43.8 s at scale 4). That is the next speed target.
+
+**Two cautions.** Do not seed `0x8C233648` (the relocated exception handler's body): translated, its
+`rte` no longer unwinds through `enter_exception` and the run faults at pc 0 at frame 22. And the
+`--replay` harness now reports one disagreement in the newly seeded `fn_0c011e64` — `r0 = 0x0C01214C`
+translated against `0x8C01214C` interpreted, the known P0/P1 segment alias, not a behavioural
+difference.
 
 ## The fault that was fixed (2026-11-10)
 
@@ -50,7 +68,8 @@ misclassified; there are 0 now), the emitter/cycle-accounting suspects, and the 
 `DREAM_HANDLER_INTERP`. It also means the interpreter path's "0 task switches" was never a fidelity
 gap of this title — it was the correct schedule.
 
-**What it does not fix:** speed. The translated build is still mostly interpreter. See below.
+**What it does not fix:** the previous slowness — that took the config seeds and the RAM fast path
+(patch 009), described above.
 
 ## Windowed session parity (2026-11-10)
 
@@ -86,12 +105,12 @@ Two method findings, recorded so they are not re-discovered:
   sequence is identical. The first 1.1 million writes — frames 0 to 4 — are identical field by
   field; the per-frame hash differences are boundary shifts, not state differences.
 
-Not covered: feel. The check cannot judge pacing or responsiveness, and the translated path runs at
-0.15x, so a human session is still worth doing with that expectation.
+Not covered: feel. The check cannot judge pacing or responsiveness; with the seeds and the RAM fast
+path the translated path is fast enough to judge now (1.2x headless, 0.8x windowed at 1,800 frames).
 
 ## Engine state (local, not committed)
 
-`engine/` is fetched by `setup.ps1` and carries eight local changes, all validated:
+`engine/` is fetched by `setup.ps1` and carries nine local changes, all validated:
 
 | # | What | Upstream? |
 |---|---|---|
@@ -103,23 +122,27 @@ Not covered: feel. The check cannot judge pacing or responsiveness, and the tran
 | 006 | SR-write rule | maybe |
 | 007 | **Exception-handler entry stops at the RTE, not at the interrupted code's PR** | **yes — fixes the 54-frame fault** |
 | 008 | Flash `FLASHROM_WRITE`/`FLASHROM_DELETE` mark a replay host-state side effect | yes |
+| 009 | **RAM loads/stores inlined ahead of the resolve/journal path** (+ `DREAM_TRACE_UNTRANSLATED`) | **yes — 1.5x → 1.9x** |
 
 Build trees: `engine/build-render` (playable, Vulkan + SDL3), `engine/build-replay`
 (`--replay-hooks`), `engine/build-test` (tests). Build them from a Developer Command Prompt (or call
 `vcvars64.bat` first) — `cl` needs the MSVC include paths.
 
+The engine changes are in `patches/0001-engine-local-changes.patch`; `setup.ps1` applies them.
+
 ## Next phase
 
 Order is by value per unit of risk, not by size:
 
-1. **Human play-through of the translated path.** `tools\parity-check.ps1` proves the window,
-   scripted input and the rendered frames match the interpreter; what it cannot judge is feel —
-   pacing, menu responsiveness, movie sync. Run `-Translated` with a window and go through the intro
-   and into gameplay, expecting slow motion (0.15x).
-2. **Translation coverage (the speed lever).** The full-set discovery/emission blocker in
-   `docs/11-M2-RESULTS.md` is now the only thing between this build and a usable frame rate. The
-   translated path is correct and slow; making it fast is a translation problem.
-3. **M3 visual parity and M6 audio.** Flycast is installed and boots the disc; driving it and
+1. **Windowed render cost.** Headless the build is 1.2x at 1,800 frames, windowed 0.8x, and the gap
+   scales with resolution (scale 1: 9.8 s per 600 frames, scale 4: 43.8 s). A 60 fps window needs
+   about 25 per cent off the renderer's per-frame draw/present path, which is now the dominant cost.
+2. **Human play-through.** With the speed fixed, judge feel — movie sync, menu responsiveness, input
+   latency — on the translated path with a window.
+3. **Translation coverage.** Still the long-term lever for heavier scenes: the full-set
+   discovery/emission blocker in `docs/11-M2-RESULTS.md` (the seeds cover what 300 frames reached,
+   not what later gameplay will).
+4. **M3 visual parity and M6 audio.** Flycast is installed and boots the disc; driving it and
    capturing is in `docs/14-M3-M6-FLYCAST-REFERENCE.md`. Audio still reaches a WAV file rather than
    the speakers, and the title screen is silent (`docs/13-M6-AUDIO-BASELINE.md`).
 

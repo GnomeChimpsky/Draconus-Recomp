@@ -54,14 +54,18 @@ translated path runs 600 and 1,800 frames deterministically, with PVR/Maple coun
 the interpreter's (41 cycles apart in 1.97 billion over 600 frames), and `--replay` still reports 0
 disagreements.
 
-**Still open for M2's speed goal:** full-set discovery and emission (`emit` over the whole set did
-not complete; a 500-function subset emits in 0.2 s). The translated path is correct but slower than
-the interpreter in the current configuration because most calls still fall through to it. That is
-the remaining M2 work, and the next lever for frame rate.
+**Speed: met for the measured scenes (2026-11-11).** Seeding the fifteen call targets that took
+99 per cent of the interpreter boundary traffic, plus an inlined RAM fast path in the runtime, took
+the translated path from 0.15x to **1.2x real time headless** at 1,800 frames (0.8x windowed). The
+windowed gap is the renderer's per-frame cost, not emulation.
 
-**Next:** close emission over the full discovery set, then re-measure the translated path's speed.
-The instruction-level differential tracer built during the investigation stays as the tool for any
-new divergence; it is described in `docs/UPSTREAM-REPORT.md`.
+**Still open for M2's goal:** full-set discovery and emission (`emit` over the whole set did not
+complete; a 500-function subset emits in 0.2 s). The seeds cover what the first 300 frames reached,
+not later gameplay, so the long-term speed lever is still emission over the full set.
+
+**Next:** close emission over the full discovery set, then re-measure; and cut the windowed
+renderer cost. The instruction-level differential tracer built during the investigation stays as
+the tool for any new divergence; it is described in `docs/UPSTREAM-REPORT.md`.
 
 ### M2b — boot-state analysis
 

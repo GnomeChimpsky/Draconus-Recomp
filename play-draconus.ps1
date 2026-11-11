@@ -1,15 +1,15 @@
 # Launch Draconus from the recompiled build.
 #
-#   .\play-draconus.ps1                    # window, interpreter path (faster today)
+#   .\play-draconus.ps1                    # window, translated path (fastest)
 #   .\play-draconus.ps1 -Scale 2           # 1280x960 window
-#   .\play-draconus.ps1 -Translated        # machine-translated path (correct, slower today)
+#   .\play-draconus.ps1 -Interpret         # the development interpreter, for comparison
 #   .\play-draconus.ps1 --max-frames 600   # extra args pass straight through
 #
-# Both paths run the game (docs/ENGINE-CHANGES.md, patch 007). The interpreter is the default
-# because it is about 0.25x real time against the translated path's 0.15x: most calls still fall
-# through to it, and the translated build pays an interpreter entry per call. Closing that gap is
-# a translation-coverage task.
+# Both paths run the game (docs/ENGINE-CHANGES.md). The translated path is the default because it
+# is the faster one (1.2x real time headless, about 0.8x windowed at 1,800 frames, against the
+# interpreter's 0.25x) and the two agree frame for frame (tools\parity-check.ps1).
 param(
+    [switch]$Interpret,
     [switch]$Translated,
     [ValidateRange(1, 4)][int]$Scale = 1,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$Extra
@@ -48,14 +48,14 @@ if ((Test-Path $sdl) -and -not (Test-Path $dll)) {
 
 $arguments = @("--config", $cfg, "--window")
 if ($Scale -ne 1) { $arguments += @("--scale", "$Scale") }
-if (-not $Translated) { $arguments += "--interpret" }
+if ($Interpret -and -not $Translated) { $arguments += "--interpret" }
 if ($Extra) { $arguments += $Extra }
 
 Write-Host ("launching " + $exe)
-if (-not $Translated) {
-    Write-Host "path: interpreter (faster today)"
+if ($Interpret -and -not $Translated) {
+    Write-Host "path: interpreter (the reference; the translated path is faster)"
 } else {
-    Write-Host "path: translated (correct; still slower until more code is translated)"
+    Write-Host "path: translated (the fast configuration)"
 }
 
 & $exe @arguments

@@ -19,10 +19,32 @@ index 5980e74..554297c 100644
    src/maple/maple.cpp
    src/aica/arm7.cpp
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 9dff7cd..936f6f1 100644
+index 9dff7cd..efce214 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
-@@ -1300,6 +1300,7 @@ int main(int argc, char** argv) {
+@@ -919,6 +919,21 @@ std::string report_text(dream::System& sys, dream::hle::Bios& bios, const dream:
+     std::snprintf(buf, sizeof buf, "untranslated call targets: %llu\n",
+                   static_cast<unsigned long long>(sys.untranslated.total()));
+     s += buf;
++    // DREAM_TRACE_UNTRANSLATED=1: the call targets that reached the interpreter, by call count.
++    // The suggested config keeps only addresses inside the image; this shows everything, which is
++    // how a target living in copied RAM (relocated code) is spotted.
++    if (std::getenv("DREAM_TRACE_UNTRANSLATED")) {
++        auto recs = sys.untranslated.records();
++        std::sort(recs.begin(), recs.end(),
++                  [](const dream::mem::FaultRecord& a, const dream::mem::FaultRecord& b) {
++                      return a.count > b.count;
++                  });
++        std::fprintf(stderr, "untranslated top targets (%zu distinct):\n", recs.size());
++        for (std::size_t k = 0; k < recs.size() && k < 30; ++k)
++            std::fprintf(stderr, "  0x%08x  %llu calls%s\n", recs[k].addr,
++                         static_cast<unsigned long long>(recs[k].count),
++                         (recs[k].addr & 0x1FFFFFFFu) < 0x0C010000u ? "  (below the image)" : "");
++    }
+     s += sys.untranslated.format();
+     for (const auto& [target, from] : sys.untranslated_sites) {
+         std::snprintf(buf, sizeof buf, "  0x%08x called from 0x%08x\n", target, from);
+@@ -1300,6 +1315,7 @@ int main(int argc, char** argv) {
          else if (!std::strcmp(argv[i], "--screenshot-presented"))
              shot_presented = true;
          else if (!std::strcmp(argv[i], "--present-mode") && i + 1 < argc) {
@@ -30,7 +52,7 @@ index 9dff7cd..936f6f1 100644
              const char* m = argv[++i];
              using PM = dream::render::vk::Window::PresentMode;
              if (!std::strcmp(m, "mailbox"))
-@@ -1312,6 +1313,13 @@ int main(int argc, char** argv) {
+@@ -1312,6 +1328,13 @@ int main(int argc, char** argv) {
                  std::fprintf(stderr, "unknown present mode %s: vsync, mailbox or immediate\n", m);
                  return 2;
              }
@@ -44,7 +66,7 @@ index 9dff7cd..936f6f1 100644
          } else if (!std::strcmp(argv[i], "--bindings") && i + 1 < argc) {
              bindings_file = argv[++i];
              bindings_file_set = true;
-@@ -2102,12 +2110,13 @@ int main(int argc, char** argv) {
+@@ -2102,12 +2125,13 @@ int main(int argc, char** argv) {
      if (dream::devinterp::replay()) {
          dream::devinterp::set_replay(nullptr);
          std::printf(
@@ -92,6 +114,110 @@ index 0000000..1123498
 +bool take_side_effect() noexcept;
 +
 +}  // namespace dream::hle
+diff --git a/runtime/include/dream/runtime/mem/dc_memory.h b/runtime/include/dream/runtime/mem/dc_memory.h
+index 83f1e69..2eaa0f5 100644
+--- a/runtime/include/dream/runtime/mem/dc_memory.h
++++ b/runtime/include/dream/runtime/mem/dc_memory.h
+@@ -225,15 +225,68 @@ public:
+     std::uint64_t sq_tlb_flushes = 0;  // bursts the UTLB translated
+     std::uint64_t sq_tlb_misses = 0;   // bursts it did not map; QACR used instead
+ 
+-    // Memory interface
+-    std::uint8_t read8(std::uint32_t a) override;
+-    std::uint16_t read16(std::uint32_t a) override;
+-    std::uint32_t read32(std::uint32_t a) override;
+-    std::uint64_t read64(std::uint32_t a) override;
+-    void write8(std::uint32_t a, std::uint8_t v) override;
+-    void write16(std::uint32_t a, std::uint16_t v) override;
+-    void write32(std::uint32_t a, std::uint32_t v) override;
+-    void write64(std::uint32_t a, std::uint64_t v) override;
++    // Memory interface. The common case -- a load or store that lands in main RAM with nothing
++    // watching -- is a mask, an index and a memcpy, and it is most of what emitted code does, so
++    // it is inlined here. Everything else (device dispatch, the store queue, the CCN registers,
++    // the replay journal, the write hash and the watch) takes the out-of-line path, which is
++    // where all the bookkeeping lives. The fast path is only valid while none of that bookkeeping
++    // is armed: a journalled or hashed store has to be seen.
++    std::uint8_t read8(std::uint32_t a) override {
++        if (is_ram(a) && ram_fast_ok()) return ram_.get()[a & (kRamSize - 1)];
++        return read8_slow(a);
++    }
++    std::uint16_t read16(std::uint32_t a) override {
++        if (is_ram(a) && ram_fast_ok()) {
++            std::uint16_t v;
++            std::memcpy(&v, ram_.get() + (a & (kRamSize - 1)), 2);
++            return v;
++        }
++        return read16_slow(a);
++    }
++    std::uint32_t read32(std::uint32_t a) override {
++        if (is_ram(a) && ram_fast_ok()) {
++            std::uint32_t v;
++            std::memcpy(&v, ram_.get() + (a & (kRamSize - 1)), 4);
++            return v;
++        }
++        return read32_slow(a);
++    }
++    std::uint64_t read64(std::uint32_t a) override {
++        if (is_ram(a) && ram_fast_ok()) {
++            std::uint64_t v;
++            std::memcpy(&v, ram_.get() + (a & (kRamSize - 1)), 8);
++            return v;
++        }
++        return read64_slow(a);
++    }
++    void write8(std::uint32_t a, std::uint8_t v) override {
++        if (is_ram(a) && ram_fast_ok()) {
++            ram_.get()[a & (kRamSize - 1)] = v;
++            return;
++        }
++        write8_slow(a, v);
++    }
++    void write16(std::uint32_t a, std::uint16_t v) override {
++        if (is_ram(a) && ram_fast_ok()) {
++            std::memcpy(ram_.get() + (a & (kRamSize - 1)), &v, 2);
++            return;
++        }
++        write16_slow(a, v);
++    }
++    void write32(std::uint32_t a, std::uint32_t v) override {
++        if (is_ram(a) && ram_fast_ok()) {
++            std::memcpy(ram_.get() + (a & (kRamSize - 1)), &v, 4);
++            return;
++        }
++        write32_slow(a, v);
++    }
++    void write64(std::uint32_t a, std::uint64_t v) override {
++        if (is_ram(a) && ram_fast_ok()) {
++            std::memcpy(ram_.get() + (a & (kRamSize - 1)), &v, 8);
++            return;
++        }
++        write64_slow(a, v);
++    }
+     void sq_write32(std::uint32_t a, std::uint32_t v) override;
+     void sq_flush(std::uint32_t a) override;
+ 
+@@ -241,6 +294,21 @@ public:
+     static std::uint32_t vram_map32(std::uint32_t offset32) noexcept;
+ 
+ private:
++    // True when a RAM access can bypass every side channel. One branch, and it is false in every
++    // ordinary run: nothing journals, hashes or watches.
++    bool ram_fast_ok() const noexcept { return !journaling && !tracing_writes(); }
++    static bool is_ram(std::uint32_t a) noexcept {
++        // Area 3 in P0/P1/P3 (P2 is left to the slow path, which handles it the same way).
++        return (a & 0x1C000000u) == 0x0C000000u;
++    }
++    std::uint8_t read8_slow(std::uint32_t a);
++    std::uint16_t read16_slow(std::uint32_t a);
++    std::uint32_t read32_slow(std::uint32_t a);
++    std::uint64_t read64_slow(std::uint32_t a);
++    void write8_slow(std::uint32_t a, std::uint8_t v);
++    void write16_slow(std::uint32_t a, std::uint16_t v);
++    void write32_slow(std::uint32_t a, std::uint32_t v);
++    void write64_slow(std::uint32_t a, std::uint64_t v);
+     struct Target {
+         enum Kind { kNone, kBytes, kMmio } kind = kNone;
+         std::uint8_t* bytes = nullptr;  // kBytes: host pointer to the first byte
 diff --git a/runtime/include/dream/runtime/sh4/ops.h b/runtime/include/dream/runtime/sh4/ops.h
 index 2c8ccb4..932f833 100644
 --- a/runtime/include/dream/runtime/sh4/ops.h
@@ -603,6 +729,62 @@ index 0000000..5ec4b7a
 +}
 +
 +}  // namespace dream::hle
+diff --git a/runtime/src/mem/dc_memory.cpp b/runtime/src/mem/dc_memory.cpp
+index 382f4e4..52dbf20 100644
+--- a/runtime/src/mem/dc_memory.cpp
++++ b/runtime/src/mem/dc_memory.cpp
+@@ -287,13 +287,13 @@ void DcMemory::redo_journal() {
+     }
+ }
+ 
+-std::uint8_t DcMemory::read8(std::uint32_t a) {
++std::uint8_t DcMemory::read8_slow(std::uint32_t a) {
+     return load<std::uint8_t>(a);
+ }
+-std::uint16_t DcMemory::read16(std::uint32_t a) {
++std::uint16_t DcMemory::read16_slow(std::uint32_t a) {
+     return load<std::uint16_t>(a);
+ }
+-std::uint32_t DcMemory::read32(std::uint32_t a) {
++std::uint32_t DcMemory::read32_slow(std::uint32_t a) {
+     if ((a & 0xFFFFFFC0u) == 0xFF000000u) {  // CCN: MMU and cache control, exception registers
+         switch (a & 0x3Cu) {
+             case 0x20:
+@@ -312,7 +312,7 @@ std::uint32_t DcMemory::read32(std::uint32_t a) {
+     }
+     return load<std::uint32_t>(a);
+ }
+-std::uint64_t DcMemory::read64(std::uint32_t a) {
++std::uint64_t DcMemory::read64_slow(std::uint32_t a) {
+     const Target t = resolve(a, 8, false);
+     if (t.kind == Target::kBytes) {
+         std::uint64_t v;
+@@ -324,13 +324,13 @@ std::uint64_t DcMemory::read64(std::uint32_t a) {
+                (static_cast<std::uint64_t>(t.mmio->read(t.mmio_addr + 4, 4)) << 32);
+     return 0;
+ }
+-void DcMemory::write8(std::uint32_t a, std::uint8_t v) {
++void DcMemory::write8_slow(std::uint32_t a, std::uint8_t v) {
+     store<std::uint8_t>(a, v);
+ }
+-void DcMemory::write16(std::uint32_t a, std::uint16_t v) {
++void DcMemory::write16_slow(std::uint32_t a, std::uint16_t v) {
+     store<std::uint16_t>(a, v);
+ }
+-void DcMemory::write32(std::uint32_t a, std::uint32_t v) {
++void DcMemory::write32_slow(std::uint32_t a, std::uint32_t v) {
+     if ((a & 0xFFFFFFC0u) == 0xFF000000u) {
+         switch (a & 0x3Cu) {
+             case 0x20:
+@@ -360,7 +360,7 @@ void DcMemory::write32(std::uint32_t a, std::uint32_t v) {
+     }
+     store<std::uint32_t>(a, v);
+ }
+-void DcMemory::write64(std::uint32_t a, std::uint64_t v) {
++void DcMemory::write64_slow(std::uint32_t a, std::uint64_t v) {
+     const Target t = resolve(a, 8, true);
+     if (t.kind == Target::kBytes) {
+         const std::uint32_t lo = static_cast<std::uint32_t>(v);
 diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
 index 7d292b7..c901b9d 100644
 --- a/runtime/src/sh4/abi_bare.cpp
