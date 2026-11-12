@@ -79,6 +79,41 @@ With it interpreted, the crash is gone: **20,000 frames (5.5 minutes of gameplay
 parity check still reports a byte-identical screenshot, and the speed is unaffected in the early
 scenes (4.2x at 600 frames, 3.9x at 1,800). Deeper gameplay settles at 1.8x over 20,000 frames.
 
+## Controllers (2026-11-12)
+
+A pad works on first plug-in and no configuration file is needed. The left stick is the Dreamcast
+analogue stick, the face buttons are A/B/X/Y, the d-pad is the d-pad, Start is Start, the shoulders
+are C and Z (the two buttons the pad has that a modern one spells as shoulders), and the analogue
+triggers are L and R. SDL's own mappings cover commercial pads; a pad that arrives as a raw joystick
+(a DirectInput stick, an 8BitDo in DInput mode) is given the standard DirectInput layout, so it is
+playable instead of invisible. `F1` rebinds everything, including the dead zone.
+
+The launcher prints `input: KEYBOARD, <pad>` at start, and `DREAM_INPUT_TRACE=1` prints the pad state
+the guest actually receives whenever it changes -- the quickest way to tell a host-side problem from
+a game-side one. `DREAM_VIRTUAL_PAD=1` attaches a synthetic pad (buttons, stick, hat, scripted) so
+the path can be exercised on a machine with no hardware; that is how the buttons and the stick were
+verified end to end here while no pad was attached.
+
+**The menu crash, found while testing the pad (2026-11-12).** Navigating the main menu with a burst of
+d-pad presses (`--press "down@150,down@170,...,down@270"`) faults the translated build at frame 192,
+pc 0; the interpreter runs the same input cleanly. A single down press does not fault. The fault is
+an indirect call through a null vtable slot:
+
+```
+hook: call_indirect 0x00000000 from pc 0x0c0c70ee r0 00000000 r2 be10ff21
+0c0c70ea  mov.l @r4,r0      ; r0 = object->vtable
+0c0c70ec  mov.l @(32,r0),r0 ; r0 = vtable[8]
+0c0c70ee  jsr @r0           ; null
+```
+
+The fault-time stack walk (RVAs resolved through the link map) is
+`unimplemented <- exec <- on_untranslated <- call_indirect <- fn_0c0c70cc <- fn_0c0c7f7c <- resume_at`:
+a non-local return resumed `0x0C0C7F7C`, and the call chain from there reached a null vtable slot.
+Whether the object or the vtable is wrong, or the menu path is being resumed at the wrong point, is
+open. This is the same translated-code class as the crash above, but it reproduces in 192 frames, so
+it is the fast case to work from: compare the object at the `r12`/`r4` of `0x0C0C70CC` between the two
+paths, and the non-local return that resumed `0x0C0C7F7C`.
+
 **What is still open.** Whether `fn_0c16cdf4`'s *translation* is wrong or whether hiding it merely
 shifts interrupt timing is not proven. It is called only late in gameplay, so the differential replay
 of that call is expensive; the next measurement is `--replay-only 0x0C16CDF4` over a run that reaches

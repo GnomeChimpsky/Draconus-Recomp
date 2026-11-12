@@ -114,6 +114,14 @@ remaining work.
 Controls: arrows = d-pad, `Z` `X` `A` `S` = A, B, X, Y, Enter = Start, `Q`/`W` = triggers,
 `F1` rebinds, `F10` frame counter, `F12` screenshot, Escape quits.
 
+**Controllers.** A pad works on first plug-in: the left stick is the Dreamcast analogue stick, the
+face buttons are A/B/X/Y, the d-pad is the d-pad, Start is Start, the shoulders are C and Z, and the
+triggers are L and R. Pads SDL knows are mapped automatically; a generic pad that arrives as a raw
+joystick gets the standard DirectInput layout instead (anything wrong can be rebound in `F1`). The
+launcher prints which devices it found at start (`input: KEYBOARD, <pad>`), a pad can be plugged in
+while the game runs, and `DREAM_INPUT_TRACE=1` prints the state the guest receives whenever it
+changes, which is the quickest way to tell a host problem from a game one.
+
 ## Rebuild the renderer build
 
 ```powershell

@@ -1691,6 +1691,27 @@ never be compared by the harness as it stands. `DREAM_REPLAY_MAX_INSNS` override
 which lets a future harness (or a checkpointed comparison) raise it without a rebuild; the default is
 unchanged.
 
+## Patch 013: pad support that covers real hardware, and a fault-time stack (2026-11-12)
+
+* The pad the title has always been able to bind now covers everything the Dreamcast pad has: **C and
+  Z** were missing, so a player could not press the two buttons a modern pad spells as shoulders.
+  They default to left/right shoulder; the analogue triggers stay on L/R.
+* A pad that arrives as a **raw joystick** (no SDL gamepad mapping -- generic DirectInput sticks,
+  8BitDo in DInput mode, arcade boxes) used to be invisible: `SDL_GetGamepads` returned nothing and
+  the game got only the keyboard. `map_unrecognised_pads()` gives such a device the standard
+  DirectInput layout, so it is playable and rebindable instead of absent.
+* The launcher prints the devices it found (`input: KEYBOARD, <pad>`), and `DREAM_INPUT_TRACE=1`
+  prints the pad state the guest receives when it changes. `DREAM_VIRTUAL_PAD=1` attaches a synthetic
+  pad with a scripted button/stick/hat sequence, so the host-to-Maple path is testable with no
+  hardware attached.
+* `unimplemented()` now prints a **fault-time stack** of module-relative addresses under
+  `DREAM_FAULT_TRACE=1`. Built with `/MAP`, those addresses resolve to the emitted `fn_*` frames, which
+  is how the menu crash's chain (`fn_0c0c7f7c <- resume_at <- ...`) was found. The map file is a link
+  option, not a CMake default: configure with `-DCMAKE_EXE_LINKER_FLAGS=/MAP` when a fault needs
+  resolving.
+* `call_indirect` logs calls whose target is outside the title's code (a null or wild pointer) with
+  the calling pc and r0-r3, under `DREAM_TRACE_HOOK=1`.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
