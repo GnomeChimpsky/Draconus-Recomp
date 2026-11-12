@@ -18,6 +18,7 @@ Die by the Sword + Limb From Limb GOG/
 game/*/extracted/
 
 # Screenshots and captures (guest pixels)
+capture-*
 *.ppm
 *.png
 *.vmu

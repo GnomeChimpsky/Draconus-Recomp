@@ -1,6 +1,0 @@
-guest frame 4515, presented frame 4428
-renders 3625, backgrounds 3625, written back 0
-textures: 156 decoded, 0 failed, 0 overwritten
-display: 640x480 RGB565 at 0x600000, stride +0
-source: the renderer
-parameter words: 158864
