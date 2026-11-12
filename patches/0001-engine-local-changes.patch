@@ -122,7 +122,7 @@ index 78777d2..02b815d 100644
          destroy();
          return false;
 diff --git a/render/src/vk/window.cpp b/render/src/vk/window.cpp
-index 0b0f03d..1032bc8 100644
+index 0b0f03d..0e64394 100644
 --- a/render/src/vk/window.cpp
 +++ b/render/src/vk/window.cpp
 @@ -4,6 +4,7 @@
@@ -133,7 +133,7 @@ index 0b0f03d..1032bc8 100644
  
  #include <SDL3/SDL.h>
  #include <SDL3/SDL_vulkan.h>
-@@ -35,6 +36,107 @@ constexpr SDL_GamepadButton kNavButtons[static_cast<unsigned>(Control::Count)] =
+@@ -35,6 +36,151 @@ constexpr SDL_GamepadButton kNavButtons[static_cast<unsigned>(Control::Count)] =
      SDL_GAMEPAD_BUTTON_INVALID,    SDL_GAMEPAD_BUTTON_INVALID,   SDL_GAMEPAD_BUTTON_BACK,
      SDL_GAMEPAD_BUTTON_EAST,
  };
@@ -173,6 +173,50 @@ index 0b0f03d..1032bc8 100644
 +        SDL_free(jids);
 +}
 +
++#if defined(_WIN32)
++// A second chance for a pad SDL cannot see. Xbox-mode pads reach Windows through XInput, and SDL
++// normally finds them there; when something else has claimed the device (Steam Input, a vendor
++// driver) the F1 list is empty and the game gets only the keyboard. XInput itself still answers,
++// so it is polled directly when SDL reports no gamepad at all. Loaded at run time: a machine
++// without the DLL simply has no fallback.
++struct XInputGamepad {
++    std::uint16_t buttons;
++    std::uint8_t left_trigger, right_trigger;
++    std::int16_t thumb_lx, thumb_ly, thumb_rx, thumb_ry;
++};
++struct XInputState {
++    std::uint32_t packet;
++    XInputGamepad pad;
++};
++using XInputGetStateFn = std::uint32_t(__stdcall*)(std::uint32_t, XInputState*);
++extern "C" __declspec(dllimport) void* __stdcall LoadLibraryW(const wchar_t* name);
++extern "C" __declspec(dllimport) void* __stdcall GetProcAddress(void* module, const char* name);
++
++XInputGetStateFn xinput_get_state() {
++    static XInputGetStateFn fn = [] {
++        for (const wchar_t* name : {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"}) {
++            if (void* module = LoadLibraryW(name)) {
++                if (auto* f = reinterpret_cast<XInputGetStateFn>(
++                        GetProcAddress(module, "XInputGetState")))
++                    return f;
++            }
++        }
++        return static_cast<XInputGetStateFn>(nullptr);
++    }();
++    return fn;
++}
++
++// The first XInput slot that answers: 0 is ERROR_SUCCESS.
++bool poll_xinput(XInputState& out) {
++    XInputGetStateFn fn = xinput_get_state();
++    if (!fn)
++        return false;
++    for (std::uint32_t i = 0; i < 4; ++i)
++        if (fn(i, &out) == 0)
++            return true;
++    return false;
++}
++#endif
 +// Test hook: DREAM_VIRTUAL_PAD attaches a synthetic pad, so the host-to-Maple path can be exercised
 +// on a machine with no hardware attached. It is a plain joystick on purpose: the fallback above is
 +// what maps it, which is the same path a generic pad takes.
@@ -241,7 +285,7 @@ index 0b0f03d..1032bc8 100644
  }  // namespace
  
  Window::~Window() {
-@@ -47,6 +149,9 @@ bool Window::create(const char* title, int width, int height, bool want_validati
+@@ -47,6 +193,9 @@ bool Window::create(const char* title, int width, int height, bool want_validati
      // be a poor trade.
      if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD))
          SDL_ClearError();
@@ -251,7 +295,7 @@ index 0b0f03d..1032bc8 100644
      if (!SDL_Init(SDL_INIT_VIDEO)) {
          error_ = std::string("SDL_Init: ") + SDL_GetError();
          return false;
-@@ -108,6 +213,10 @@ bool Window::create(const char* title, int width, int height, bool want_validati
+@@ -108,6 +257,10 @@ bool Window::create(const char* title, int width, int height, bool want_validati
      // with no configuration file and no visit to any UI.
      refresh_devices();
      set_bindings(Bindings::defaults());
@@ -262,7 +306,49 @@ index 0b0f03d..1032bc8 100644
      return create_swapchain();
  }
  
-@@ -370,6 +479,7 @@ bool Window::take_capture(Binding& out, bool& cancelled) noexcept {
+@@ -297,6 +450,11 @@ bool Window::recreate_swapchain() {
+ }
+ 
+ void Window::refresh_devices() {
++    // A pad that is plugged in after the window opened arrives as a raw joystick first; without a
++    // mapping it would never appear as a gamepad, and hot-plug would silently do nothing. Mapping
++    // before enumerating makes the list the same whether the pad was there at start or not.
++    map_unrecognised_pads();
++    SDL_PumpEvents();
+     for (SDL_Gamepad* g : pads_)
+         if (g)
+             SDL_CloseGamepad(g);
+@@ -314,6 +472,29 @@ void Window::refresh_devices() {
+         }
+         SDL_free(ids);
+     }
++#if defined(_WIN32)
++    // The fallback shows up as a device row too, or the menu would still claim only a keyboard.
++    if (pads_.empty()) {
++        XInputState xi{};
++        if (poll_xinput(xi))
++            devices_.push_back("XINPUT");
++    }
++#endif
++    // What SDL sees that the gamepad API does not: a pad in a mode it has no mapping for, or one
++    // another driver is holding. Printing it turns "the pad is not in the menu" into a fact about
++    // the device rather than a guess.
++    int raw_count = 0;
++    if (SDL_JoystickID* ids = SDL_GetJoysticks(&raw_count)) {
++        for (int i = 0; i < raw_count; ++i) {
++            if (SDL_IsGamepad(ids[i]))
++                continue;
++            const char* name = SDL_GetJoystickNameForID(ids[i]);
++            std::printf("input: joystick \"%s\" vid 0x%04x pid 0x%04x is not a gamepad to SDL\n",
++                        name && *name ? name : "?", SDL_GetJoystickVendorForID(ids[i]),
++                        SDL_GetJoystickProductForID(ids[i]));
++        }
++        SDL_free(ids);
++    }
+ }
+ 
+ void Window::set_bindings(const Bindings& b) {
+@@ -370,6 +551,7 @@ bool Window::take_capture(Binding& out, bool& cancelled) noexcept {
  }
  
  bool Window::poll() {
@@ -270,6 +356,75 @@ index 0b0f03d..1032bc8 100644
      // A capture consumes the physical input that ends it, so the key being bound does not also
      // reach the game on the same frame.
      bool captured_this_poll = false;
+@@ -382,6 +564,8 @@ bool Window::poll() {
+                 break;
+             case SDL_EVENT_GAMEPAD_ADDED:
+             case SDL_EVENT_GAMEPAD_REMOVED:
++            case SDL_EVENT_JOYSTICK_ADDED:
++            case SDL_EVENT_JOYSTICK_REMOVED:
+                 // Hot-plug: rebuild the list and drop every held state. A pad yanked mid-race must
+                 // release the accelerator rather than leave it held at its last value.
+                 refresh_devices();
+@@ -460,7 +644,46 @@ bool Window::poll() {
+     last_poll_ns_ = now_ns;
+     dt = std::clamp(dt, 0.0f, 0.25f);  // a long stall must not jump the ramp to full
+ 
+-    const float dead = static_cast<float>(bindings_.deadzone_percent) / 100.0f;
++const float dead = static_cast<float>(bindings_.deadzone_percent) / 100.0f;
++#if defined(_WIN32)
++    // XInput only when SDL has no gamepad at all: a pad SDL sees is already read below, and taking
++    // it twice would apply the dead zone twice and fight itself.
++    bool xin_digital[kPadControlCount] = {};
++    float xin_analogue[kPadControlCount] = {};
++    if (pads_.empty()) {
++        XInputState st{};
++        if (poll_xinput(st)) {
++            const XInputGamepad& p = st.pad;
++            struct XButton {
++                std::uint16_t bit;
++                PadControl control;
++            };
++            const XButton buttons[] = {
++                {0x0001, PadControl::Up},   {0x0002, PadControl::Down},
++                {0x0004, PadControl::Left}, {0x0008, PadControl::Right},
++                {0x0010, PadControl::Start}, {0x1000, PadControl::A},
++                {0x2000, PadControl::B},    {0x4000, PadControl::X},
++                {0x8000, PadControl::Y},    {0x0100, PadControl::C},
++                {0x0200, PadControl::Z}};
++            for (const XButton& b : buttons)
++                if (p.buttons & b.bit)
++                    xin_digital[static_cast<unsigned>(b.control)] = true;
++            auto axis = [&](int v, PadControl neg, PadControl pos) {
++                const float raw = static_cast<float>(v) / 32767.0f;
++                if (raw < -dead)
++                    xin_analogue[static_cast<unsigned>(neg)] = (-raw - dead) / (1.0f - dead);
++                if (raw > dead)
++                    xin_analogue[static_cast<unsigned>(pos)] = (raw - dead) / (1.0f - dead);
++            };
++            axis(p.thumb_lx, PadControl::StickLeft, PadControl::StickRight);
++            axis(p.thumb_ly, PadControl::StickUp, PadControl::StickDown);
++            xin_analogue[static_cast<unsigned>(PadControl::LeftTrigger)] =
++                static_cast<float>(p.left_trigger) / 255.0f;
++            xin_analogue[static_cast<unsigned>(PadControl::RightTrigger)] =
++                static_cast<float>(p.right_trigger) / 255.0f;
++        }
++    }
++#endif
+     for (unsigned i = 0; i < kPadControlCount; ++i) {
+         // Digital and analogue sources are gathered separately, because only a digital one ramps.
+         // A pad's real trigger position must pass straight through, or a pad would feel worse than
+@@ -494,6 +717,11 @@ bool Window::poll() {
+             }
+         }
+ 
++#if defined(_WIN32)
++        if (xin_digital[i])
++            digital_on = true;
++        analogue = std::max(analogue, xin_analogue[i]);
++#endif
+         const bool is_trigger = i == static_cast<unsigned>(PadControl::LeftTrigger) ||
+                                 i == static_cast<unsigned>(PadControl::RightTrigger);
+         float value = analogue;
 diff --git a/runtime/CMakeLists.txt b/runtime/CMakeLists.txt
 index 5980e74..554297c 100644
 --- a/runtime/CMakeLists.txt

@@ -88,6 +88,11 @@ triggers are L and R. SDL's own mappings cover commercial pads; a pad that arriv
 (a DirectInput stick, an 8BitDo in DInput mode) is given the standard DirectInput layout, so it is
 playable instead of invisible. `F1` rebinds everything, including the dead zone.
 
+A pad that SDL enumerates but cannot open (another driver holding it, a device that answers a
+moment after launch) is polled through **XInput directly**, and the device row reads `XINPUT`. That
+was the GameSir Cyclone 3 case: SDL listed an "XInput Controller #1" gamepad, `SDL_OpenGamepad` still
+failed, and the XInput fallback is what made the pad appear and work.
+
 The launcher prints `input: KEYBOARD, <pad>` at start, and `DREAM_INPUT_TRACE=1` prints the pad state
 the guest actually receives whenever it changes -- the quickest way to tell a host-side problem from
 a game-side one. `DREAM_VIRTUAL_PAD=1` attaches a synthetic pad (buttons, stick, hat, scripted) so

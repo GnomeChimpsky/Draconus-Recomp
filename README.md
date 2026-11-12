@@ -120,7 +120,9 @@ triggers are L and R. Pads SDL knows are mapped automatically; a generic pad tha
 joystick gets the standard DirectInput layout instead (anything wrong can be rebound in `F1`). The
 launcher prints which devices it found at start (`input: KEYBOARD, <pad>`), a pad can be plugged in
 while the game runs, and `DREAM_INPUT_TRACE=1` prints the state the guest receives whenever it
-changes, which is the quickest way to tell a host problem from a game one.
+changes, which is the quickest way to tell a host problem from a game one. If SDL cannot open the pad
+because another driver has claimed it, the launcher falls back to XInput directly and lists the
+device as `XINPUT`.
 
 ## Rebuild the renderer build
 
