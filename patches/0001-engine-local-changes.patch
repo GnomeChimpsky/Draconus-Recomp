@@ -1223,7 +1223,7 @@ index 382f4e4..52dbf20 100644
      if (t.kind == Target::kBytes) {
          const std::uint32_t lo = static_cast<std::uint32_t>(v);
 diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
-index 7d292b7..d8332d2 100644
+index 7d292b7..af62304 100644
 --- a/runtime/src/sh4/abi_bare.cpp
 +++ b/runtime/src/sh4/abi_bare.cpp
 @@ -301,6 +301,12 @@ void run_guest(Ctx& c, ::dream::Memory& m, GuestFn entry) {
@@ -1231,7 +1231,7 @@ index 7d292b7..d8332d2 100644
  
  void call_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target) {
 +    static const bool trace_hook = std::getenv("DREAM_TRACE_HOOK") != nullptr;
-+    if (std::getenv("DREAM_TRACE_HOOK") && (target < 0x0C010000u || target >= 0x8C001000u && target < 0x8C00100Cu))
++    if (trace_hook && (target < 0x0C010000u || (target >= 0x8C001000u && target < 0x8C00100Cu)))
 +        std::fprintf(stderr,
 +                     "hook: call_indirect 0x%08x from pc 0x%08x pr 0x%08x r15 0x%08x "
 +                     "r0 %08x r1 %08x r2 %08x r3 %08x\n",
