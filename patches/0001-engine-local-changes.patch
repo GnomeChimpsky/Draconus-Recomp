@@ -122,7 +122,7 @@ index 78777d2..02b815d 100644
          destroy();
          return false;
 diff --git a/render/src/vk/window.cpp b/render/src/vk/window.cpp
-index 0b0f03d..0e64394 100644
+index 0b0f03d..2c5281f 100644
 --- a/render/src/vk/window.cpp
 +++ b/render/src/vk/window.cpp
 @@ -4,6 +4,7 @@
@@ -365,7 +365,7 @@ index 0b0f03d..0e64394 100644
                  // Hot-plug: rebuild the list and drop every held state. A pad yanked mid-race must
                  // release the accelerator rather than leave it held at its last value.
                  refresh_devices();
-@@ -460,7 +644,46 @@ bool Window::poll() {
+@@ -460,7 +644,49 @@ bool Window::poll() {
      last_poll_ns_ = now_ns;
      dt = std::clamp(dt, 0.0f, 0.25f);  // a long stall must not jump the ramp to full
  
@@ -402,7 +402,10 @@ index 0b0f03d..0e64394 100644
 +                    xin_analogue[static_cast<unsigned>(pos)] = (raw - dead) / (1.0f - dead);
 +            };
 +            axis(p.thumb_lx, PadControl::StickLeft, PadControl::StickRight);
-+            axis(p.thumb_ly, PadControl::StickUp, PadControl::StickDown);
++            // XInput's Y is the one axis that does not follow the screen: positive is *up*. SDL
++            // negates it for its own convention for the same reason, so the halves swap here or
++            // pushing forward walks backwards.
++            axis(p.thumb_ly, PadControl::StickDown, PadControl::StickUp);
 +            xin_analogue[static_cast<unsigned>(PadControl::LeftTrigger)] =
 +                static_cast<float>(p.left_trigger) / 255.0f;
 +            xin_analogue[static_cast<unsigned>(PadControl::RightTrigger)] =
@@ -413,7 +416,7 @@ index 0b0f03d..0e64394 100644
      for (unsigned i = 0; i < kPadControlCount; ++i) {
          // Digital and analogue sources are gathered separately, because only a digital one ramps.
          // A pad's real trigger position must pass straight through, or a pad would feel worse than
-@@ -494,6 +717,11 @@ bool Window::poll() {
+@@ -494,6 +720,11 @@ bool Window::poll() {
              }
          }
  
