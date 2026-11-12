@@ -1381,10 +1381,51 @@ index 382f4e4..52dbf20 100644
      if (t.kind == Target::kBytes) {
          const std::uint32_t lo = static_cast<std::uint32_t>(v);
 diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
-index 7d292b7..af62304 100644
+index 7d292b7..acb6699 100644
 --- a/runtime/src/sh4/abi_bare.cpp
 +++ b/runtime/src/sh4/abi_bare.cpp
-@@ -301,6 +301,12 @@ void run_guest(Ctx& c, ::dream::Memory& m, GuestFn entry) {
+@@ -15,6 +15,15 @@
+ 
+ #include "dream/runtime/sh4/ops.h"
+ 
++#if defined(_WIN32)
++// Declared rather than pulled in through <windows.h>: this file is compiled into the bare harness
++// too, and two kernel32 entry points are all the fault diagnostics need.
++extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(
++    unsigned long frames_to_skip, unsigned long frames_to_capture, void** backtrace,
++    unsigned long* hash);
++extern "C" __declspec(dllimport) void* __stdcall GetModuleHandleW(const wchar_t* name);
++#endif
++
+ namespace dream::sh4 {
+ namespace {
+ 
+@@ -220,9 +229,21 @@ bool trace_nonlocal() {
+ }  // namespace
+ 
+ void nonlocal_return(Ctx& c, ::dream::Memory&, std::uint32_t pc) {
+-    if (trace_nonlocal())
+-        std::fprintf(stderr, "nonlocal: rts from pc 0x%08x to 0x%08x (r15 0x%08x)\n", c.pc, pc,
+-                     c.r[15]);
++    if (trace_nonlocal()) {
++        std::fprintf(stderr, "nonlocal: rts from pc 0x%08x to 0x%08x (r15 0x%08x pr 0x%08x)\n",
++                     c.pc, pc, c.r[15], c.pr);
++#if defined(_WIN32)
++        void* frames[32];
++        const unsigned short n = RtlCaptureStackBackTrace(0, 32, frames, nullptr);
++        const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
++        std::fprintf(stderr, "nonlocal-stack:");
++        for (unsigned short i = 0; i < n; ++i)
++            std::fprintf(stderr, " %llx",
++                         static_cast<unsigned long long>(
++                             reinterpret_cast<std::uintptr_t>(frames[i]) - base));
++        std::fprintf(stderr, "\n");
++#endif
++    }
+     c.pc = pc;
+     throw NonLocalReturn{pc};
+ }
+@@ -301,6 +322,12 @@ void run_guest(Ctx& c, ::dream::Memory& m, GuestFn entry) {
  }
  
  void call_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target) {
@@ -1397,16 +1438,10 @@ index 7d292b7..af62304 100644
      if (GuestFn fn = find_function(target, &m)) {
          fn(c, m);
          return;
-@@ -364,7 +370,30 @@ bool rte(Ctx& c, ::dream::Memory& m) {
+@@ -364,7 +391,24 @@ bool rte(Ctx& c, ::dream::Memory& m) {
      return false;
  }
  
-+#if defined(_WIN32)
-+extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(
-+    unsigned long frames_to_skip, unsigned long frames_to_capture, void** backtrace,
-+    unsigned long* hash);
-+extern "C" __declspec(dllimport) void* __stdcall GetModuleHandleW(const wchar_t* name);
-+#endif
 +
  void unimplemented(Ctx& c, std::uint32_t raw, std::uint32_t pc) {
 +#if defined(_WIN32)

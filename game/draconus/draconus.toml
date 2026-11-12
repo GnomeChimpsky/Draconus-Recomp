@@ -32,12 +32,20 @@ entry = 0x8C010000
 pointers = true
 sweep = false
 extra = []
-# Workaround (2026-11-11): do not translate 0x0C16CDF4 (the 4,914-byte FP function). With the pointer
-# pass on, the translated path faults at pc 0 about 79 s into the menu scene; interpreting this one
-# function removes it (20,000 frames clean, 2.2x) and the crash window is exactly where its
-# translation runs. The emitter question is still open: a differential replay of that call at the
-# crash point is the next measurement. Remove this line when that is resolved.
-exclude = [0x0C16CDF4]
+# Workarounds (2026-11-12): two functions the translated path faults in. Interpreting them removes
+# the two reproductions found so far -- 500 frames of d-pad menu navigation and a 20,000-frame
+# gameplay run are clean with both, and the windowed parity check is unchanged.
+#
+#   0x0C16CDF4  a 4,914-byte FP function; without it the translated path faults at pc 0 about 79 s
+#               into the menu scene.
+#   0x0C0C7F7C  a small function reached from the exception handler; without it a burst of d-pad
+#               presses on the main menu faults at frame 192.
+#
+# The fault signature is the same in both, and in a third crash that is still open: an `rte` outside
+# an exception frame (the guest's own task return) resumes at a function entry, and the guest then
+# jumps to 0. That machinery, not the two functions, is the thing to fix; take these exclusions out
+# when it is.
+exclude = [0x0C16CDF4, 0x0C0C7F7C]
 
 [[relocations]]
 # Detected by --suggest-config: the game copies 56 bytes from the image to the

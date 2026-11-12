@@ -1661,7 +1661,7 @@ Nothing measurable, at native resolution: the window is at 1.0x for 1,800 frames
 change would remove that), but at 0.16 ms per present it no longer decides the frame rate. What
 remains for heavier scenes is emulation time (translation coverage), not the renderer.
 
-## The pointer-pass gameplay crash and the one-function workaround (2026-11-11)
+## The pointer-pass gameplay crash and the two-function workaround (2026-11-11/12)
 
 With `pointers = true` the translated build faulted at pc 0 about 79 s into the menu scene
 (`--press start@1000,a@4000`, frame 4,750, 79.07 s guest). The interpreter and the pre-pointer build
@@ -1671,7 +1671,25 @@ ran the same input to frame 5,000 cleanly, so it was translated code. The crash 
 Ruling out candidates by exclusion did not move the fault (the first suspect, `0x0C22B508`, changed
 nothing, and excluding interior pointer entries broke boot). One exclusion did: interpreting
 **`0x0C16CDF4`**, a 4,914-byte FP function, removes the crash — 20,000 frames of gameplay run clean.
-The title config now carries that exclusion.
+
+A second, much faster crash was found while wiring up a pad: a burst of d-pad presses on the main
+menu (`--press "down@150,down@170,...,down@270"`) faults at frame 192 through a null vtable slot, and
+interpreting **`0x0C0C7F7C`** removes it. The title config carries both exclusions; 500 frames of
+menu navigation and 20,000 frames of gameplay are clean with them, and parity is unchanged.
+
+Both crashes, and a third that is still open (a menu-heavy sequence faults at frame 18,690), end in
+the same line:
+
+```
+nonlocal: rts from pc 0x0c0e4908 to 0x0c0e4908 (r15 0x8c483ae0 pr 0x0c0e4960)
+```
+
+That is not an `rts` despite the message: the emitted `rte` path calls
+`nonlocal_return(c, m, c.pc)` when `rte()` reports no exception frame, so the guest's own task return
+unwinds the C++ stack and resumes at SPC. When SPC is a function entry, `resume_at` takes the
+`e->fn()` door (`resume_pc = 0`); the guest then jumps to 0. The common factor is that resume path,
+not the functions, which is why excluding them moves the crash rather than explaining it.
+
 
 Whether the function's *translation* is wrong or the exclusion merely shifts interrupt timing is not
 settled. It is called only late in gameplay, and the differential replay at 8,940 functions is too

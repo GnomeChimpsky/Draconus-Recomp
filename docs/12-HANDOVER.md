@@ -68,16 +68,33 @@ said it was translated code, not a runtime limit: the interpreter and the pre-po
 the same input to frame 5,000 cleanly. The trace ended with an `rte` to `0x0C16CDF4`, then an emitted
 `rts` whose target was its own entry, then a jump to 0 — a context one slot out of step.
 
-**Workaround (shipped).** The title config excludes **one** function from translation:
+**Workaround (shipped).** The title config excludes **two** functions from translation:
 
 ```toml
 [functions]
-exclude = [0x0C16CDF4]     # the 4,914-byte FP function the crash lands in
+exclude = [0x0C16CDF4, 0x0C0C7F7C]
 ```
 
-With it interpreted, the crash is gone: **20,000 frames (5.5 minutes of gameplay) run clean**, the
-parity check still reports a byte-identical screenshot, and the speed is unaffected in the early
-scenes (4.2x at 600 frames, 3.9x at 1,800). Deeper gameplay settles at 1.8x over 20,000 frames.
+With them interpreted: **20,000 frames of gameplay run clean** (1.8x), the d-pad menu burst that used
+to fault at frame 192 now reaches the frame limit, and the windowed parity check still reports a
+byte-identical screenshot. Speed is unaffected in the early scenes (4.2x at 600 frames, 3.9x at
+1,800).
+
+**A third crash is still open.** A menu-heavy sequence (`--press "start@1000,a@1200,down@1500,
+down@1530,a@1600,down@4000,down@4030,a@4200"`) faults at frame 18,690 with the same signature the
+other two had:
+
+```
+nonlocal: rts from pc 0x0c0e4908 to 0x0c0e4908 (r15 0x8c483ae0 pr 0x0c0e4960)
+fault: unimplemented instruction 0x0000 at 0x00000000
+```
+
+That line is not an `rts` despite the message: the emitted `rte` path calls
+`nonlocal_return(c, m, c.pc)` when `rte()` reports no exception frame, so the guest's own task return
+(`rte` to SPC) unwinds the C++ stack and resumes at SPC. Here SPC is a function entry, `resume_at`
+takes the `e->fn()` door (resume_pc = 0), and the guest then jumps to 0. The same line appeared in
+both fixed crashes (`0x0C16CDF4` and `0x0C0C7F7C`), so the common factor is that resume path, not the
+two functions -- excluding them moved the crash rather than explaining it.
 
 ## Controllers (2026-11-12)
 
