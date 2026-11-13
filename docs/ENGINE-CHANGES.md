@@ -1691,6 +1691,15 @@ unwinds the C++ stack and resumes at SPC. When SPC is a function entry, `resume_
 not the functions, which is why excluding them moves the crash rather than explaining it.
 
 
+The rte that triggers such a fault restores an **inconsistent context**: `spc 0x0C0C7F7C` (a function
+entry) with `pr 0x0C0C7FBE` (a return address inside that same function). Resuming at the entry
+re-runs the prologue with that stale PR, the function returns into its own middle, the epilogue pops
+the wrong frame, and the next indirect call goes to 0. `DREAM_TRACE_RTE=path` logs the state at every
+`rte` from both engines; the engines' rte paths differ early (interrupt timing), but the crashing
+context itself is the evidence. Candidate producer: `c.pc` is only refreshed at poll points, so a
+handler that saves "the interrupted PC" can read a function entry while the PR it saves is live from
+inside the function. The next measurement is the save side, not the resume side.
+
 Whether the function's *translation* is wrong or the exclusion merely shifts interrupt timing is not
 settled. It is called only late in gameplay, and the differential replay at 8,940 functions is too
 slow without a checkpoint. `--replay-only 0x0C16CDF4` over the crash run has now been tried and

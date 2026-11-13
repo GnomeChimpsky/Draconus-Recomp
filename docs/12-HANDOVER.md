@@ -80,6 +80,29 @@ to fault at frame 192 now reaches the frame limit, and the windowed parity check
 byte-identical screenshot. Speed is unaffected in the early scenes (4.2x at 600 frames, 3.9x at
 1,800).
 
+**Root-cause work on the rte (2026-11-13).** `DREAM_TRACE_RTE=path` now logs the guest state at every
+`rte` from both engines. Diffing the two runs of the menu burst showed the two engines take *different*
+rte paths from the first few frames (interrupt delivery timing), so a straight diff is not the tool.
+What the trace did give is the crashing `rte` itself:
+
+```
+pc 0c233784  spc 0c0c7f7c  ssr 40000000  sr 70000000  pr 0c0c7fbe  r15 8c483b38
+```
+
+The guest restores a context whose **PC is a function entry (`0x0C0C7F7C`) and whose PR is a return
+address inside that same function (`0x0C0C7FBE`)**: the return address of the `jsr` at `0x0C0C7FBA`.
+Those two cannot both be right. Resuming at the entry re-runs the prologue, which pushes that stale PR;
+the function then returns into its own middle, the epilogue pops the wrong frame, and the next indirect
+call goes to 0 — the fault we see. Neither the function nor `resume_at` is at fault: the restored
+context is inconsistent before either runs.
+
+Why the game saved that pair is the open question. The strong candidate is our refresh of `c.pc`: it is
+written only at poll points, so a handler that saves "the interrupted PC" reads a function entry while
+the PR register it saves is live from inside the function. The interpreter, which retires one
+instruction at a time, never produces that pair. The next experiment is to log the *save* side (the
+game's task-save writes) and compare with the interpreter, then decide whether interrupt delivery needs
+a more exact PC.
+
 **A third crash is still open.** A menu-heavy sequence (`--press "start@1000,a@1200,down@1500,
 down@1530,a@1600,down@4000,down@4030,a@4200"`) faults at frame 18,690 with the same signature the
 other two had:

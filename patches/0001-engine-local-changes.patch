@@ -1381,10 +1381,18 @@ index 382f4e4..52dbf20 100644
      if (t.kind == Target::kBytes) {
          const std::uint32_t lo = static_cast<std::uint32_t>(v);
 diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
-index 7d292b7..acb6699 100644
+index 7d292b7..7f6d3f6 100644
 --- a/runtime/src/sh4/abi_bare.cpp
 +++ b/runtime/src/sh4/abi_bare.cpp
-@@ -15,6 +15,15 @@
+@@ -2,6 +2,7 @@
+ // failures for anything that needs the real runtime (exceptions, interrupts, untranslated code).
+ #include <algorithm>
+ #include <cstdio>
++#include <cstdlib>
+ #include <stdexcept>
+ #include <string>
+ #include <utility>
+@@ -15,6 +16,15 @@
  
  #include "dream/runtime/sh4/ops.h"
  
@@ -1400,7 +1408,7 @@ index 7d292b7..acb6699 100644
  namespace dream::sh4 {
  namespace {
  
-@@ -220,9 +229,21 @@ bool trace_nonlocal() {
+@@ -220,9 +230,21 @@ bool trace_nonlocal() {
  }  // namespace
  
  void nonlocal_return(Ctx& c, ::dream::Memory&, std::uint32_t pc) {
@@ -1425,7 +1433,7 @@ index 7d292b7..acb6699 100644
      c.pc = pc;
      throw NonLocalReturn{pc};
  }
-@@ -301,6 +322,12 @@ void run_guest(Ctx& c, ::dream::Memory& m, GuestFn entry) {
+@@ -301,6 +323,12 @@ void run_guest(Ctx& c, ::dream::Memory& m, GuestFn entry) {
  }
  
  void call_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target) {
@@ -1438,7 +1446,35 @@ index 7d292b7..acb6699 100644
      if (GuestFn fn = find_function(target, &m)) {
          fn(c, m);
          return;
-@@ -364,7 +391,24 @@ bool rte(Ctx& c, ::dream::Memory& m) {
+@@ -352,9 +380,27 @@ void trapa(Ctx& c, ::dream::Memory& m, std::uint32_t imm) {
+                              " (no exception model in the bare harness)");
+ }
+ 
++// DREAM_TRACE_RTE=path: one line per `rte` with the guest state before it is taken, from both the
++// interpreter and the translated build. The two runs of the same input can then be diffed to the
++// first `rte` whose state differs, which is where a divergence in the task-switch path starts.
++void trace_rte(const Ctx& c) {
++    static FILE* out = [] {
++        const char* path = std::getenv("DREAM_TRACE_RTE");
++        return path ? std::fopen(path, "w") : nullptr;
++    }();
++    if (!out)
++        return;
++    std::fprintf(out, "%08x %08x %08x %08x %08x %08x", c.pc, c.spc, c.ssr, read_sr(c), c.pr,
++                 c.r[15]);
++    for (int i = 0; i < 16; ++i)
++        std::fprintf(out, " %08x", c.r[i]);
++    std::fprintf(out, "\n");
++}
++
+ bool rte(Ctx& c, ::dream::Memory& m) {
+     if (g_hooks) {
+         const bool unwind = g_hooks->in_exception_frame();
++        trace_rte(c);
+         g_hooks->on_rte(c, m);
+         return unwind;
+     }
+@@ -364,7 +410,24 @@ bool rte(Ctx& c, ::dream::Memory& m) {
      return false;
  }
  
