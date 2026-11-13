@@ -1772,6 +1772,13 @@ overlaps a written range.
 run now shows the dynamic textures being refreshed (21 decoded, 11 overwritten on a title-screen
 run) where it used to show none.
 
+**Completed later the same day:** only the ordinary 32-bit store reported. A 64-bit store and a
+store-queue burst -- which is how Katana's texture loader moves most of its bytes, including the
+consecutive-word uploads a title does mid-level -- went straight into video memory without telling
+the cache, so an upload that used them kept its old decode. `DcMemory::report_vram_write` is now
+called from every path into video memory, and `runtime/tests/test_memory.cpp` covers the word,
+64-bit and store-queue cases plus the main-RAM negative case.
+
 ## Patch 016: the capture replay exits after its screenshot (2026-11-13)
 
 `dream_render_view FILE --screenshot OUT` used to open a window and keep drawing until it was closed,
@@ -1827,6 +1834,47 @@ default rate and is unchanged; screenshot and capture frame numbers follow *pres
 targeting one with a raised rate means accounting for the repeats.
 
 The launcher exposes it as `-PresentRate 120`.
+
+## Patch 021: 4:3 menus and loading screens in widescreen (2026-11-13)
+
+The hor+ projection widens the field of view of 3D geometry, but the title, menus and loading cards
+are flat 2D art authored at 4:3. Presenting every frame stretched to the wide window distorted them.
+The two kinds of frame can be told apart from the display list: a 2D screen is made of quads whose
+vertices share one depth (`z = 1/w`), while a 3D scene has a depth span across its polygons. That is
+also exactly the set of frames the widened projection applies to.
+
+`frame_uses_depth(const Frame&)` (render library, unit-tested) makes the call. The boot runs it per
+submitted display list, switches to "3D" on the first frame with depth, and switches back to "2D"
+after two flat submissions so a single HUD-only or dropped world list cannot flash a pillarbox.
+Presentation then stretches only when the aspect was asked for, the displayed buffer is the
+renderer's, and the frame carried depth:
+
+```cpp
+presenter.stretch = wide_aspect > 0.0 && from_renderer && scene_3d;
+```
+
+Everything else -- title, options, save/load, the story and location cards, a movie decoded from
+video memory -- is fitted at 4:3 inside the wide window and pillarboxed. An in-game pause or quit
+dialog drawn over the live world is not one of those: the frame still carries the world, so it stays
+in the widescreen presentation. Making that 4:3 needs a pause-state or UI-overlay signal, which is a
+separate, title-specific job. Nothing is restored in the guest: a menu frame rendered with the x scale
+patched at `0x0C098640` is byte-identical to the same frame at 4:3, so the projection does not touch
+2D art and the 4:3 picture is the original one.
+`DREAM_TRACE_SCENE=1` prints the classification per submitted frame (`2D`/`3D`, strips, sprites,
+polygons) for checking a new screen.
+
+The bars exposed an older presenter bug. The fullscreen triangle is deliberately larger than the
+screen; when it is scaled down to letterbox, the part outside the image still rasterises and samples
+the texture past its edge, so the bar showed smeared edge texels (the left bar was black because the
+triangle starts exactly there, which is why it looked like a one-sided artifact). `present.frag` now
+discards fragments whose interpolated `uv` leaves the unit square, so the bars are the render pass's
+clear colour. This also fixes ordinary 4:3-in-a-wide-window letterboxing.
+
+Verified on the retail disc at 1280x720: title and the location/menu cards present as a 960x720 image
+centred with 160-pixel pure-black bars, no distortion; the in-game cutscene frame at the same guest
+frame is byte-identical to the pre-change widescreen capture, so gameplay and movies are untouched;
+the render suite passes 78/78 (1,350 assertions), including the new classifier test. 4:3 runs are
+unchanged: the presenter is not stretched and never leaves the unit square.
 
 ## Validation against the engine's own tests (2026-11-06)
 

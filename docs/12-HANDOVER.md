@@ -275,30 +275,23 @@ The engine changes are in `patches/0001-engine-local-changes.patch`; `setup.ps1`
 
 ## M9 plan (2026-11-13)
 
-M9 has three parts; one is already done, two need a decision and real work.
+M9 is done as of 2026-11-13: all three parts are implemented and checked.
 
 1. **Internal resolution scaling — done.** `--scale N` draws the geometry at N x 640x480 and resamples
    on the way into video memory, so the guest still sees 640x480. Checked at N=2: "drawing at
    1280x960".
-2. **16:9/21:9 with undistorted HUD — needs a choice of semantics.** The PVR receives already
-   projected coordinates at 4:3, so three behaviours are possible and they are not interchangeable:
-   * **pillarbox** -- 4:3 content, black bars. Correct picture, no extra view. Trivial.
-   * **stretch, HUD kept square** -- the 3D fills the wide frame and is horizontally stretched; HUD
-     polygons are drawn at their 4:3 scale. This is what the milestone wording implies, and what
-     widescreen launchers for other 3D titles do. Costs a per-polygon "is this HUD" split, which the
-     display list can only guess from sprite-vs-strip and screen-space coordinates.
-   * **hor+** -- widen the field of view. Needs the title's projection matrix, i.e. a per-title hook
-     the way Flycast's widescreen hack works. Best result, most work, and it is title-specific.
+2. **16:9/21:9 with undistorted HUD — done as hor+ for 3D, 4:3 for flat screens.** The PVR receives
+   already projected coordinates at 4:3, so the alternatives were pillarbox, a stretched 3D frame
+   with a per-polygon HUD split, or hor+. The title's projection x scale turned out to be a plain
+   float, so hor+ is what shipped, with the HUD riding the same projection and keeping its shape.
+   Flat 2D frames (title, menus, loading cards) do not use that projection and are now pillarboxed
+   at 4:3 instead of stretched; see below.
 3. **Render rate decoupled from 60 Hz logic — done.** `--present-rate N` (launcher `-PresentRate`)
    presents each guest frame `N/60` times with an even cadence; the guest is untouched. 300-frame
    runs at 60/120/144 give identical guest reports (same cycles and pc) with presented counts
    212/424/508. The remaining M9 text, "suite passes at 60/120/144", holds for the guest-facing
    checks (determinism, parity counters); only screenshot/capture targeting is expressed in
    presented frames and shifts with the rate.
- Two steps: present the last frame at the
-   panel's rate first (each guest frame shown N times, no interpolation), then optionally interpolate.
-   The frame limiter in the boot already knows the guest's 60 Hz cadence, so the first step is
-   contained.
 
 **hor+ found and implemented (2026-11-13).** The title's projection is not a matrix in RAM, but its
 x scale is a plain float at **0x0C098640** (0.75 = 4:3). It was found by patching every 0.75
@@ -313,12 +306,24 @@ x_scale_base = 0.75
 
 with `--aspect 16:9` (launcher: `-Widescreen`, or `-Aspect 21:9`). The boot patches the x scale to
 `base * (4/3)/aspect` and re-applies it every vertical blank, opens a window of that aspect, and the
-presenter fills it instead of letterboxing. Verified at 1280x720 and 1680x720: more world
+presenter stretches the frames that carry depth. Verified at 1280x720 and 1680x720: more world
 horizontally, no distortion. 4:3 stays the default and parity is unaffected.
 
 The HUD goes through the title's own projection, so it is squeezed with the world and stretched back
-by the presenter: it should keep its shape and move outward with the frame, which is what was asked
-for. Check it in play.
+by the presenter: it keeps its shape and moves outward with the frame.
+
+**4:3 menus and loading screens (2026-11-13).** The title, menus, story/location cards and loading
+screens are flat 2D art. They do not use the projection (a menu frame rendered with the x scale
+patched is byte-identical to the 4:3 one), so stretching them to the wide window was pure
+distortion. The boot now classifies each submitted display list with `frame_uses_depth` (any polygon
+with a depth span = 3D) and stretches only a 3D frame that came from the renderer; everything else
+is fitted at 4:3 and pillarboxed inside the wide window. (A pause or quit dialog drawn over the live
+world stays widescreen, because the frame still contains the world; separating a 2D overlay from the
+3D scene needs its own signal.) Verified at 1280x720: a 960x720 centred
+image with 160-pixel black bars for the title and menu cards, and an in-game cutscene frame that is
+byte-identical to the pre-change widescreen capture. The presenter also discards fragments outside
+the image now, which fixes the edge smear that used to appear in letterbox bars. See
+`docs/ENGINE-CHANGES.md` patch 021.
 
 ## Next phase
 

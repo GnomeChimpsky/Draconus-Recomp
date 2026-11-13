@@ -12,8 +12,9 @@ param(
     [switch]$Interpret,
     [switch]$Translated,
     [ValidateRange(1, 4)][int]$Scale = 1,
-    # -Widescreen: hor+ at 16:9. The title's projection is widened and the frame presented
-    # stretched, so more world is visible horizontally and nothing is distorted.
+    # -Widescreen: hor+ at 16:9. The title's projection is widened and 3D scenes are presented
+    # stretched, so more world is visible horizontally and nothing is distorted. Menus, the title
+    # and loading cards are flat 2D screens, keep their 4:3 shape, and are pillarboxed.
     # -Aspect takes any ratio, for example 21:9.
     [switch]$Widescreen,
     [string]$Aspect = "",

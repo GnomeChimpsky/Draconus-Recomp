@@ -114,9 +114,10 @@ remaining work.
 Controls: arrows = d-pad, `Z` `X` `A` `S` = A, B, X, Y, Enter = Start, `Q`/`W` = triggers,
 `F1` rebinds, `F10` frame counter, `F12` screenshot, Escape quits.
 
-**Display.** `-Widescreen` gives hor+ at 16:9: the game's projection is widened and the frame is
-presented stretched, so more of the world is visible horizontally and nothing is distorted.
-`-Aspect 21:9` takes any ratio, `-Scale 2` draws at twice the guest's resolution, and
+**Display.** `-Widescreen` gives hor+ at 16:9: the game's projection is widened and 3D frames are
+presented stretched, so more of the world is visible horizontally and nothing is distorted. Menus,
+the title and loading cards are flat 2D art, keep their 4:3 shape and are pillarboxed inside the
+wide window. `-Aspect 21:9` takes any ratio, `-Scale 2` draws at twice the guest's resolution, and
 `-PresentRate 120` presents the display at that rate while the game logic keeps its 60 Hz (the extra
 presents repeat the current image).
 

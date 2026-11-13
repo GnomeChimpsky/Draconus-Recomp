@@ -47,8 +47,10 @@ exclude = []
 
 [widescreen]
 # The projection x scale: 0.75 at this address is the 4:3 value. --aspect scales it by
-# (4/3)/aspect to widen the field of view, and the presenter then fills the wide window; found by
-# patching the 0.75 candidates one at a time and comparing the frame (2026-11-13).
+# (4/3)/aspect to widen the field of view, and 3D frames are presented stretched to fill the wide
+# window; found by patching the 0.75 candidates one at a time and comparing the frame (2026-11-13).
+# Frames with no depth are flat 2D screens (title, menus, loading cards) and are pillarboxed at 4:3
+# instead, so only the world is widened.
 x_scale_address = 0x0C098640
 x_scale_base = 0.75
 
