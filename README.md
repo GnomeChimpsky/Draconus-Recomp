@@ -114,11 +114,11 @@ remaining work.
 Controls: arrows = d-pad, `Z` `X` `A` `S` = A, B, X, Y, Enter = Start, `Q`/`W` = triggers,
 `F1` rebinds, `F10` frame counter, `F12` screenshot, Escape quits.
 
-**Display.** `-Widescreen` gives hor+ at 16:9 (the game's projection is widened widt the world and the
-frame presented stretched, so more is visible horizontally and nothing is distorted); `-Aspect 21:9`
-takes any ratio, and `-Scale 2` draws at twice the guest's resolution. `-PresentRate 120` presents the
-display at that rate while the game logic keeps its 60 Hz; the extra presents repeat the current
-image.
+**Display.** `-Widescreen` gives hor+ at 16:9: the game's projection is widened and the frame is
+presented stretched, so more of the world is visible horizontally and nothing is distorted.
+`-Aspect 21:9` takes any ratio, `-Scale 2` draws at twice the guest's resolution, and
+`-PresentRate 120` presents the display at that rate while the game logic keeps its 60 Hz (the extra
+presents repeat the current image).
 
 **Controllers.** A pad works on first plug-in: the left stick is the Dreamcast analogue stick, the
 face buttons are A/B/X/Y, the d-pad is the d-pad, Start is Start, the shoulders are C and Z, and the
