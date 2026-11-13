@@ -72,7 +72,7 @@ tools\launcher.bat
 ```
 
 Pick a `.gdi`, press **Verify** (it refuses anything that is not the USA V1.000 release and
-writes the config on success), choose a window scale and a path, press **Play**. The logic
+writes the config on success), choose a resolution and a path, press **Play**. The logic
 under the window is the same code the scripts use, and it has a headless self-test:
 
 ```powershell
@@ -145,7 +145,12 @@ artwork on the left, and Graphics, Audio and Gameplay tabs on the right.
 The tabs are described by one table in the script (`TABS`) plus their keys in `DEFAULTS`, so adding
 an option is a few lines rather than new layout code. Settings persist under
 `%APPDATA%\DraconusRecomp\launcher.json`; `python tools\launcher.py --selftest` checks the command
-each setting produces, and `--smoke` builds the window once and closes it.
+each setting produces, and `--smoke` builds the window, checks that selecting 4x and 16:9 really
+produces `--scale 4 --aspect 16:9`, and closes it.
+
+The resolution list is the scale the 3D is drawn at, not the size of the window: 4x draws
+2560x1920 and presents it into the window (960x720, or 1280x720 at 16:9). The game itself always
+sees its 640x480 framebuffer, which is why captures and reports say 640x480 at every setting.
 
 ## Rebuild the renderer build
 

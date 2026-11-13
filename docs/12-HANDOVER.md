@@ -270,8 +270,11 @@ The engine changes are in `patches/0001-engine-local-changes.patch`; `setup.ps1`
   replays it through `dream_render_view`; both checks are green. The replay tool used to hang when
   given `--screenshot` without `--frames` -- it opened a window and waited -- and now renders one
   frame and exits in that case.
-- **First non-blank frame vs Flycast: not yet measured.** Flycast is present at the documented path;
-  the capture procedure is in `docs/14-M3-M6-FLYCAST-REFERENCE.md`.
+- **First non-blank frame vs Flycast: measured.** `DREAM_FIRST_FRAME=1` puts our first non-black
+  frame (the Crave logo, fading in) at **1.8-2.2 s**; `tools\flycast-first-frame.ps1` puts
+  Flycast at 0.67 s for its licence screen and about 6 s for that same logo, because it plays the
+  licence first. Our picture appears earlier than Flycast's for the same content, so the gate is
+  met; the two screens themselves match (same logo, same layout).
 
 ## M9 plan (2026-11-13)
 

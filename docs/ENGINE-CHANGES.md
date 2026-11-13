@@ -1876,6 +1876,17 @@ frame is byte-identical to the pre-change widescreen capture, so gameplay and mo
 the render suite passes 78/78 (1,350 assertions), including the new classifier test. 4:3 runs are
 unchanged: the presenter is not stretched and never leaves the unit square.
 
+## Patch 021: first-frame measurement (2026-11-13)
+
+`DREAM_FIRST_FRAME=1` reports the first presented frame whose picture has a non-black pixel, with the
+presented frame, the guest frame and the time since the window opened. It is the M3 gate's "first
+non-blank frame" measurement and needs no screenshot.
+
+Measured: **our first non-blank is the Crave logo at 1.8-2.2 s** (presented 0, guest ~88).
+Flycast's first non-black frame is the Sega license screen at 0.67 s, and it reaches the same Crave
+logo at about 6 s because it plays the licence screen first (`tools\flycast-first-frame.ps1`). Our
+picture therefore appears earlier than Flycast's for the same content.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

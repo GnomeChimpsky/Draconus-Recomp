@@ -7,7 +7,7 @@ its key in DEFAULTS -- no new layout code.
 
 The non-UI half (command line, settings file) is separated out so it can be exercised without a
 window:  python tools/launcher.py --selftest
-         python tools/launcher.py --smoke      (builds the window once and closes it)
+         python tools/launcher.py --smoke      (builds the window, checks the controls, closes it)
 
 Run with:  python tools/launcher.py      (or tools\launcher.bat)
 """
@@ -220,6 +220,7 @@ class Launcher(tk.Tk):
         self.image_path = self._initial_image()
         self.status = tk.StringVar(value="Ready.")
         self.vars: dict[str, tk.Variable] = {}
+        self.combos: dict[str, ttk.Combobox] = {}
         self._dependent: list[tuple[str, str, tk.Widget]] = []
         self._build()
         self._sync_depends()
@@ -318,11 +319,15 @@ class Launcher(tk.Tk):
     def _control(self, tab: tk.Frame, c: dict) -> tk.Widget | None:
         kind, key = c["kind"], c.get("key")
         if kind == "combo":
-            var = tk.StringVar()
+            # The StringVar is the widget's textvariable, not a label beside it: _value_for reads
+            # the var, so it must be what the combobox holds. Without the binding the var stays
+            # empty and every selection silently falls back to the saved setting.
+            var = tk.StringVar(value=self._label_for(key))
             self.vars[key] = var
             labels = [label for label, _ in c["values"]]
-            box = ttk.Combobox(tab, values=labels, state="readonly", width=26)
-            box.set(self._label_for(key))
+            box = ttk.Combobox(tab, values=labels, state="readonly", width=26,
+                               textvariable=var)
+            self.combos[key] = box
             box.bind("<<ComboboxSelected>>", lambda _e: self._combo_changed(key))
             return box
         if kind == "entry":
@@ -427,6 +432,7 @@ class Launcher(tk.Tk):
         for child in list(self.children.values()):
             child.destroy()
         self.vars.clear()
+        self.combos.clear()
         self._dependent.clear()
         self._build()
         self._sync_depends()
@@ -568,10 +574,42 @@ def selftest() -> int:
     return 1 if failures else 0
 
 
+def check_ui(app: Launcher) -> list[str]:
+    """What the controls *do*, not just what they display.
+
+    A combobox that keeps its choice to itself shows the new label and quietly builds the old
+    command line; --selftest cannot see that, because it never touches a widget. Select the two
+    values a widescreen player selects and check the command line, then put them back.
+    """
+    failures = []
+
+    def pick(key: str, label: str) -> None:
+        box = app.combos[key]
+        box.set(label)
+        box.event_generate("<<ComboboxSelected>>")
+        app.update()
+
+    pick("scale", "4x - 2560 x 1920")
+    pick("aspect", "16:9 - hor+")
+    cmd = build_command(app.image_path or "disc.gdi", app.collect())
+    for flag in ("--scale", "4", "--aspect", "16:9"):
+        if flag not in cmd:
+            failures.append("4x + 16:9 lost %r: %s" % (flag, " ".join(cmd)))
+
+    pick("scale", "1x - 640 x 480 (native)")
+    pick("aspect", "Off - 4:3")
+    cmd = build_command(app.image_path or "disc.gdi", app.collect())
+    for flag in ("--scale", "--aspect"):
+        if flag in cmd:
+            failures.append("defaults kept %r: %s" % (flag, " ".join(cmd)))
+    return failures
+
+
 def smoke(shot: str | None = None) -> int:
     app = Launcher()
     app.update_idletasks()
     app.update()
+    failures = check_ui(app)
     if shot:
         # For checking the layout without a human: raise the window and grab every tab.
         try:
@@ -591,8 +629,10 @@ def smoke(shot: str | None = None) -> int:
         except Exception as exc:  # no Pillow, or no interactive desktop
             print("screenshot failed:", exc)
     app.destroy()
-    print("SMOKE OK")
-    return 0
+    for f in failures:
+        print("  -", f)
+    print("SMOKE OK" if not failures else "SMOKE FAILED")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
