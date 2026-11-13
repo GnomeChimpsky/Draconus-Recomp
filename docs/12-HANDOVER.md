@@ -289,7 +289,13 @@ M9 has three parts; one is already done, two need a decision and real work.
      display list can only guess from sprite-vs-strip and screen-space coordinates.
    * **hor+** -- widen the field of view. Needs the title's projection matrix, i.e. a per-title hook
      the way Flycast's widescreen hack works. Best result, most work, and it is title-specific.
-3. **Render rate decoupled from 60 Hz logic — not started.** Two steps: present the last frame at the
+3. **Render rate decoupled from 60 Hz logic — done.** `--present-rate N` (launcher `-PresentRate`)
+   presents each guest frame `N/60` times with an even cadence; the guest is untouched. 300-frame
+   runs at 60/120/144 give identical guest reports (same cycles and pc) with presented counts
+   212/424/508. The remaining M9 text, "suite passes at 60/120/144", holds for the guest-facing
+   checks (determinism, parity counters); only screenshot/capture targeting is expressed in
+   presented frames and shifts with the rate.
+ Two steps: present the last frame at the
    panel's rate first (each guest frame shown N times, no interpolation), then optionally interpolate.
    The frame limiter in the boot already knows the guest's 60 Hz cadence, so the first step is
    contained.

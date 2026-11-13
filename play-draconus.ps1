@@ -17,6 +17,9 @@ param(
     # -Aspect takes any ratio, for example 21:9.
     [switch]$Widescreen,
     [string]$Aspect = "",
+    # -PresentRate 120: present the display at that rate while the game logic keeps running at
+    # 60 Hz. The extra presents repeat the current image; 0 leaves one present per game frame.
+    [int]$PresentRate = 0,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$Extra
 )
 
@@ -55,6 +58,7 @@ $arguments = @("--config", $cfg, "--window")
 if ($Scale -ne 1) { $arguments += @("--scale", "$Scale") }
 $ratio = if ($Aspect) { $Aspect } elseif ($Widescreen) { "16:9" } else { "" }
 if ($ratio) { $arguments += @("--aspect", $ratio) }
+if ($PresentRate -gt 0) { $arguments += @("--present-rate", "$PresentRate") }
 if ($Interpret -and -not $Translated) { $arguments += "--interpret" }
 if ($Extra) { $arguments += $Extra }
 

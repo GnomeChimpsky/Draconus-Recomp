@@ -1814,6 +1814,20 @@ Verified at 1280x720 and 1680x720 in gameplay: more world horizontally, no disto
 goes through the same projection so it keeps its shape and moves outward with the frame. The cost is
 one float write per frame.
 
+## Patch 020: presentation decoupled from the 60 Hz logic (2026-11-13)
+
+`--present-rate N` presents the display N times a second while the guest's logic keeps running at
+60 Hz. Each guest frame is presented `N/60` times (2.4 for 144 Hz, carried as a fraction across
+frames), with the repeats spaced across the frame so the cadence is even. It is presentation only:
+the image is repeated, not interpolated, and the guest sees nothing different.
+
+Measured on a 300-frame windowed run: guest report identical at 60, 120 and 144 (same cycles, same
+pc), and presented counts 212, 424 and 508 -- exactly 1x, 2x and 2.4x. The parity suite runs at the
+default rate and is unchanged; screenshot and capture frame numbers follow *presented* frames, so
+targeting one with a raised rate means accounting for the repeats.
+
+The launcher exposes it as `-PresentRate 120`.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
