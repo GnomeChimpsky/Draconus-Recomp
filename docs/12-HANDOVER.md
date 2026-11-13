@@ -273,6 +273,27 @@ The engine changes are in `patches/0001-engine-local-changes.patch`; `setup.ps1`
 - **First non-blank frame vs Flycast: not yet measured.** Flycast is present at the documented path;
   the capture procedure is in `docs/14-M3-M6-FLYCAST-REFERENCE.md`.
 
+## M9 plan (2026-11-13)
+
+M9 has three parts; one is already done, two need a decision and real work.
+
+1. **Internal resolution scaling — done.** `--scale N` draws the geometry at N x 640x480 and resamples
+   on the way into video memory, so the guest still sees 640x480. Checked at N=2: "drawing at
+   1280x960".
+2. **16:9/21:9 with undistorted HUD — needs a choice of semantics.** The PVR receives already
+   projected coordinates at 4:3, so three behaviours are possible and they are not interchangeable:
+   * **pillarbox** -- 4:3 content, black bars. Correct picture, no extra view. Trivial.
+   * **stretch, HUD kept square** -- the 3D fills the wide frame and is horizontally stretched; HUD
+     polygons are drawn at their 4:3 scale. This is what the milestone wording implies, and what
+     widescreen launchers for other 3D titles do. Costs a per-polygon "is this HUD" split, which the
+     display list can only guess from sprite-vs-strip and screen-space coordinates.
+   * **hor+** -- widen the field of view. Needs the title's projection matrix, i.e. a per-title hook
+     the way Flycast's widescreen hack works. Best result, most work, and it is title-specific.
+3. **Render rate decoupled from 60 Hz logic — not started.** Two steps: present the last frame at the
+   panel's rate first (each guest frame shown N times, no interpolation), then optionally interpolate.
+   The frame limiter in the boot already knows the guest's 60 Hz cadence, so the first step is
+   contained.
+
 ## Next phase
 
 Order is by value per unit of risk, not by size:
