@@ -131,6 +131,22 @@ changes, which is the quickest way to tell a host problem from a game one. If SD
 because another driver has claimed it, the launcher falls back to XInput directly and lists the
 device as `XINPUT`.
 
+## Launcher
+
+`tools\launcher.bat` (or `python tools\launcher.py`) opens the graphical launcher: the game's own
+artwork on the left, and Graphics, Audio and Gameplay tabs on the right.
+
+* **Graphics** -- internal resolution (1x to 4x), widescreen (off, 16:9, 21:9 or a custom ratio,
+  hor+), present rate (60/120/144 Hz against the fixed 60 Hz logic), VSync and the frame counter.
+* **Audio** -- sound on/off, and recording the audio to a WAV file.
+* **Gameplay** -- translated or interpreter engine path, the frame limiter, the controller bindings
+  file, and the game disc.
+
+The tabs are described by one table in the script (`TABS`) plus their keys in `DEFAULTS`, so adding
+an option is a few lines rather than new layout code. Settings persist under
+`%APPDATA%\DraconusRecomp\launcher.json`; `python tools\launcher.py --selftest` checks the command
+each setting produces, and `--smoke` builds the window once and closes it.
+
 ## Rebuild the renderer build
 
 ```powershell

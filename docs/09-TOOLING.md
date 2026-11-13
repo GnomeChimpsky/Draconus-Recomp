@@ -55,6 +55,29 @@ Design constraints honoured by the tool:
 * Audio tracks are never read as user data.
 * Wrong dumps are refused by SHA-256 rather than half-processed.
 
+## Launcher (tools\launcher.py, tools\launcher.bat)
+
+A tabbed settings window: the game's own artwork on the left, Graphics / Audio / Gameplay on the
+right, and Play. It builds the boot command line from the settings through a pure `build_command`, so
+everything the window can do is also reachable from the command line:
+
+| tab | option | flag |
+|---|---|---|
+| Graphics | resolution | `--scale 1..4` |
+| | widescreen | `--aspect 16:9`, `21:9`, `W:H` |
+| | present rate | `--present-rate 60/120/144` |
+| | VSync off | `--present-mode immediate` |
+| | frame counter | `--fps` |
+| Audio | sound off | `--no-audio` |
+| | record to WAV | `--wav FILE` |
+| Gameplay | interpreter | `--interpret` |
+| | unthrottled | `--unthrottled` |
+
+Settings persist in `%APPDATA%\DraconusRecomp\launcher.json`. `--selftest` checks the command each
+setting produces without opening a window; `--smoke` (optionally `--shot FILE`) builds the window and
+exits, which is also how the layout is reviewed. The tabs are one table (`TABS`) plus their keys in
+`DEFAULTS`, so a new option is a few lines rather than new layout code.
+
 ## Engine build (already staged under `engine/`)
 
 The engine archive has **no submodules**, and CMake hard-fails without
