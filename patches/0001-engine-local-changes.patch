@@ -1500,7 +1500,7 @@ index 7d292b7..7f6d3f6 100644
      std::snprintf(buf, sizeof buf, "unimplemented instruction 0x%04x at 0x%08x", raw, pc);
      c.pc = pc;
 diff --git a/runtime/src/system.cpp b/runtime/src/system.cpp
-index b9813e7..3e05f23 100644
+index b9813e7..81b3ba0 100644
 --- a/runtime/src/system.cpp
 +++ b/runtime/src/system.cpp
 @@ -1,4 +1,5 @@
@@ -1519,18 +1519,19 @@ index b9813e7..3e05f23 100644
      c.spc = c.pc;
      c.sgr = c.r[15];
      sh4::write_sr(c, c.ssr | sh4::SR_BL | sh4::SR_MD | sh4::SR_RB);
-@@ -70,6 +73,10 @@ void System::enter_exception(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t vect
+@@ -70,6 +73,11 @@ void System::enter_exception(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t vect
      max_nesting = std::max(max_nesting, nesting);
      frame_pcs.push_back(c.spc);
      frame_sps.push_back(c.sgr);
 +    if (std::getenv("DREAM_TRACE_SWITCH"))
 +        std::fprintf(stderr,
-+                     "exc: vec 0x%03x pc 0x%08x spc 0x%08x r15 0x%08x nesting %u depth %zu\n",
-+                     vector_offset, c.spc, c.spc, c.r[15], nesting, frame_pcs.size());
++                     "exc: vec 0x%03x pc 0x%08x spc 0x%08x pr 0x%08x r15 0x%08x nesting %u "
++                     "depth %zu\n",
++                     vector_offset, c.spc, c.spc, c.pr, c.r[15], nesting, frame_pcs.size());
      // A non-local return inside the handler unwinds through here: keep the frame books straight.
      struct Frame {
          System& s;
-@@ -95,7 +102,11 @@ void System::enter_exception(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t vect
+@@ -95,7 +103,11 @@ void System::enter_exception(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t vect
          }
      } report{trace, c, pr_before, sp_before};
  #ifdef DREAM_DEV_INTERPRETER
@@ -1543,7 +1544,7 @@ index b9813e7..3e05f23 100644
          devinterp::Options iopt;
          iopt.call_translated = false;
          iopt.native_lo = hle::Bios::kHookSystem;
-@@ -103,12 +114,22 @@ void System::enter_exception(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t vect
+@@ -103,12 +115,22 @@ void System::enter_exception(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t vect
          devinterp::run(c, m, 0, iopt, nullptr);  // the handler's RTE ends the run
      } else
  #endif
@@ -1566,7 +1567,7 @@ index b9813e7..3e05f23 100644
          memory.intevt = sel->intevt;
          ++interrupts_delivered;
          ++delivered;
-@@ -120,6 +141,13 @@ unsigned System::deliver_pending(sh4::Ctx& c, ::dream::Memory& m) {
+@@ -120,6 +142,13 @@ unsigned System::deliver_pending(sh4::Ctx& c, ::dream::Memory& m) {
  }
  
  void System::on_poll(sh4::Ctx& c, ::dream::Memory& m) {
@@ -1580,7 +1581,7 @@ index b9813e7..3e05f23 100644
      if (c.cycles > sched.now())
          sched.advance_to(c.cycles);  // devices raise their interrupts here
      deliver_pending(c, m);
-@@ -135,6 +163,12 @@ void System::on_trapa(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t imm) {
+@@ -135,6 +164,12 @@ void System::on_trapa(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t imm) {
  }
  
  void System::on_rte(sh4::Ctx& c, ::dream::Memory& m) {
@@ -1593,7 +1594,7 @@ index b9813e7..3e05f23 100644
      const bool switched =
          !frame_pcs.empty() && (c.spc != frame_pcs.back() || c.r[15] != frame_sps.back());
      sh4::write_sr(c, c.ssr);
-@@ -144,7 +178,26 @@ void System::on_rte(sh4::Ctx& c, ::dream::Memory& m) {
+@@ -144,7 +179,26 @@ void System::on_rte(sh4::Ctx& c, ::dream::Memory& m) {
          // handler): the interrupted host frames belong to the suspended task. Drop them and let
          // run_guest re-enter the resumed task at its SPC (docs/emitter-design.md, "Non-local
          // returns"). The delivery frame's bookkeeping unwinds through enter_exception.
@@ -1620,7 +1621,7 @@ index b9813e7..3e05f23 100644
          if (first_switches.size() < 8)
              first_switches.push_back({frame_pcs.back(), frame_sps.back(), c.spc, c.r[15]});
          sh4::nonlocal_return(c, m, c.spc);
-@@ -159,11 +212,38 @@ void System::on_untranslated(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t targ
+@@ -159,11 +213,38 @@ void System::on_untranslated(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t targ
          untranslated_sites.emplace_back(target, c.pc);
  #ifdef DREAM_DEV_INTERPRETER
      // Run the untranslated code from memory until it returns to the caller's PR (or RTEs, for an

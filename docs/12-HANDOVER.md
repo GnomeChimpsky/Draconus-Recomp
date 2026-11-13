@@ -103,6 +103,23 @@ instruction at a time, never produces that pair. The next experiment is to log t
 game's task-save writes) and compare with the interpreter, then decide whether interrupt delivery needs
 a more exact PC.
 
+**The delivery behind it (2026-11-13).** With PR in the delivery log, the exception that plants the bad
+context is:
+
+```
+exc: vec 0x600 pc 0x0c0c7f7c spc 0x0c0c7f7c pr 0x0c0c7fbe r15 0x8c483b38 nesting 1 depth 1
+```
+
+The same run on the interpreter delivers 13,698 exceptions and **never once at `0x0C0C7F7C`**. So the
+boundary is one only the translated build's poll points can pick: a function entry reached by a tail
+jump (the `jmp` target of the call at `0x0C0C7FBA`), where PR still holds that call's return address —
+`0x0C0C7FBE`, which is the function's own epilogue. Re-entering the entry runs the prologue a second
+time and the epilogue then returns to `0x0C0C7FBE` again, popping a frame that is not there; the next
+indirect call reads zero. On hardware the same boundary is reachable in principle, so the remaining
+question is whether the restore should suppress the immediate re-delivery (the resumed entry poll
+delivers again while the source is still pending) -- that is the next experiment: suppress delivery on
+the entry poll that follows a non-local resume and see whether the double-epilogue goes away.
+
 **A third crash is still open.** A menu-heavy sequence (`--press "start@1000,a@1200,down@1500,
 down@1530,a@1600,down@4000,down@4030,a@4200"`) faults at frame 18,690 with the same signature the
 other two had:
