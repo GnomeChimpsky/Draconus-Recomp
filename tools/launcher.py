@@ -194,7 +194,8 @@ TABS = [
         {"kind": "check", "key": "unthrottled", "label": "Unthrottled (benchmarking)",
          "help": "Runs as fast as the host can instead of at the game's own clock. Useful for "
                  "measuring; games play wrong at the wrong speed."},
-        {"kind": "button", "action": "bindings", "label": "Controller bindings...",
+        {"kind": "button", "action": "bindings", "label": "Controller bindings",
+         "text": "Open bindings file...",
          "help": "Opens the per-user bindings file. In game, F1 (or the pad's select button) opens "
                  "the same screen."},
         {"kind": "disc", "label": "Game disc"},
@@ -287,30 +288,32 @@ class Launcher(tk.Tk):
                  justify="left", wraplength=560).pack(fill="x", pady=(10, 0))
 
     def _build_tab(self, tab: tk.Frame, controls: list[dict]) -> None:
-        tab.configure(padx=16, pady=14)
+        tab.configure(padx=18, pady=14)
         row = 0
         for c in controls:
             kind = c["kind"]
             if kind == "note":
                 tk.Label(tab, text=c["text"], bg=self.BG, fg=self.DIM, anchor="w",
-                         justify="left", wraplength=520).grid(
-                    row=row, column=0, columnspan=3, sticky="w", pady=(18, 0))
+                         justify="left", wraplength=700).grid(
+                    row=row, column=0, columnspan=2, sticky="w", pady=(18, 0))
                 row += 1
                 continue
 
-            label = c.get("label", "")
-            tk.Label(tab, text=label, bg=self.BG, fg=self.FG, anchor="w").grid(
-                row=row, column=0, sticky="w", pady=8)
-
+            tk.Label(tab, text=c.get("label", ""), bg=self.BG, fg=self.FG, anchor="w").grid(
+                row=row, column=0, sticky="w", pady=(10, 0))
             widget = self._control(tab, c)
             if widget is not None:
-                widget.grid(row=row, column=1, sticky="w", padx=12, pady=8)
+                widget.grid(row=row, column=1, sticky="w", padx=(18, 0), pady=(10, 0))
+            row += 1
+            # The explanation sits under its row rather than in a third column: a long radio label
+            # or a wide combo pushed a third column off the edge of the window.
             if c.get("help"):
                 tk.Label(tab, text=c["help"], bg=self.BG, fg=self.DIM, anchor="w",
-                         justify="left", wraplength=330).grid(
-                    row=row, column=2, sticky="w", pady=8)
-            row += 1
-        tab.columnconfigure(2, minsize=360, weight=1)
+                         justify="left", wraplength=720, font=("Segoe UI", 8)).grid(
+                    row=row, column=0, columnspan=2, sticky="w", pady=(2, 0))
+                row += 1
+        tab.columnconfigure(0, minsize=190)
+        tab.columnconfigure(1, weight=1)
 
     def _control(self, tab: tk.Frame, c: dict) -> tk.Widget | None:
         kind, key = c["kind"], c.get("key")
@@ -342,7 +345,8 @@ class Launcher(tk.Tk):
                     anchor="w")
             return frame
         if kind == "button":
-            return ttk.Button(tab, text=c.get("label", ""), command=self._action(c["action"]))
+            return ttk.Button(tab, text=c.get("text", c.get("label", "")),
+                              command=self._action(c["action"]))
         if kind == "wav":
             frame = tk.Frame(tab, bg=self.BG)
             var_on = tk.BooleanVar(value=bool(self.settings.get("wav_on", False)))
