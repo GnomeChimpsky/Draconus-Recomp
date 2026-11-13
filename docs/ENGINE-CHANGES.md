@@ -1829,9 +1829,11 @@ frames), with the repeats spaced across the frame so the cadence is even. It is 
 the image is repeated, not interpolated, and the guest sees nothing different.
 
 Measured on a 300-frame windowed run: guest report identical at 60, 120 and 144 (same cycles, same
-pc), and presented counts 212, 424 and 508 -- exactly 1x, 2x and 2.4x. The parity suite runs at the
-default rate and is unchanged; screenshot and capture frame numbers follow *presented* frames, so
-targeting one with a raised rate means accounting for the repeats.
+pc), and presented counts 212, 424 and 508 -- exactly 1x, 2x and 2.4x. That compared guest state,
+not wall time: it showed the guest saw the same frames, not that it reached them at the same speed.
+Patch 023 fixes the speed when presentation cannot keep up. The parity suite runs at the default
+rate and is unchanged; screenshot and capture frame numbers follow *presented* frames, so targeting
+one with a raised rate means accounting for the repeats.
 
 The launcher exposes it as `-PresentRate 120`.
 
@@ -1886,6 +1888,57 @@ Measured: **our first non-blank is the Crave logo at 1.8-2.2 s** (presented 0, g
 Flycast's first non-black frame is the Sega license screen at 0.67 s, and it reaches the same Crave
 logo at about 6 s because it plays the licence screen first (`tools\flycast-first-frame.ps1`). Our
 picture therefore appears earlier than Flycast's for the same content.
+
+## Patch 022: the window follows the scale, and fullscreen (2026-11-13)
+
+`--scale` used to change only the offscreen image: the window stayed 960x720, or 1280x720 at 16:9,
+so `--scale 4` drew 2560x1920 and then minified it into 960x720. The window now opens at the scale
+it names (`render/window_size.h`, unit-tested):
+
+| scale | 4:3 | 16:9 |
+|---|---|---|
+| 1 | 960x720 | 1280x720 |
+| 2 | 1280x960 | 1280x720 |
+| 3 | 1920x1440 | 1920x1080 |
+| 4 | 2560x1920 | 2560x1440 |
+
+The 720-line floor is what keeps 1x at the old default; 16:9 keeps the width the scale names and
+takes the height out of it, so 3x and 4x land on 1080p and 1440p. A window that does not fit is
+shrunk to 90% of the display's usable area (`fit_window`), preserving its aspect: on this
+2560x1440 screen 4x 4:3 opens at 1669x1252 and 4x 16:9 at 2226x1252, the largest windows that leave
+the frame and the taskbar room.
+
+`--fullscreen` (implies `--window`) uses SDL desktop fullscreen instead, which is the only way to
+get a 2560x1440 window on a 2560x1440 panel: a decorated window cannot fit around the screen.
+Verified on the RTX 3080 / 2560x1440 machine: `--fullscreen --scale 4 --aspect 16:9` reports
+`drawing at 2560x1920, showing 2560x1440`, with the projection patched to 0.5625 as before.
+
+Presentation had to follow. `Presenter::stretch` was a boolean: fill the window, on the assumption
+that the window's shape was the aspect the projection was patched for. A resized window, or a
+fullscreen display of a different shape, broke that assumption and distorted the picture. It is now
+`content_aspect`, the aspect the image was drawn for: the frame is fitted into a rectangle of that
+aspect inside the window, so a mismatch gives bars instead of a stretch. A widescreen 3D frame
+passes the patched aspect; flat 2D screens and 4:3 runs pass 0 and are fitted at 4:3 as before.
+
+Verified: render suite 81/81 (1,379 assertions), including the new window-size cases; the
+scale/aspect runs print the sizes above; the launcher's `--selftest` and `--smoke` pass, and the
+smoke check asserts that 4x + 16:9 really produce `--scale 4 --aspect 16:9`.
+
+## Patch 023: --present-rate is capped to the display (2026-11-13)
+
+`--present-rate 120` on a 60 Hz display did not smooth anything: every guest frame presented two
+pictures and each waited a vblank, so the guest ran at 30 Hz -- half speed. The rate is now capped
+to the display's refresh (`presents_per_frame`, unit-tested, `render/present_rate.h`) and the cap
+is announced: `present: 120 Hz requested, the display runs at 60 Hz; capping to it`.
+
+The repeats are best-effort as well. A guest frame already behind its own clock presents once and
+lets the pacing catch up instead of adding another repeat, so a display slower than the request, or
+a frame that took too long, cannot drag the guest down: the guest stays at 60 Hz and presentation
+drops the repeats it cannot afford. On a 165 Hz display at 4x fullscreen 16:9 over 6,000 frames,
+the guest ran at 1.0x real time at 60, 120 and 144 present rates (120 measured 0.8x before this);
+presented frames were 5,912 / 10,674 / 11,679.
+
+Verified: render suite 85/85 (1,392 assertions), including the present-rate cap cases.
 
 ## Validation against the engine's own tests (2026-11-06)
 

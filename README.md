@@ -117,9 +117,11 @@ Controls: arrows = d-pad, `Z` `X` `A` `S` = A, B, X, Y, Enter = Start, `Q`/`W` =
 **Display.** `-Widescreen` gives hor+ at 16:9: the game's projection is widened and 3D frames are
 presented stretched, so more of the world is visible horizontally and nothing is distorted. Menus,
 the title and loading cards are flat 2D art, keep their 4:3 shape and are pillarboxed inside the
-wide window. `-Aspect 21:9` takes any ratio, `-Scale 2` draws at twice the guest's resolution, and
-`-PresentRate 120` presents the display at that rate while the game logic keeps its 60 Hz (the extra
-presents repeat the current image).
+wide window. `-Aspect 21:9` takes any ratio, `-Scale 2` draws at twice the guest's resolution and
+opens the window at that size (4x at 16:9 is 2560x1440, shrunk to fit a smaller screen),
+`-Fullscreen` fills the display instead of opening a window, and `-PresentRate 120` presents the
+display at up to that rate while the game logic keeps its 60 Hz (the extra presents repeat the
+current image; a slower display caps the rate instead of slowing the game down).
 
 **Controllers.** A pad works on first plug-in: the left stick is the Dreamcast analogue stick, the
 face buttons are A/B/X/Y, the d-pad is the d-pad, Start is Start, the shoulders are C and Z, and the
@@ -136,8 +138,10 @@ device as `XINPUT`.
 `tools\launcher.bat` (or `python tools\launcher.py`) opens the graphical launcher: the game's own
 artwork on the left, and Graphics, Audio and Gameplay tabs on the right.
 
-* **Graphics** -- internal resolution (1x to 4x), widescreen (off, 16:9, 21:9 or a custom ratio,
-  hor+), present rate (60/120/144 Hz against the fixed 60 Hz logic), VSync and the frame counter.
+* **Graphics** -- internal resolution (1x to 4x, which is also the window size: 4x at 16:9 is
+  2560x1440), widescreen (off, 16:9, 21:9 or a custom ratio, hor+), fullscreen at the display's own
+  size, present rate (60/120/144 Hz against the fixed 60 Hz logic, capped to the display's refresh),
+  VSync and the frame counter.
 * **Audio** -- sound on/off, and recording the audio to a WAV file.
 * **Gameplay** -- translated or interpreter engine path, the frame limiter, the controller bindings
   file, and the game disc.
@@ -148,9 +152,12 @@ an option is a few lines rather than new layout code. Settings persist under
 each setting produces, and `--smoke` builds the window, checks that selecting 4x and 16:9 really
 produces `--scale 4 --aspect 16:9`, and closes it.
 
-The resolution list is the scale the 3D is drawn at, not the size of the window: 4x draws
-2560x1920 and presents it into the window (960x720, or 1280x720 at 16:9). The game itself always
-sees its 640x480 framebuffer, which is why captures and reports say 640x480 at every setting.
+The resolution list is the scale the 3D is drawn at and the size the window opens at: 4x is
+2560x1920 at 4:3, or 2560x1440 at 16:9 (16:9 keeps the 2560 width and takes the height out of it).
+A window larger than the screen is shrunk to fit, so on a 1080p display 4x opens at the largest
+16:9 the screen allows; **Fullscreen** takes the display's own mode instead, which is how 4x 16:9
+becomes exactly 2560x1440 on a 2560x1440 panel. The game itself always sees its 640x480
+framebuffer, which is why captures and reports say 640x480 at every setting.
 
 ## Rebuild the renderer build
 

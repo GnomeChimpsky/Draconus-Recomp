@@ -5,7 +5,7 @@ against that commit, so a fresh clone builds the same engine this project was de
 
 | Patch | What it carries |
 |---|---|
-| `0001-engine-local-changes.patch` | The sum of ledger entries 001–021 in `docs/ENGINE-CHANGES.md`: the diagnostics and instruction tracer, the hook-dispatch fix, the replay host-state skip, the SR-write rule, the exception-handler stop address (the translated-path fault), the flash side-effect marking, the inlined RAM fast path, cached host memory for the offscreen readback, hor+ widescreen, presentation decoupled from the 60 Hz logic, and 4:3 pillarboxing for flat 2D screens (`frame_uses_depth`, plus the presenter's bar discard). Touches `runtime/`, `translator/`, `render/` and `cmake/`. |
+| `0001-engine-local-changes.patch` | The sum of ledger entries 001–023 in `docs/ENGINE-CHANGES.md`: the diagnostics and instruction tracer, the hook-dispatch fix, the replay host-state skip, the SR-write rule, the exception-handler stop address (the translated-path fault), the flash side-effect marking, the inlined RAM fast path, cached host memory for the offscreen readback, hor+ widescreen, presentation decoupled from the 60 Hz logic, 4:3 pillarboxing for flat 2D screens (`frame_uses_depth`, plus the presenter's bar discard), the window following `--scale` with `--fullscreen` and a content aspect (`window_size`, `content_aspect`), and `--present-rate` capped to the display's refresh (`present_rate`). Touches `runtime/`, `translator/`, `render/` and `cmake/`. |
 
 `setup.ps1` applies each patch after fetching the engine, and is safe to re-run: a tree that
 already has the patch is detected with `git apply --reverse --check` and left alone.

@@ -45,6 +45,7 @@ DEFAULTS = {
     "aspect_custom": "16:9",
     "present_rate": 0,
     "vsync": True,
+    "fullscreen": False,
     "fps": False,
     "audio": True,
     "wav": "",
@@ -129,6 +130,8 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
         cmd += ["--present-rate", str(int(s["present_rate"]))]
     if not s.get("vsync", True):
         cmd += ["--present-mode", "immediate"]
+    if s.get("fullscreen"):
+        cmd += ["--fullscreen"]
     if s.get("fps"):
         cmd += ["--fps"]
     if s.get("unthrottled"):
@@ -156,8 +159,9 @@ TABS = [
         {"kind": "combo", "key": "scale", "label": "Resolution",
          "values": [("1x - 640 x 480 (native)", 1), ("2x - 1280 x 960", 2),
                     ("3x - 1920 x 1440", 3), ("4x - 2560 x 1920", 4)],
-         "help": "Draws the 3D at a multiple of the guest's resolution; the game still sees "
-                 "640 x 480, so nothing about it changes."},
+         "help": "Draws the 3D at a multiple of the guest's resolution and opens the window at "
+                 "that size (16:9 is 2560 x 1440 at 4x); the game still sees 640 x 480, so "
+                 "nothing about it changes."},
         {"kind": "combo", "key": "aspect", "label": "Widescreen",
          "values": [("Off - 4:3", "off"), ("16:9 - hor+", "16:9"),
                     ("21:9 - hor+", "21:9"), ("Custom ratio - hor+", "custom")],
@@ -168,11 +172,16 @@ TABS = [
          "help": "Two numbers, for example 32:9."},
         {"kind": "combo", "key": "present_rate", "label": "Present rate",
          "values": [("Match the game (60 Hz)", 0), ("120 Hz", 120), ("144 Hz", 144)],
-         "help": "The display refreshes at this rate while the game logic stays at 60 Hz. Frames "
-                 "are repeated, not interpolated."},
+         "help": "Presents up to this rate while the game logic stays at 60 Hz. Frames are "
+                 "repeated, not interpolated; a display that cannot show them caps the rate "
+                 "rather than slowing the game down."},
         {"kind": "check", "key": "vsync", "label": "VSync",
          "help": "On, the picture is presented in step with the display. Off, it is presented "
                  "immediately, which tears but removes the display's pacing."},
+        {"kind": "check", "key": "fullscreen", "label": "Fullscreen",
+         "help": "Fills the display at its own resolution. Windowed, the window follows the "
+                 "Resolution setting (1920 x 1080 at 3x and 16:9, 2560 x 1440 at 4x), shrunk to "
+                 "fit the screen if it is smaller."},
         {"kind": "check", "key": "fps", "label": "Show the frame counter",
          "help": "Starts with the overlay on. F10 toggles it in game."},
     ]),
@@ -511,6 +520,8 @@ class Launcher(tk.Tk):
                         else s["aspect"] + " hor+")
         if int(s["present_rate"]):
             bits.append("%d Hz present" % int(s["present_rate"]))
+        if s["fullscreen"]:
+            bits.append("fullscreen")
         if s["path"] == "interpreter":
             bits.append("interpreter")
         self.status.set("Running" + ((" - " + ", ".join(bits)) if bits else "") + ".")
@@ -533,8 +544,8 @@ def selftest() -> int:
                 failures.append("%s: missing %s" % (name, f))
 
     base = {"scale": 1, "aspect": "off", "aspect_custom": "16:9", "present_rate": 0,
-            "vsync": True, "fps": False, "audio": True, "wav": "", "unthrottled": False,
-            "path": "translated"}
+            "vsync": True, "fullscreen": False, "fps": False, "audio": True, "wav": "",
+            "unthrottled": False, "path": "translated"}
     image = "G:/dumps/draconus.gdi"
 
     cmd = build_command(image, base)
@@ -547,8 +558,10 @@ def selftest() -> int:
     cmd = build_command(image, dict(base, aspect="custom", aspect_custom="32:9"))
     expect("custom aspect", cmd, ["--aspect", "32:9"])
 
-    cmd = build_command(image, dict(base, vsync=False, fps=True, unthrottled=True))
-    expect("toggles", cmd, ["--present-mode", "immediate", "--fps", "--unthrottled"])
+    cmd = build_command(image, dict(base, vsync=False, fps=True, unthrottled=True,
+                                    fullscreen=True))
+    expect("toggles", cmd, ["--present-mode", "immediate", "--fps", "--unthrottled",
+                            "--fullscreen"])
 
     cmd = build_command(image, dict(base, audio=False, wav="C:/tmp/run.wav", wav_on=True))
     expect("audio", cmd, ["--no-audio", "--wav", "C:/tmp/run.wav"])

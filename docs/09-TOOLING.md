@@ -63,9 +63,10 @@ everything the window can do is also reachable from the command line:
 
 | tab | option | flag |
 |---|---|---|
-| Graphics | resolution | `--scale 1..4` |
+| Graphics | resolution | `--scale 1..4` (also the window size) |
 | | widescreen | `--aspect 16:9`, `21:9`, `W:H` |
-| | present rate | `--present-rate 60/120/144` |
+| | fullscreen | `--fullscreen` |
+| | present rate | `--present-rate 60/120/144` (capped to the display's refresh) |
 | | VSync off | `--present-mode immediate` |
 | | frame counter | `--fps` |
 | Audio | sound off | `--no-audio` |
