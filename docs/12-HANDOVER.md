@@ -294,15 +294,25 @@ M9 has three parts; one is already done, two need a decision and real work.
    The frame limiter in the boot already knows the guest's 60 Hz cadence, so the first step is
    contained.
 
-**hor+ reconnaissance (2026-11-13):** the projection is not a persistent RAM matrix. `DREAM_SCAN_MATRIX`
-(at the blank) and `DREAM_SCAN_MATRIX_RENDER` (at a display-list submission) both find only view
-rotations in a 4:3 ratio and no matrix with a perspective row in gameplay. So the title either
-builds it transiently inside a frame or projects per vertex with scale constants. The debug `--patch ADDR=VALUE` is in place and pokes RAM before the first frame. Two candidates
-were tried on a gameplay frame: the 1.3333 aspect float (0x0C0B1E90) and the adjacent 320/240
-screen pair (0x0C0D8128/2C). Both leave the frame **byte-identical**, so neither is in the
-projection path. The next step is a read-watch on the remaining candidates and an XMTRX (FPU
-matrix) dump from the main loop -- the Sega/Ninja path loads the projection into XMTRX for FTRV,
-and that dump needs the Ctx threaded into the frame loop.
+**hor+ found and implemented (2026-11-13).** The title's projection is not a matrix in RAM, but its
+x scale is a plain float at **0x0C098640** (0.75 = 4:3). It was found by patching every 0.75
+candidate to 0.5625 and diffing the frame: only that address changes the whole picture, the rest
+are inert or touch one object. Implementation:
+
+```toml
+[widescreen]
+x_scale_address = 0x0C098640
+x_scale_base = 0.75
+```
+
+with `--aspect 16:9` (launcher: `-Widescreen`, or `-Aspect 21:9`). The boot patches the x scale to
+`base * (4/3)/aspect` and re-applies it every vertical blank, opens a window of that aspect, and the
+presenter fills it instead of letterboxing. Verified at 1280x720 and 1680x720: more world
+horizontally, no distortion. 4:3 stays the default and parity is unaffected.
+
+The HUD goes through the title's own projection, so it is squeezed with the world and stretched back
+by the presenter: it should keep its shape and move outward with the frame, which is what was asked
+for. Check it in play.
 
 ## Next phase
 

@@ -12,6 +12,11 @@ param(
     [switch]$Interpret,
     [switch]$Translated,
     [ValidateRange(1, 4)][int]$Scale = 1,
+    # -Widescreen: hor+ at 16:9. The title's projection is widened and the frame presented
+    # stretched, so more world is visible horizontally and nothing is distorted.
+    # -Aspect takes any ratio, for example 21:9.
+    [switch]$Widescreen,
+    [string]$Aspect = "",
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$Extra
 )
 
@@ -48,6 +53,8 @@ if ((Test-Path $sdl) -and -not (Test-Path $dll)) {
 
 $arguments = @("--config", $cfg, "--window")
 if ($Scale -ne 1) { $arguments += @("--scale", "$Scale") }
+$ratio = if ($Aspect) { $Aspect } elseif ($Widescreen) { "16:9" } else { "" }
+if ($ratio) { $arguments += @("--aspect", $ratio) }
 if ($Interpret -and -not $Translated) { $arguments += "--interpret" }
 if ($Extra) { $arguments += $Extra }
 

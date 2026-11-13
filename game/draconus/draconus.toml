@@ -45,6 +45,13 @@ extra = [0x0C187B1C]
 entry_polls = false
 exclude = []
 
+[widescreen]
+# The projection x scale: 0.75 at this address is the 4:3 value. --aspect scales it by
+# (4/3)/aspect to widen the field of view, and the presenter then fills the wide window; found by
+# patching the 0.75 candidates one at a time and comparing the frame (2026-11-13).
+x_scale_address = 0x0C098640
+x_scale_base = 0.75
+
 [[relocations]]
 # Detected by --suggest-config: the game copies 56 bytes from the image to the
 # general-exception vector at VBR+0x600 (VBR = 0x8C000000) and runs it there.

@@ -28,6 +28,21 @@ index e9d1aa2..9727846 100644
      Start,
      Up,
      Down,
+diff --git a/render/include/dream/render/vk/present.h b/render/include/dream/render/vk/present.h
+index 4424f49..f3bbdda 100644
+--- a/render/include/dream/render/vk/present.h
++++ b/render/include/dream/render/vk/present.h
+@@ -54,6 +54,10 @@ public:
+     // shader averages them, so --scale finally produces the anti-aliasing it was already paying
+     // for.
+     bool smooth = false;
++    // Fill the whole window instead of fitting the image aspect inside it. Widescreen uses it:
++    // the guest still renders 4:3, and the projection was widened to match the target aspect, so
++    // stretching is what restores the proportions.
++    bool stretch = false;
+ 
+     const std::string& error() const noexcept { return error_; }
+ 
 diff --git a/render/include/dream/render/vk/resources.h b/render/include/dream/render/vk/resources.h
 index eaee9e3..3476772 100644
 --- a/render/include/dream/render/vk/resources.h
@@ -119,6 +134,26 @@ index 41d2488..127d723 100644
          error_ = "could not allocate the readback buffer";
          return false;
      }
+diff --git a/render/src/vk/present.cpp b/render/src/vk/present.cpp
+index f3d3c96..06f3460 100644
+--- a/render/src/vk/present.cpp
++++ b/render/src/vk/present.cpp
+@@ -346,10 +346,13 @@ bool Presenter::draw(VkCommandBuffer cmd, VkExtent2D target) {
+     const float target_aspect =
+         static_cast<float>(target.width) / static_cast<float>(target.height);
+     PushConstants push{{1.0f, 1.0f}, {0.0f, 0.0f}, {0.0f, 0.0f}, {1.0f, 1.0f}};
+-    if (target_aspect > image_aspect)
++    if (stretch) {
++        // Widescreen: the image already carries the wide field of view, so fill the window.
++    } else if (target_aspect > image_aspect) {
+         push.scale[0] = image_aspect / target_aspect;
+-    else
++    } else {
+         push.scale[1] = target_aspect / image_aspect;
++    }
+ 
+     // How many source pixels each drawn pixel covers. --scale draws the guest's 640x480 at a
+     // multiple of that and the window is usually smaller than the result, so this is normally
 diff --git a/render/src/vk/resources.cpp b/render/src/vk/resources.cpp
 index 78777d2..02b815d 100644
 --- a/render/src/vk/resources.cpp
@@ -515,10 +550,35 @@ index 5980e74..554297c 100644
    src/maple/maple.cpp
    src/aica/arm7.cpp
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 9dff7cd..7f56efa 100644
+index 9dff7cd..89d860f 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
-@@ -147,15 +147,65 @@ struct Live {
+@@ -125,9 +125,15 @@ struct Live {
+     // `scale` multiplies the resolution the geometry is drawn at. The frame is resampled back to
+     // the guest's own framebuffer on the way into video memory, so a higher setting sharpens the
+     // geometry without lying to the guest about the size of its screen.
+-    bool start(unsigned scale, bool validation, const std::string& title) {
++    bool start(unsigned scale, bool validation, const std::string& title, double aspect = 0.0) {
+         const std::uint32_t w = kGuestWidth * scale, h = kGuestHeight * scale;
+-        if (!window.create(title.c_str(), 960, 720, validation)) {
++        // A wide aspect widens the window, not the offscreen image: the guest still renders 4:3
++        // geometry, and the presenter stretches that into the window. Combined with the title's
++        // widened projection this is hor+: more world horizontally, no distortion on screen.
++        const int window_h = 720;
++        const int window_w =
++            aspect > 0.0 ? static_cast<int>(window_h * aspect + 0.5) : 960;
++        if (!window.create(title.c_str(), window_w, window_h, validation)) {
+             error = window.error();
+             return false;
+         }
+@@ -141,21 +147,81 @@ struct Live {
+             error = renderer.error();
+             return false;
+         }
++        presenter.stretch = aspect > 0.0;
+         if (!presenter.create(window.context(), window.render_pass())) {
+             error = presenter.error();
+             return false;
          }
          renderer.set_memory(memory_.vram(), dream::mem::DcMemory::kVramSize,
                              pvr_.reg_block() + 0x1000 / 4, palette_format());
@@ -580,17 +640,55 @@ index 9dff7cd..7f56efa 100644
 +                scan_projection_candidates();
 +            }
 +        }
++        {
++            static const char* scan_stack = std::getenv("DREAM_SCAN_STACK");
++            static bool scanned_stack = false;
++            if (scan_stack && !scanned_stack &&
++                guest_frame >= std::strtoull(scan_stack, nullptr, 0)) {
++                scanned_stack = true;
++                scan_stack_candidates();
++            }
++        }
 +        flush_vram_writes();
          decoder.reset();
          decoder.feed_stream(stream.data(), stream.size());
          // The plane the whole frame sits on is not in the stream: the title writes it into the
-@@ -270,15 +320,69 @@ struct Live {
+@@ -270,15 +336,128 @@ struct Live {
          renderer.textures().invalidate_range(target.address, target.address + bytes);
      }
  
 +    // Looks through RAM for projection-matrix candidates: a 4x4 float matrix whose x and y scales
 +    // are in a 4:3 (or 16:9) ratio and whose perspective row carries a -1. The title's projection
 +    // is one of them; widening its x scale is what hor+ needs. DREAM_SCAN_MATRIX=<frame>.
++    // Same idea over the guest stack only: a projection built for the frame is stack-local and gone
++    // by the vertical blank, but it can still be live when the display list is submitted. The stack
++    // lives at 0x8C48xxxx, which is RAM offset 0x48xxxx.
++    void scan_stack_candidates() {
++        const std::uint8_t* ram = memory_.ram();
++        const float* f = reinterpret_cast<const float*>(ram + 0x480000);
++        const std::size_t words = 0x4000 / 4;  // the top 16 KB
++        int printed = 0;
++        for (std::size_t i = 0; i + 16 <= words && printed < 10; ++i) {
++            const float* m = f + i;
++            const double m00 = m[0], m11 = m[5];
++            if (!(std::isfinite(m00) && std::isfinite(m11)))
++                continue;
++            const double ax = std::fabs(m00), ay = std::fabs(m11);
++            if (ax < 0.05 || ay < 0.05 || ax > 100.0 || ay > 100.0)
++                continue;
++            const double ratio = ay > ax ? ay / ax : ax / ay;
++            if (std::fabs(ratio - 4.0 / 3.0) > 0.02 && std::fabs(ratio - 16.0 / 9.0) > 0.02)
++                continue;
++            std::printf("stack matrix %08x ratio %.4f:", 0x0C480000u + static_cast<unsigned>(i * 4),
++                        ratio);
++            for (int k = 0; k < 16; ++k)
++                std::printf(" %.4f", static_cast<double>(m[k]));
++            std::printf("\n");
++            ++printed;
++        }
++        std::printf("stack scan at frame %llu: %d candidate(s)\n",
++                    static_cast<unsigned long long>(guest_frame), printed);
++    }
 +    void scan_projection_candidates() {
 +        const float* f = reinterpret_cast<const float*>(memory_.ram());
 +        const std::size_t words = (16u << 20) / 4;
@@ -639,6 +737,36 @@ index 9dff7cd..7f56efa 100644
          update_counter(guest_cycles);
          pump_menu();
  
++        // DREAM_SCAN_SCREEN=<frame>: look through RAM once for adjacent float pairs whose ratio is
++        // 4:3 and whose sizes look like a screen. A title that keeps its screen size in a structure
++        // can be widened by patching the pair -- with --patch and DREAM_PATCH_REPEAT, because the
++        // structure may be rewritten every frame.
++        {
++            static const char* scan_screen = std::getenv("DREAM_SCAN_SCREEN");
++            static bool scanned_screen = false;
++            if (scan_screen && !scanned_screen && frame >= std::strtoull(scan_screen, nullptr, 0)) {
++                scanned_screen = true;
++                const float* f = reinterpret_cast<const float*>(memory_.ram());
++                const std::size_t words = (16u << 20) / 4;
++                int printed = 0;
++                for (std::size_t i = 0; i + 1 < words && printed < 16; ++i) {
++                    const float w = f[i], h = f[i + 1];
++                    if (!(std::isfinite(w) && std::isfinite(h)))
++                        continue;
++                    if (w < 100.0f || w > 2000.0f || h < 75.0f || h > 1500.0f)
++                        continue;
++                    const double ratio = static_cast<double>(w) / static_cast<double>(h);
++                    if (std::fabs(ratio - 4.0 / 3.0) > 0.002)
++                        continue;
++                    std::printf("screen pair %08x: %.2f x %.2f\n",
++                                0x0C000000u + static_cast<unsigned>(i * 4),
++                                static_cast<double>(w), static_cast<double>(h));
++                    ++printed;
++                }
++                std::printf("screen scan at frame %llu: %d pair(s)\n",
++                            static_cast<unsigned long long>(guest_frame), printed);
++            }
++        }
 +        // DREAM_SCAN_MATRIX=<frame>: once, look through RAM for 4x4 float matrices whose x/y
 +        // scales are in a 4:3 ratio. The title's projection lives in one of them; widening its
 +        // x scale is what a hor+ widescreen needs, and this is how the matrix is found.
@@ -654,7 +782,7 @@ index 9dff7cd..7f56efa 100644
          dream::render::FramebufferInfo fb;
          const bool described = dream::render::describe_framebuffer(pvr_.reg_block(), fb);
          // The guest is displaying the buffer the renderer drew into, so show what was drawn rather
-@@ -302,26 +406,33 @@ struct Live {
+@@ -302,26 +481,33 @@ struct Live {
  
          std::uint32_t image = 0;
          VkCommandBuffer cmd = VK_NULL_HANDLE;
@@ -702,7 +830,7 @@ index 9dff7cd..7f56efa 100644
          VkClearValue clears[2]{};
          clears[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
          clears[1].depthStencil = {0.0f, 0};
-@@ -342,10 +453,13 @@ struct Live {
+@@ -342,10 +528,13 @@ struct Live {
          const VkRect2D scissor{{0, 0}, window.extent()};
          vkCmdSetViewport(cmd, 0, 1, &viewport);
          vkCmdSetScissor(cmd, 0, 1, &scissor);
@@ -719,7 +847,7 @@ index 9dff7cd..7f56efa 100644
          ++presented;
          if (window.pressed(dream::render::vk::Control::ToggleFps)) {
              show_fps = !show_fps;
-@@ -387,6 +501,10 @@ struct Live {
+@@ -387,6 +576,10 @@ struct Live {
              held |= dream::maple::kX;
          if (window.pad_held(PadControl::Y))
              held |= dream::maple::kY;
@@ -730,7 +858,7 @@ index 9dff7cd..7f56efa 100644
          if (window.pad_held(PadControl::Start))
              held |= dream::maple::kStart;
          pad.buttons = static_cast<std::uint16_t>(0xFFFFu & ~held);
-@@ -919,6 +1037,21 @@ std::string report_text(dream::System& sys, dream::hle::Bios& bios, const dream:
+@@ -919,6 +1112,21 @@ std::string report_text(dream::System& sys, dream::hle::Bios& bios, const dream:
      std::snprintf(buf, sizeof buf, "untranslated call targets: %llu\n",
                    static_cast<unsigned long long>(sys.untranslated.total()));
      s += buf;
@@ -752,7 +880,17 @@ index 9dff7cd..7f56efa 100644
      s += sys.untranslated.format();
      for (const auto& [target, from] : sys.untranslated_sites) {
          std::snprintf(buf, sizeof buf, "  0x%08x called from 0x%08x\n", target, from);
-@@ -1270,8 +1403,28 @@ int main(int argc, char** argv) {
+@@ -1245,6 +1453,9 @@ int main(int argc, char** argv) {
+     std::string suggest_config;
+     std::uint64_t screenshot_at = 0, capture_at = 0;
+     unsigned scale = 1;
++    // --aspect W:H (or a decimal): present the 4:3 frame in a window of that aspect and, when the
++    // title config names a projection x scale, widen the field of view to match (hor+). 0 is 4:3.
++    double aspect = 0.0;
+     // --rtc-seed N: a fixed console clock, so two runs of the same build do the same thing and can
+     // be compared. Any non-zero value will do; the number itself only changes the date a title
+     // shows.
+@@ -1270,8 +1481,28 @@ int main(int argc, char** argv) {
      // functions, because comparing every call is slow.
      bool replay_all = false, replay_self_check = false;
      std::string replay_only;
@@ -782,7 +920,26 @@ index 9dff7cd..7f56efa 100644
              config = argv[++i];
          else if (!std::strcmp(argv[i], "--report") && i + 1 < argc)
              report = argv[++i];
-@@ -1300,6 +1453,7 @@ int main(int argc, char** argv) {
+@@ -1285,6 +1516,18 @@ int main(int argc, char** argv) {
+             sample_file = argv[++i];
+         else if (!std::strcmp(argv[i], "--sample") && i + 1 < argc)
+             sample_every = std::strtoull(argv[++i], nullptr, 0);
++        else if (!std::strcmp(argv[i], "--aspect") && i + 1 < argc) {
++            const char* spec = argv[++i];
++            const char* colon = std::strchr(spec, ':');
++            if (colon) {
++                const double aw = std::strtod(spec, nullptr);
++                const double ah = std::strtod(colon + 1, nullptr);
++                if (aw > 0.0 && ah > 0.0)
++                    aspect = aw / ah;
++            } else {
++                aspect = std::strtod(spec, nullptr);
++            }
++        }
+         else if (!std::strcmp(argv[i], "--interpret"))
+             interpret_all = true;
+         else if (!std::strcmp(argv[i], "--wav") && i + 1 < argc)
+@@ -1300,6 +1543,7 @@ int main(int argc, char** argv) {
          else if (!std::strcmp(argv[i], "--screenshot-presented"))
              shot_presented = true;
          else if (!std::strcmp(argv[i], "--present-mode") && i + 1 < argc) {
@@ -790,7 +947,7 @@ index 9dff7cd..7f56efa 100644
              const char* m = argv[++i];
              using PM = dream::render::vk::Window::PresentMode;
              if (!std::strcmp(m, "mailbox"))
-@@ -1312,6 +1466,13 @@ int main(int argc, char** argv) {
+@@ -1312,6 +1556,13 @@ int main(int argc, char** argv) {
                  std::fprintf(stderr, "unknown present mode %s: vsync, mailbox or immediate\n", m);
                  return 2;
              }
@@ -804,7 +961,53 @@ index 9dff7cd..7f56efa 100644
          } else if (!std::strcmp(argv[i], "--bindings") && i + 1 < argc) {
              bindings_file = argv[++i];
              bindings_file_set = true;
-@@ -1789,6 +1950,21 @@ int main(int argc, char** argv) {
+@@ -1410,6 +1661,23 @@ int main(int argc, char** argv) {
+         std::fprintf(stderr, "%s\n", err.c_str());
+         return 2;
+     }
++    // Widescreen (hor+): scale the title's projection x scale by (4/3)/aspect, which widens the
++    // field of view, and present the frame in a window of that aspect. The title rebuilds the value
++    // as it goes, so it is re-applied every vertical blank.
++    std::pair<std::uint32_t, std::uint32_t> widescreen_patch{0, 0};
++    if (aspect > 0.0 && cfg.widescreen_x_scale_address != 0) {
++        const double factor = (4.0 / 3.0) / aspect;
++        const float value = static_cast<float>(cfg.widescreen_x_scale_base * factor);
++        std::uint32_t word = 0;
++        std::memcpy(&word, &value, 4);
++        widescreen_patch = {cfg.widescreen_x_scale_address, word};
++        patches.emplace_back(widescreen_patch);
++        std::printf("widescreen: aspect %.4f, x scale %.4f -> %.4f at 0x%08x\n", aspect,
++                    cfg.widescreen_x_scale_base, static_cast<double>(value),
++                    cfg.widescreen_x_scale_address);
++    } else if (aspect > 0.0) {
++        std::fprintf(stderr, "widescreen: this title has no projection hook configured\n");
++    }
+     std::unique_ptr<dream::gdrom::Disc> disc;
+     if (cfg.disc_image) {
+         disc = dream::gdrom::open_disc(*cfg.disc_image, err);
+@@ -1743,7 +2011,8 @@ int main(int argc, char** argv) {
+         // down for a human, and a config without one still gets a window with a name on it.
+         if (!live->start(
+                 scale, validation,
+-                cfg.title.empty() ? std::string("Dream Recomp") : cfg.title + " - Dream Recomp")) {
++                cfg.title.empty() ? std::string("Dream Recomp") : cfg.title + " - Dream Recomp",
++                aspect)) {
+             std::fprintf(stderr, "window: %s\n", live->error.c_str());
+             return 2;
+         }
+@@ -1769,6 +2038,11 @@ int main(int argc, char** argv) {
+         sys.spg.on_vblank_out = [&, previous_vblank, started] {
+             if (previous_vblank)
+                 previous_vblank();
++            // DREAM_PATCH_REPEAT re-applies the --patch pokes every frame, for a value the title
++            // recomputes or copies into its own structures during the run.
++            if (!patches.empty() && (std::getenv("DREAM_PATCH_REPEAT") || widescreen_patch.first))
++                for (const auto& [addr, word] : patches)
++                    sys.memory.write32(addr, word);
+             if (!live->present(sys.spg.frames(), sys.ctx.cycles))
+                 throw StopRun{"the window was closed"};
+             // The binding screen stops the guest rather than drawing over a running one: nobody
+@@ -1789,6 +2063,21 @@ int main(int argc, char** argv) {
              // Scripted presses win while they are held, so --press still works with a window open.
              if (replayed.empty() && (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu))
                  live->read_controls(pad_ptr->state);
@@ -826,7 +1029,7 @@ index 9dff7cd..7f56efa 100644
              if (unthrottled)
                  return;
              const auto guest =
-@@ -2045,6 +2221,11 @@ int main(int argc, char** argv) {
+@@ -2045,6 +2334,11 @@ int main(int argc, char** argv) {
      (void)replay_self_check;
      (void)replay_only;
  #endif
@@ -838,7 +1041,7 @@ index 9dff7cd..7f56efa 100644
      dream::sh4::GuestFn entry = dream::sh4::find_function(cfg.entry);
      if (!entry) {
          std::fprintf(stderr, "no translated function at entry 0x%08x\n", cfg.entry);
-@@ -2102,12 +2283,13 @@ int main(int argc, char** argv) {
+@@ -2102,12 +2396,13 @@ int main(int argc, char** argv) {
      if (dream::devinterp::replay()) {
          dream::devinterp::set_replay(nullptr);
          std::printf(
@@ -854,7 +1057,7 @@ index 9dff7cd..7f56efa 100644
              static_cast<unsigned long long>(replay.skipped_interrupt),
              static_cast<unsigned long long>(replay.skipped_nonlocal),
              static_cast<unsigned long long>(replay.skipped_too_long), replay.divergences().size());
-@@ -2167,6 +2349,20 @@ int main(int argc, char** argv) {
+@@ -2167,6 +2462,20 @@ int main(int argc, char** argv) {
              static_cast<unsigned long long>(live->palette_changes));
          if (live->have_frame)
              std::printf("window: last shown %s\n", live->shown.describe().c_str());
@@ -2142,10 +2345,10 @@ index 947fb1b..70fd0aa 100644
      System sys;
      sys.install();
 diff --git a/translator/include/dream/translator/config/game_config.h b/translator/include/dream/translator/config/game_config.h
-index b348fe7..9dc6c4c 100644
+index b348fe7..7ad1456 100644
 --- a/translator/include/dream/translator/config/game_config.h
 +++ b/translator/include/dream/translator/config/game_config.h
-@@ -37,6 +37,11 @@ struct GameConfig {
+@@ -37,6 +37,17 @@ struct GameConfig {
      std::vector<std::uint32_t> extra_functions, exclude;
      std::optional<std::filesystem::path> symbols;  // resolved
      bool pointers = true, sweep = true;
@@ -2154,6 +2357,12 @@ index b348fe7..9dc6c4c 100644
 +    // poll can land at a tail-jump target where PR still holds the jumper's return address, and
 +    // the context a handler saves there resumes into that function's own epilogue.
 +    bool entry_polls = true;
++    // Widescreen (hor+): the title's projection x scale lives at this guest address, and this is
++    // its 4:3 value. Scaling it by (4/3)/aspect widens the field of view; presenting the frame at
++    // the wide aspect restores the proportions. Found per title by patching candidates and looking
++    // at the picture (see docs/12-HANDOVER.md). Zero means the title has no known hook.
++    std::uint32_t widescreen_x_scale_address = 0;
++    double widescreen_x_scale_base = 0.0;
  
      std::map<std::uint32_t, std::string> hle;    // guest address -> runtime handler name
      std::map<std::uint32_t, std::string> hooks;  // guest address -> hook name
@@ -2184,10 +2393,10 @@ index 86af1fe..9db71a1 100644
      // against the interpreter with the same inputs (runtime/devinterp/replay.h). Development only:
      // it costs a constructor and destructor per call even when no harness is installed.
 diff --git a/translator/src/config/game_config.cpp b/translator/src/config/game_config.cpp
-index 86e46f0..9e9452c 100644
+index 86e46f0..754db3d 100644
 --- a/translator/src/config/game_config.cpp
 +++ b/translator/src/config/game_config.cpp
-@@ -153,6 +153,13 @@ bool finish(const toml::table& t, const std::filesystem::path& dir, GameConfig&
+@@ -153,6 +153,18 @@ bool finish(const toml::table& t, const std::filesystem::path& dir, GameConfig&
      if (!get_u32_list(t["functions"]["extra"], "functions.extra", c.extra_functions, error) ||
          !get_u32_list(t["functions"]["exclude"], "functions.exclude", c.exclude, error))
          return false;
@@ -2197,6 +2406,11 @@ index 86e46f0..9e9452c 100644
 +            return false;
 +        }
 +        c.entry_polls = ep.value_or(false);
++    }
++    if (auto ws = t["widescreen"]; ws) {
++        c.widescreen_x_scale_address =
++            static_cast<std::uint32_t>(ws["x_scale_address"].value_or(std::int64_t{0}));
++        c.widescreen_x_scale_base = ws["x_scale_base"].value_or(0.0);
 +    }
      std::string sym;
      if (!get_str(t["functions"]["symbols"], "functions.symbols", sym, error, false))

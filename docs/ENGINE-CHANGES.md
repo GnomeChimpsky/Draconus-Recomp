@@ -1800,6 +1800,20 @@ only way to tell what a constant controls is to change it and look at the frame.
 Two projection candidates were ruled out this way: the 1.3333 aspect float at 0x0C0B1E90 and the
 adjacent 320/240 screen pair at 0x0C0D8128/2C both leave a gameplay frame byte-identical.
 
+## Patch 019: hor+ widescreen (2026-11-13)
+
+The title's projection x scale is a plain float at `0x0C098640` (0.75 = 4:3), found by patching every
+0.75 candidate and diffing the frame. `[widescreen]` in the title config names the address and its
+4:3 value; `--aspect 16:9` (or `21:9`, or a decimal) makes the boot patch it to
+`base * (4/3)/aspect`, re-apply it every vertical blank, and open a window of that aspect.
+`Presenter::stretch` fills that window instead of fitting the image aspect inside it, so the
+squeezed wider field of view is stretched back to correct proportions. 4:3 is unchanged when
+`--aspect` is not given.
+
+Verified at 1280x720 and 1680x720 in gameplay: more world horizontally, no distortion, and the HUD
+goes through the same projection so it keeps its shape and moves outward with the frame. The cost is
+one float write per frame.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
