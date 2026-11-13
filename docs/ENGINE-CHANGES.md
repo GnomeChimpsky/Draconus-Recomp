@@ -1772,6 +1772,14 @@ overlaps a written range.
 run now shows the dynamic textures being refreshed (21 decoded, 11 overwritten on a title-screen
 run) where it used to show none.
 
+## Patch 016: the capture replay exits after its screenshot (2026-11-13)
+
+`dream_render_view FILE --screenshot OUT` used to open a window and keep drawing until it was closed,
+which made a scripted capture replay a hang. With `--screenshot` and no `--frames` it now renders one
+frame, writes the picture and exits. `tools\m3-check.ps1` uses that for the M3 capture-replay gate:
+it takes an F11 bundle and replays it, alongside the 600-frame determinism check (two runs, identical
+write-hash files).
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

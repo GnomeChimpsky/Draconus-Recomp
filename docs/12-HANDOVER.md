@@ -266,8 +266,10 @@ The engine changes are in `patches/0001-engine-local-changes.patch`; `setup.ps1`
 
 - **Determinism: passes.** Two 600-frame headless runs with `--write-hash` produce byte-identical
   files (same SHA-256), so the translated path is deterministic run to run.
-- **Capture replay: blocked on the tool.** `dream_render_view` creates a window and does not return
-  headlessly; it needs an offscreen mode before the M3 check can run in a script.
+- **Capture replay: passes.** `tools\m3-check.ps1` runs the determinism check, takes an F11 bundle and
+  replays it through `dream_render_view`; both checks are green. The replay tool used to hang when
+  given `--screenshot` without `--frames` -- it opened a window and waited -- and now renders one
+  frame and exits in that case.
 - **First non-blank frame vs Flycast: not yet measured.** Flycast is present at the documented path;
   the capture procedure is in `docs/14-M3-M6-FLYCAST-REFERENCE.md`.
 

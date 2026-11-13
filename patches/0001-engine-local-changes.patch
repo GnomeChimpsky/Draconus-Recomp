@@ -86,6 +86,23 @@ index 3e9a7c4..6848380 100644
      k.gamepad[PadControl::Start] = btn("start");
      k.gamepad[PadControl::Up] = btn("dpup");
      k.gamepad[PadControl::Down] = btn("dpdown");
+diff --git a/render/src/view_main.cpp b/render/src/view_main.cpp
+index 8cd6e3a..b03678c 100644
+--- a/render/src/view_main.cpp
++++ b/render/src/view_main.cpp
+@@ -264,8 +264,11 @@ int main(int argc, char** argv) {
+         }
+     }
+ 
++    // A screenshot is a one-frame job: without --frames the viewer is interactive and would wait
++    // for the window to close, which turned every scripted capture replay into a hang.
++    const int loop_frames = frames > 0 ? frames : (screenshot ? 1 : 0);
+     int drawn = 0;
+-    while (window.poll() && (frames == 0 || drawn < frames)) {
++    while (window.poll() && (loop_frames == 0 || drawn < loop_frames)) {
+         std::uint32_t image = 0;
+         VkCommandBuffer cmd = VK_NULL_HANDLE;
+         if (!window.begin_frame(image, cmd)) {
 diff --git a/render/src/vk/offscreen.cpp b/render/src/vk/offscreen.cpp
 index 41d2488..127d723 100644
 --- a/render/src/vk/offscreen.cpp
