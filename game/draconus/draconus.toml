@@ -32,20 +32,15 @@ entry = 0x8C010000
 pointers = true
 sweep = false
 extra = []
-# Workarounds (2026-11-12): two functions the translated path faults in. Interpreting them removes
-# the two reproductions found so far -- 500 frames of d-pad menu navigation and a 20,000-frame
-# gameplay run are clean with both, and the windowed parity check is unchanged.
-#
-#   0x0C16CDF4  a 4,914-byte FP function; without it the translated path faults at pc 0 about 79 s
-#               into the menu scene.
-#   0x0C0C7F7C  a small function reached from the exception handler; without it a burst of d-pad
-#               presses on the main menu faults at frame 192.
-#
-# The fault signature is the same in both, and in a third crash that is still open: an `rte` outside
-# an exception frame (the guest's own task return) resumes at a function entry, and the guest then
-# jumps to 0. That machinery, not the two functions, is the thing to fix; take these exclusions out
-# when it is.
-exclude = [0x0C16CDF4, 0x0C0C7F7C]
+# Interrupts are polled inside a function and at loop back-edges, not at its entry (2026-11-13).
+# The entry poll could deliver an interrupt at a function entry reached by a tail jump, where PR
+# still holds the jumper's return address; the context a handler saved there resumed into the
+# function's own epilogue, popped a frame that was not there, and jumped to 0. That was the crash
+# behind three reproductions (frame 4,750, frame 192, frame 18,690). With the entry poll left out
+# all three run clean, parity is byte-identical, and the runs are faster (entry polls cost a compare
+# per call): 3.6x at 5,000 frames, 3.0x over 20,000. Nothing is excluded from translation.
+entry_polls = false
+exclude = []
 
 [[relocations]]
 # Detected by --suggest-config: the game copies 56 bytes from the image to the

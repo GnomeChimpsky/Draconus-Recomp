@@ -5,7 +5,7 @@ A native Windows x64 static recompilation of **Draconus: Cult of the Wyrm**
 `F888` / `T-402`), built on [`dream-recomp`](https://github.com/phobos665/dream-recomp).
 
 The game is playable at real time, and the recompiled path is the fast one: 1.0x with a window and
-2-4x headless depending on the scene (1.8x five minutes into gameplay). The development interpreter remains as a reference and a bring-up tool.
+3-4.5x headless depending on the scene (3.0x over 20,000 frames of gameplay). The development interpreter remains as a reference and a bring-up tool.
 
 The game's SH-4 code is translated ahead of time into C++, and the Dreamcast hardware
 (file system, controllers, video, sound, memory card) is replaced by native code. The
@@ -150,7 +150,7 @@ into gameplay and responds to input — menu navigation and character movement b
 owner's own disc, deterministically. Translation now covers 8,940 functions (995,051 instructions),
 up from 3,285: pointer-table discovery is on, and it is what makes the recompiled path fast.
 
-**Speed** went from 0.15x to **1.0x in a window and 2-4x headless depending on the scene (1.8x five minutes into gameplay)**: the title config now turns
+**Speed** went from 0.15x to **1.0x in a window and 3-4.5x headless depending on the scene (3.0x over 20,000 frames of gameplay)**: the title config now turns
 on pointer-table discovery, which finds 8,940 functions instead of 3,285 — this game reaches most of
 its code through tables, so without it the translated build spent its time in the development
 interpreter. Inlining the RAM fast path and moving the presenter's readback out of write-combined

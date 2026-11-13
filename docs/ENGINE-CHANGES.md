@@ -1739,6 +1739,22 @@ unchanged.
 * `call_indirect` logs calls whose target is outside the title's code (a null or wild pointer) with
   the calling pc and r0-r3, under `DREAM_TRACE_HOOK=1`.
 
+## Patch 014: entry polls are optional, and they were the crash (2026-11-13)
+
+`[functions] entry_polls = false` leaves the interrupt poll at each function entry out of the emitted
+code; interrupts then arrive at loop back-edges and call returns. `EmitOptions::entry_polls` carries
+the title's setting, parsed from `functions.entry_polls`.
+
+The crash: an entry poll can deliver an interrupt at a function entry reached by a tail jump, where PR
+still holds the jumper's return address. The handler saved that pair (`spc` = entry, `pr` = an address
+inside the same function's epilogue); on `rte` the function was re-entered at its entry, and its
+epilogue returned to that PR a second time, popping a frame that was not there -- then an indirect call
+read zero. The interpreter never delivers at such an address, which is why it never crashed.
+
+With entry polls off and nothing excluded, all three reproductions run clean (frames 4,750, 192 and
+18,690), windowed parity is byte-identical, and the runs are faster: an entry poll is a compare per
+call. Interrupt counts stay within 0.1% of the interpreter's.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

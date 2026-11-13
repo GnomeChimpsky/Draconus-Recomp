@@ -1381,7 +1381,7 @@ index 382f4e4..52dbf20 100644
      if (t.kind == Target::kBytes) {
          const std::uint32_t lo = static_cast<std::uint32_t>(v);
 diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
-index 7d292b7..7f6d3f6 100644
+index 7d292b7..3d5bc60 100644
 --- a/runtime/src/sh4/abi_bare.cpp
 +++ b/runtime/src/sh4/abi_bare.cpp
 @@ -2,6 +2,7 @@
@@ -1392,7 +1392,7 @@ index 7d292b7..7f6d3f6 100644
  #include <stdexcept>
  #include <string>
  #include <utility>
-@@ -15,6 +16,15 @@
+@@ -15,9 +16,19 @@
  
  #include "dream/runtime/sh4/ops.h"
  
@@ -1408,7 +1408,11 @@ index 7d292b7..7f6d3f6 100644
  namespace dream::sh4 {
  namespace {
  
-@@ -220,9 +230,21 @@ bool trace_nonlocal() {
++
+ std::vector<FunctionEntry>& table() {
+     static std::vector<FunctionEntry> t;
+     return t;
+@@ -220,9 +231,21 @@ bool trace_nonlocal() {
  }  // namespace
  
  void nonlocal_return(Ctx& c, ::dream::Memory&, std::uint32_t pc) {
@@ -1433,7 +1437,7 @@ index 7d292b7..7f6d3f6 100644
      c.pc = pc;
      throw NonLocalReturn{pc};
  }
-@@ -301,6 +323,12 @@ void run_guest(Ctx& c, ::dream::Memory& m, GuestFn entry) {
+@@ -301,6 +324,12 @@ void run_guest(Ctx& c, ::dream::Memory& m, GuestFn entry) {
  }
  
  void call_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target) {
@@ -1446,7 +1450,7 @@ index 7d292b7..7f6d3f6 100644
      if (GuestFn fn = find_function(target, &m)) {
          fn(c, m);
          return;
-@@ -352,9 +380,27 @@ void trapa(Ctx& c, ::dream::Memory& m, std::uint32_t imm) {
+@@ -352,9 +381,27 @@ void trapa(Ctx& c, ::dream::Memory& m, std::uint32_t imm) {
                               " (no exception model in the bare harness)");
  }
  
@@ -1474,7 +1478,7 @@ index 7d292b7..7f6d3f6 100644
          g_hooks->on_rte(c, m);
          return unwind;
      }
-@@ -364,7 +410,24 @@ bool rte(Ctx& c, ::dream::Memory& m) {
+@@ -364,7 +411,24 @@ bool rte(Ctx& c, ::dream::Memory& m) {
      return false;
  }
  
@@ -1893,11 +1897,27 @@ index 947fb1b..70fd0aa 100644
  TEST_CASE("system: TRAPA enters the general exception vector with TRA and EXPEVT set") {
      System sys;
      sys.install();
+diff --git a/translator/include/dream/translator/config/game_config.h b/translator/include/dream/translator/config/game_config.h
+index b348fe7..9dc6c4c 100644
+--- a/translator/include/dream/translator/config/game_config.h
++++ b/translator/include/dream/translator/config/game_config.h
+@@ -37,6 +37,11 @@ struct GameConfig {
+     std::vector<std::uint32_t> extra_functions, exclude;
+     std::optional<std::filesystem::path> symbols;  // resolved
+     bool pointers = true, sweep = true;
++    // Poll at each function entry. Off leaves the entry poll out and lets the next poll inside
++    // the function (a loop back-edge or a call return) deliver the interrupt instead: an entry
++    // poll can land at a tail-jump target where PR still holds the jumper's return address, and
++    // the context a handler saves there resumes into that function's own epilogue.
++    bool entry_polls = true;
+ 
+     std::map<std::uint32_t, std::string> hle;    // guest address -> runtime handler name
+     std::map<std::uint32_t, std::string> hooks;  // guest address -> hook name
 diff --git a/translator/include/dream/translator/emit.h b/translator/include/dream/translator/emit.h
-index 86af1fe..5ada6ff 100644
+index 86af1fe..9db71a1 100644
 --- a/translator/include/dream/translator/emit.h
 +++ b/translator/include/dream/translator/emit.h
-@@ -41,8 +41,19 @@ struct FunctionSpec {
+@@ -41,8 +41,21 @@ struct FunctionSpec {
  };
  
  struct EmitOptions {
@@ -1910,6 +1930,8 @@ index 86af1fe..5ada6ff 100644
 +    // back-edges. Slower, but it makes the delivery points match the interpreter's closely enough
 +    // to test whether poll placement decides when a nested interrupt lands.
 +    bool irq_dense = false;
++    // Emit the poll at each function entry (the title's cfg.entry_polls).
++    bool entry_polls = true;
      bool trace = false;         // call trace_return() before every return
 +    // Emit a dream::trace::insn() call before every instruction in [trace_lo, trace_hi).
 +    // Used by the instruction-level differential tracer; an empty range emits nothing.
@@ -1917,11 +1939,40 @@ index 86af1fe..5ada6ff 100644
      // Bracket each function's plain entry with a ReplayScope, so a development run can compare it
      // against the interpreter with the same inputs (runtime/devinterp/replay.h). Development only:
      // it costs a constructor and destructor per call even when no harness is installed.
+diff --git a/translator/src/config/game_config.cpp b/translator/src/config/game_config.cpp
+index 86e46f0..9e9452c 100644
+--- a/translator/src/config/game_config.cpp
++++ b/translator/src/config/game_config.cpp
+@@ -153,6 +153,13 @@ bool finish(const toml::table& t, const std::filesystem::path& dir, GameConfig&
+     if (!get_u32_list(t["functions"]["extra"], "functions.extra", c.extra_functions, error) ||
+         !get_u32_list(t["functions"]["exclude"], "functions.exclude", c.exclude, error))
+         return false;
++    if (auto ep = t["functions"]["entry_polls"]; ep) {
++        if (!ep.is_boolean()) {
++            error = "functions.entry_polls must be true or false";
++            return false;
++        }
++        c.entry_polls = ep.value_or(false);
++    }
+     std::string sym;
+     if (!get_str(t["functions"]["symbols"], "functions.symbols", sym, error, false))
+         return false;
 diff --git a/translator/src/emit/emit.cpp b/translator/src/emit/emit.cpp
-index 2ebdd71..cd47d8e 100644
+index 2ebdd71..2ae5185 100644
 --- a/translator/src/emit/emit.cpp
 +++ b/translator/src/emit/emit.cpp
-@@ -280,14 +280,16 @@ public:
+@@ -247,7 +247,9 @@ public:
+         out << "    [[maybe_unused]] const std::uint32_t entry_pr = c.pr;\n";
+         // Poll points record the exact guest pc first: an interrupt handler that switches tasks
+         // returns through RTE to SPC, and run_guest re-enters this function there.
+-        if (opt_.irq_checks)
++        // entry_polls off leaves the entry poll out: an interrupt delivered at a function entry
++        // reached by a tail jump can plant a context that resumes into the function's own epilogue.
++        if (opt_.irq_checks && opt_.entry_polls)
+             out << "    if (c.cycles >= c.next_event) { c.pc = " << hexu(spec_.entry)
+                 << "; deliver_irq(c, m); }\n";
+         out << "    if (resume_pc) {\n        switch (resume_pc) {\n";
+@@ -280,14 +282,16 @@ public:
                          // landing one instruction into a prologue, or shared code): control
                          // continues in that function, so tail-call it.
                          out << "    // falls through into the function at " << hex(stop) << "\n";
@@ -1940,7 +1991,7 @@ index 2ebdd71..cd47d8e 100644
                              << "); return;\n";
                      }
                  }
-@@ -875,6 +877,18 @@ private:
+@@ -875,6 +879,18 @@ private:
          const Instr ins = at(pc);
          ++result_.instructions;
          out << "    // " << hex(pc) << ": " << sh4::format(ins, pc) << "\n";
@@ -1959,7 +2010,7 @@ index 2ebdd71..cd47d8e 100644
          const FpMode before = mode_;
          mode_ = transfer(mode_, current_block_start(pc), pc, ins);
          (void)before;
-@@ -913,9 +927,20 @@ private:
+@@ -913,9 +929,20 @@ private:
          auto emit_slot = [&] {
              out << "        // " << hex(pc + 2) << ": " << sh4::format(slot, pc + 2)
                  << " (delay slot)\n";
@@ -1981,7 +2032,7 @@ index 2ebdd71..cd47d8e 100644
          flush_cycles(out);
          out << "    {\n";
          switch (ins.op) {
-@@ -929,6 +954,7 @@ private:
+@@ -929,6 +956,7 @@ private:
                      out << "        if (taken) { " << irq_check_if_backedge(t, pc) << "goto "
                          << label(t) << "; }\n";
                  } else {
@@ -1989,7 +2040,7 @@ index 2ebdd71..cd47d8e 100644
                      out << "        if (taken) { " << call_target_expr(t) << " return; }\n";
                  }
                  break;
-@@ -940,6 +966,7 @@ private:
+@@ -940,6 +968,7 @@ private:
                      out << "        " << irq_check_if_backedge(t, pc) << "goto " << label(t)
                          << ";\n";
                  } else {
@@ -1997,7 +2048,7 @@ index 2ebdd71..cd47d8e 100644
                      out << "        " << call_target_expr(t) << " return;\n";
                  }
                  break;
-@@ -948,7 +975,9 @@ private:
+@@ -948,7 +977,9 @@ private:
                  const std::uint32_t t = sh4::pcrel_target(ins, pc);
                  out << "        c.pr = " << hexu(pc + 4) << ";\n";
                  emit_slot();
@@ -2007,7 +2058,7 @@ index 2ebdd71..cd47d8e 100644
                  break;
              }
              case Op::BSRF:
-@@ -962,6 +991,7 @@ private:
+@@ -962,6 +993,7 @@ private:
                  if (constant && known_.count(direct)) {
                      out << "        c.pr = " << hexu(pc + 4) << ";\n";
                      emit_slot();
@@ -2015,7 +2066,7 @@ index 2ebdd71..cd47d8e 100644
                      out << "        c.pc = " << hexu(pc) << "; " << call_target_expr(direct)
                          << "\n";
                      ++result_.direct_calls;
-@@ -974,7 +1004,9 @@ private:
+@@ -974,7 +1006,9 @@ private:
                      out << "        const std::uint32_t target = " << R(ins.m) << ";\n";
                  out << "        c.pr = " << hexu(pc + 4) << ";\n";
                  emit_slot();
@@ -2025,7 +2076,7 @@ index 2ebdd71..cd47d8e 100644
                  break;
              }
              case Op::BRAF:
-@@ -1251,7 +1283,14 @@ private:
+@@ -1251,7 +1285,14 @@ private:
              case Op::MOV_L_PCREL:
                  return rn + " = " + literal32(sh4::pcrel_target(ins, pc)) + ";";
              case Op::MOVA:
@@ -2041,7 +2092,7 @@ index 2ebdd71..cd47d8e 100644
              case Op::MOVT:
                  return rn + " = c.t;";
              case Op::MOV_B_S:
-@@ -1682,7 +1721,9 @@ EmitResult emit_unit(const Image& image, const std::vector<FunctionSpec>& functi
+@@ -1682,7 +1723,9 @@ EmitResult emit_unit(const Image& image, const std::vector<FunctionSpec>& functi
          << ". Do not edit.\n"
          << "#include <cstdint>\n#include \"dream/runtime/memory.h\"\n#include "
             "\"dream/runtime/sh4/abi.h\"\n"
@@ -2053,7 +2104,7 @@ index 2ebdd71..cd47d8e 100644
      for (const auto& f : specs) {
          hdr << "void " << f.name << "(dream::sh4::Ctx& c, dream::Memory& m);\n";
 diff --git a/translator/src/main.cpp b/translator/src/main.cpp
-index e451638..fc07f3b 100644
+index e451638..27bede2 100644
 --- a/translator/src/main.cpp
 +++ b/translator/src/main.cpp
 @@ -168,8 +168,19 @@ int cmd_emit(int argc, char** argv) {
@@ -2076,7 +2127,18 @@ index e451638..fc07f3b 100644
          else if (!std::strcmp(argv[i], "--functions") && i + 1 < argc) {
              std::string err;
              if (!dream::translator::load_functions_json(argv[++i], fns, err)) {
-@@ -412,7 +423,9 @@ int translate_view(const dream::translator::GameConfig& cfg, const dream::transl
+@@ -385,8 +396,9 @@ void write_functions_json(const std::string& path,
+ // Translate one image view (the main binary or a relocated copy) into DIR/<stem>.{cpp,h,json}.
+ int translate_view(const dream::translator::GameConfig& cfg, const dream::translator::Image& img,
+                    const std::vector<std::uint32_t>& seeds, const std::string& stem,
+-                   const std::filesystem::path& out_dir, const dream::translator::EmitOptions& opt,
++                   const std::filesystem::path& out_dir, dream::translator::EmitOptions opt,
+                    const dream::translator::SymbolTable* syms) {
++    opt.entry_polls = cfg.entry_polls;
+     dream::translator::DiscoverOptions dopt;
+     dopt.seeds = seeds;
+     dopt.follow_pointers = cfg.pointers;
+@@ -412,7 +424,9 @@ int translate_view(const dream::translator::GameConfig& cfg, const dream::transl
          const std::string suffix = "_" + (pos == std::string::npos ? stem : stem.substr(pos + 7));
          for (auto& f : fns) f.name += suffix;
      }
@@ -2087,7 +2149,7 @@ index e451638..fc07f3b 100644
      const auto base = out_dir / stem;
      {
          std::ofstream o(base.string() + ".cpp");
-@@ -459,6 +472,16 @@ int cmd_game(int argc, char** argv) {
+@@ -459,6 +473,16 @@ int cmd_game(int argc, char** argv) {
              opt.trace = true;
          else if (!std::strcmp(argv[i], "--no-irq"))
              opt.irq_checks = false;

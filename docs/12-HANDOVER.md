@@ -17,7 +17,7 @@ this is measured against. This file is the pick-up point.
 | Instruction tracing | `DREAM_TRACE_INSNS=lo:hi:FILE` | filtered by range, cycle window and in-range index |
 | Function differential | `--replay` (+ replay build) | 2,448,650 calls compared, **0 disagreements** (one P0/P1 alias in a newly seeded function) |
 | Windowed parity | `tools\parity-check.ps1` | window renders; input recording and screenshot byte-identical to the interpreter |
-| Speed | translated path | **4.2x at 600 frames, 3.9x at 1,800, 1.8x five minutes into gameplay; 1.0x windowed** |
+| Speed | translated path | **4.5x at 400 frames, 3.6x at 5,000, 3.0x over 20,000 frames of gameplay; 1.0x windowed** |
 | Fresh clone | `setup.ps1 -SkipBuild`, `import-disc`, `setup.ps1` | engine patched, dump extracted, built, **600 frames clean** |
 | Engine test suite | `ctest` in `engine/build-test` | 6/6 (76 runtime cases incl. the new regression) |
 
@@ -53,88 +53,39 @@ known alias, not a behavioural difference.
 
 If a later scene is still slow, `tools\diagnose-speed.bat` runs the game with
 `DREAM_TRACE_UNTRANSLATED` and leaves `work\speed-report.txt` naming the hotspots.
+## The gameplay crash: fixed at the root (2026-11-13)
 
-## The gameplay crash: worked around, emitter question open (2026-11-11)
+Three reproductions faulted at pc 0: frame 4,750 (`start@1000,a@4000`), frame 192 (a burst of d-pad
+presses on the main menu), and frame 18,690 (a menu-heavy sequence). The interpreter ran all three
+cleanly. The fault always followed an `rte` whose saved context had **PC at a function entry and PR
+inside that same function** -- `spc 0x0C0C7F7C` with `pr 0x0C0C7FBE`, the return address of the call
+at `0x0C0C7FBA`, which is that function's own epilogue. Resuming at the entry ran the prologue again,
+the epilogue returned to `0x0C0C7FBE` a second time, popped a frame that was not there, and the next
+indirect call read zero.
 
-The fast build (`pointers = true`) used to crash in gameplay, deterministically:
-
-```powershell
-draconus_boot --config games\draconus\draconus.toml --max-frames 5000 --rtc-seed 1000000 `
-              --press "start@1000,a@4000"
-```
-
-`fault: unimplemented instruction 0x0000 at 0x00000000`, frame 4,750 (79.07 s guest). The controls
-said it was translated code, not a runtime limit: the interpreter and the pre-pointer build both ran
-the same input to frame 5,000 cleanly. The trace ended with an `rte` to `0x0C16CDF4`, then an emitted
-`rts` whose target was its own entry, then a jump to 0 — a context one slot out of step.
-
-**Workaround (shipped).** The title config excludes **two** functions from translation:
+The context came from the **function-entry interrupt poll**. That poll can deliver an interrupt at an
+entry reached by a tail jump, where PR still holds the jumper's return address -- a state the
+interpreter never delivers at (13,698 deliveries on the same input, none at that address). Leaving the
+entry poll out is the fix:
 
 ```toml
 [functions]
-exclude = [0x0C16CDF4, 0x0C0C7F7C]
+entry_polls = false
 ```
 
-With them interpreted: **20,000 frames of gameplay run clean** (1.8x), the d-pad menu burst that used
-to fault at frame 192 now reaches the frame limit, and the windowed parity check still reports a
-byte-identical screenshot. Speed is unaffected in the early scenes (4.2x at 600 frames, 3.9x at
-1,800).
+Validation with **nothing excluded from translation** (8,940 functions):
 
-**Root-cause work on the rte (2026-11-13).** `DREAM_TRACE_RTE=path` now logs the guest state at every
-`rte` from both engines. Diffing the two runs of the menu burst showed the two engines take *different*
-rte paths from the first few frames (interrupt delivery timing), so a straight diff is not the tool.
-What the trace did give is the crashing `rte` itself:
+| run | before | after |
+|---|---|---|
+| menu burst, 400 frames | fault at 192 | clean, 4.5x |
+| `start@1000,a@4000`, 5,000 frames | fault at 4,750 | clean, 3.6x |
+| menu-heavy sequence, 20,000 frames | fault at 18,690 | clean, 3.0x |
+| windowed parity, 1,100 frames | — | **byte-identical**, counters match |
 
-```
-pc 0c233784  spc 0c0c7f7c  ssr 40000000  sr 70000000  pr 0c0c7fbe  r15 8c483b38
-```
+It is also faster: an entry poll is a compare per call, and interrupts are still delivered at loop
+back-edges and call returns (57,688 deliveries against the interpreter's 57,629 over the parity run).
+`DREAM_TRACE_RTE=path` logs the state at every `rte` from both engines and is what found this.
 
-The guest restores a context whose **PC is a function entry (`0x0C0C7F7C`) and whose PR is a return
-address inside that same function (`0x0C0C7FBE`)**: the return address of the `jsr` at `0x0C0C7FBA`.
-Those two cannot both be right. Resuming at the entry re-runs the prologue, which pushes that stale PR;
-the function then returns into its own middle, the epilogue pops the wrong frame, and the next indirect
-call goes to 0 — the fault we see. Neither the function nor `resume_at` is at fault: the restored
-context is inconsistent before either runs.
-
-Why the game saved that pair is the open question. The strong candidate is our refresh of `c.pc`: it is
-written only at poll points, so a handler that saves "the interrupted PC" reads a function entry while
-the PR register it saves is live from inside the function. The interpreter, which retires one
-instruction at a time, never produces that pair. The next experiment is to log the *save* side (the
-game's task-save writes) and compare with the interpreter, then decide whether interrupt delivery needs
-a more exact PC.
-
-**The delivery behind it (2026-11-13).** With PR in the delivery log, the exception that plants the bad
-context is:
-
-```
-exc: vec 0x600 pc 0x0c0c7f7c spc 0x0c0c7f7c pr 0x0c0c7fbe r15 0x8c483b38 nesting 1 depth 1
-```
-
-The same run on the interpreter delivers 13,698 exceptions and **never once at `0x0C0C7F7C`**. So the
-boundary is one only the translated build's poll points can pick: a function entry reached by a tail
-jump (the `jmp` target of the call at `0x0C0C7FBA`), where PR still holds that call's return address —
-`0x0C0C7FBE`, which is the function's own epilogue. Re-entering the entry runs the prologue a second
-time and the epilogue then returns to `0x0C0C7FBE` again, popping a frame that is not there; the next
-indirect call reads zero. On hardware the same boundary is reachable in principle, so the remaining
-question is whether the restore should suppress the immediate re-delivery (the resumed entry poll
-delivers again while the source is still pending) -- that is the next experiment: suppress delivery on
-the entry poll that follows a non-local resume and see whether the double-epilogue goes away.
-
-**A third crash is still open.** A menu-heavy sequence (`--press "start@1000,a@1200,down@1500,
-down@1530,a@1600,down@4000,down@4030,a@4200"`) faults at frame 18,690 with the same signature the
-other two had:
-
-```
-nonlocal: rts from pc 0x0c0e4908 to 0x0c0e4908 (r15 0x8c483ae0 pr 0x0c0e4960)
-fault: unimplemented instruction 0x0000 at 0x00000000
-```
-
-That line is not an `rts` despite the message: the emitted `rte` path calls
-`nonlocal_return(c, m, c.pc)` when `rte()` reports no exception frame, so the guest's own task return
-(`rte` to SPC) unwinds the C++ stack and resumes at SPC. Here SPC is a function entry, `resume_at`
-takes the `e->fn()` door (resume_pc = 0), and the guest then jumps to 0. The same line appeared in
-both fixed crashes (`0x0C16CDF4` and `0x0C0C7F7C`), so the common factor is that resume path, not the
-two functions -- excluding them moved the crash rather than explaining it.
 
 ## Controllers (2026-11-12)
 
