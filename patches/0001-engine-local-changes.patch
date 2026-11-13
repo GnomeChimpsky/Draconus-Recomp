@@ -46,6 +46,22 @@ index eaee9e3..3476772 100644
      void write(const void* data, std::size_t bytes, VkDeviceSize offset = 0);
      void destroy();
  
+diff --git a/render/include/dream/render/vk/texture_cache.h b/render/include/dream/render/vk/texture_cache.h
+index 7dd89a2..724839f 100644
+--- a/render/include/dream/render/vk/texture_cache.h
++++ b/render/include/dream/render/vk/texture_cache.h
+@@ -46,6 +46,11 @@ public:
+     // render to texture apart from ordinary double buffering, because a double-buffered title
+     // never samples the buffer it just wrote. Returns the number dropped.
+     std::size_t invalidate_range(std::uint32_t begin, std::uint32_t end);
++    // The same, for every range a frame wrote, with one device wait instead of one per range.
++    // Video memory is also written by the guest directly (texture uploads) and by the PVR's YUV
++    // converter, which is how streamed backgrounds and video reach a texture; without this a
++    // texture updated in place keeps showing the frame that was there when it was first decoded.
++    std::size_t invalidate_ranges(const std::vector<std::pair<std::uint32_t, std::uint32_t>>& ranges);
+ 
+     // The descriptor set for a polygon's texture, or VK_NULL_HANDLE when it cannot be decoded.
+     // `cmd` is a command buffer outside a render pass, used for the upload.
 diff --git a/render/src/input.cpp b/render/src/input.cpp
 index 3e9a7c4..6848380 100644
 --- a/render/src/input.cpp
@@ -121,6 +137,39 @@ index 78777d2..02b815d 100644
      if (type == UINT32_MAX) {
          destroy();
          return false;
+diff --git a/render/src/vk/texture_cache.cpp b/render/src/vk/texture_cache.cpp
+index f2eac2e..41ebe45 100644
+--- a/render/src/vk/texture_cache.cpp
++++ b/render/src/vk/texture_cache.cpp
+@@ -87,7 +87,12 @@ bool TextureCache::set_palette(const std::uint32_t* palette_ram, PaletteFormat f
+ }
+ 
+ std::size_t TextureCache::invalidate_range(std::uint32_t begin, std::uint32_t end) {
+-    if (!ctx_ || !ctx_->device() || end <= begin)
++    return invalidate_ranges({{begin, end}});
++}
++
++std::size_t TextureCache::invalidate_ranges(
++    const std::vector<std::pair<std::uint32_t, std::uint32_t>>& ranges) {
++    if (!ctx_ || !ctx_->device() || ranges.empty())
+         return 0;
+     std::vector<std::uint64_t> doomed;
+     for (const auto& [key, e] : entries_) {
+@@ -97,8 +102,12 @@ std::size_t TextureCache::invalidate_range(std::uint32_t begin, std::uint32_t en
+         // not retried every frame, and a write cannot make it stale.
+         if (bytes == 0)
+             continue;
+-        if (lo < end && begin < lo + bytes)
+-            doomed.push_back(key);
++        for (const auto& [begin, end] : ranges) {
++            if (end > begin && lo < end && begin < lo + bytes) {
++                doomed.push_back(key);
++                break;
++            }
++        }
+     }
+     if (doomed.empty())
+         return 0;
 diff --git a/render/src/vk/window.cpp b/render/src/vk/window.cpp
 index 0b0f03d..2c5281f 100644
 --- a/render/src/vk/window.cpp
@@ -449,10 +498,20 @@ index 5980e74..554297c 100644
    src/maple/maple.cpp
    src/aica/arm7.cpp
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 9dff7cd..1391c6c 100644
+index 9dff7cd..2414346 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
-@@ -152,9 +152,24 @@ struct Live {
+@@ -147,15 +147,55 @@ struct Live {
+         }
+         renderer.set_memory(memory_.vram(), dream::mem::DcMemory::kVramSize,
+                             pvr_.reg_block() + 0x1000 / 4, palette_format());
++        // Collect every video-memory write the guest makes; the cache drops the covered textures
++        // before the next display list samples them.
++        memory_.on_vram_write = [this](std::uint32_t begin, std::uint32_t end) {
++            note_vram_write(begin, end);
++        };
+         std::printf("window: %s, drawing at %ux%u\n", window.context().caps().device_name.c_str(),
+                     w, h);
          return true;
      }
  
@@ -470,14 +529,35 @@ index 9dff7cd..1391c6c 100644
 +        }
 +    };
 +
++    // Merged video-memory write ranges since the last render: the guest uploads textures directly
++    // and the PVR's YUV converter writes streamed backgrounds and video, so a texture decoded once
++    // and then updated in place has to be dropped or it keeps showing the older picture.
++    std::vector<std::pair<std::uint32_t, std::uint32_t>> vram_dirty;
++    void note_vram_write(std::uint32_t begin, std::uint32_t end) {
++        if (!vram_dirty.empty() && begin <= vram_dirty.back().second + 128) {
++            if (end > vram_dirty.back().second)
++                vram_dirty.back().second = end;
++        } else {
++            vram_dirty.emplace_back(begin, end);
++        }
++    }
++    void flush_vram_writes() {
++        if (vram_dirty.empty())
++            return;
++        renderer.textures().invalidate_ranges(vram_dirty);
++        vram_dirty.clear();
++    }
++
      // The guest has handed the hardware a display list. Draw it, then put the result where the
      // hardware would have put it.
      void render(const std::vector<std::uint32_t>& stream) {
 +        PhaseTimer timer(render_ns);
          last_stream = stream;  // kept so F11 can write the list that drew what is on screen
++        flush_vram_writes();
          decoder.reset();
          decoder.feed_stream(stream.data(), stream.size());
-@@ -273,6 +288,7 @@ struct Live {
+         // The plane the whole frame sits on is not in the stream: the title writes it into the
+@@ -273,6 +313,7 @@ struct Live {
      // Vertical blank: show what the video hardware would be scanning out, and read the keyboard.
      // Returns false when the user has closed the window.
      bool present(std::uint64_t frame, std::uint64_t guest_cycles) {
@@ -485,7 +565,7 @@ index 9dff7cd..1391c6c 100644
          guest_frame = frame;
          if (!window.poll())
              return false;
-@@ -302,26 +318,33 @@ struct Live {
+@@ -302,26 +343,33 @@ struct Live {
  
          std::uint32_t image = 0;
          VkCommandBuffer cmd = VK_NULL_HANDLE;
@@ -533,7 +613,7 @@ index 9dff7cd..1391c6c 100644
          VkClearValue clears[2]{};
          clears[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
          clears[1].depthStencil = {0.0f, 0};
-@@ -342,10 +365,13 @@ struct Live {
+@@ -342,10 +390,13 @@ struct Live {
          const VkRect2D scissor{{0, 0}, window.extent()};
          vkCmdSetViewport(cmd, 0, 1, &viewport);
          vkCmdSetScissor(cmd, 0, 1, &scissor);
@@ -550,7 +630,7 @@ index 9dff7cd..1391c6c 100644
          ++presented;
          if (window.pressed(dream::render::vk::Control::ToggleFps)) {
              show_fps = !show_fps;
-@@ -387,6 +413,10 @@ struct Live {
+@@ -387,6 +438,10 @@ struct Live {
              held |= dream::maple::kX;
          if (window.pad_held(PadControl::Y))
              held |= dream::maple::kY;
@@ -561,7 +641,7 @@ index 9dff7cd..1391c6c 100644
          if (window.pad_held(PadControl::Start))
              held |= dream::maple::kStart;
          pad.buttons = static_cast<std::uint16_t>(0xFFFFu & ~held);
-@@ -919,6 +949,21 @@ std::string report_text(dream::System& sys, dream::hle::Bios& bios, const dream:
+@@ -919,6 +974,21 @@ std::string report_text(dream::System& sys, dream::hle::Bios& bios, const dream:
      std::snprintf(buf, sizeof buf, "untranslated call targets: %llu\n",
                    static_cast<unsigned long long>(sys.untranslated.total()));
      s += buf;
@@ -583,7 +663,7 @@ index 9dff7cd..1391c6c 100644
      s += sys.untranslated.format();
      for (const auto& [target, from] : sys.untranslated_sites) {
          std::snprintf(buf, sizeof buf, "  0x%08x called from 0x%08x\n", target, from);
-@@ -1300,6 +1345,7 @@ int main(int argc, char** argv) {
+@@ -1300,6 +1370,7 @@ int main(int argc, char** argv) {
          else if (!std::strcmp(argv[i], "--screenshot-presented"))
              shot_presented = true;
          else if (!std::strcmp(argv[i], "--present-mode") && i + 1 < argc) {
@@ -591,7 +671,7 @@ index 9dff7cd..1391c6c 100644
              const char* m = argv[++i];
              using PM = dream::render::vk::Window::PresentMode;
              if (!std::strcmp(m, "mailbox"))
-@@ -1312,6 +1358,13 @@ int main(int argc, char** argv) {
+@@ -1312,6 +1383,13 @@ int main(int argc, char** argv) {
                  std::fprintf(stderr, "unknown present mode %s: vsync, mailbox or immediate\n", m);
                  return 2;
              }
@@ -605,7 +685,7 @@ index 9dff7cd..1391c6c 100644
          } else if (!std::strcmp(argv[i], "--bindings") && i + 1 < argc) {
              bindings_file = argv[++i];
              bindings_file_set = true;
-@@ -1789,6 +1842,21 @@ int main(int argc, char** argv) {
+@@ -1789,6 +1867,21 @@ int main(int argc, char** argv) {
              // Scripted presses win while they are held, so --press still works with a window open.
              if (replayed.empty() && (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu))
                  live->read_controls(pad_ptr->state);
@@ -627,7 +707,7 @@ index 9dff7cd..1391c6c 100644
              if (unthrottled)
                  return;
              const auto guest =
-@@ -2102,12 +2170,13 @@ int main(int argc, char** argv) {
+@@ -2102,12 +2195,13 @@ int main(int argc, char** argv) {
      if (dream::devinterp::replay()) {
          dream::devinterp::set_replay(nullptr);
          std::printf(
@@ -643,7 +723,7 @@ index 9dff7cd..1391c6c 100644
              static_cast<unsigned long long>(replay.skipped_interrupt),
              static_cast<unsigned long long>(replay.skipped_nonlocal),
              static_cast<unsigned long long>(replay.skipped_too_long), replay.divergences().size());
-@@ -2167,6 +2236,20 @@ int main(int argc, char** argv) {
+@@ -2167,6 +2261,20 @@ int main(int argc, char** argv) {
              static_cast<unsigned long long>(live->palette_changes));
          if (live->have_frame)
              std::printf("window: last shown %s\n", live->shown.describe().c_str());
@@ -697,10 +777,21 @@ index 0000000..1123498
 +
 +}  // namespace dream::hle
 diff --git a/runtime/include/dream/runtime/mem/dc_memory.h b/runtime/include/dream/runtime/mem/dc_memory.h
-index 83f1e69..2eaa0f5 100644
+index 83f1e69..c28dfed 100644
 --- a/runtime/include/dream/runtime/mem/dc_memory.h
 +++ b/runtime/include/dream/runtime/mem/dc_memory.h
-@@ -225,15 +225,68 @@ public:
+@@ -130,6 +130,10 @@ public:
+     // guest's cycle count here, so a timer or drive status read sees the present rather than the
+     // last interrupt poll (Katana's syTmrGetCount busy-waits on TMU0 between polls).
+     std::function<void()> on_device_access;
++    // A write into video memory, as VRAM offsets [begin, end). Textures live there and may be
++    // decoded and cached, so a write can make a cached copy stale; the renderer uses this to
++    // drop the entries it covers. Collect and flush, rather than invalidating mid-frame.
++    std::function<void(std::uint32_t, std::uint32_t)> on_vram_write;
+     // Development write watch: stores that touch [watch_lo, watch_hi) call on_watch_write with
+     // the guest address and value (the launcher's DREAM_WATCH_WRITE).
+     std::uint32_t watch_lo = 1, watch_hi = 0;
+@@ -225,15 +229,68 @@ public:
      std::uint64_t sq_tlb_flushes = 0;  // bursts the UTLB translated
      std::uint64_t sq_tlb_misses = 0;   // bursts it did not map; QACR used instead
  
@@ -778,7 +869,7 @@ index 83f1e69..2eaa0f5 100644
      void sq_write32(std::uint32_t a, std::uint32_t v) override;
      void sq_flush(std::uint32_t a) override;
  
-@@ -241,6 +294,21 @@ public:
+@@ -241,6 +298,21 @@ public:
      static std::uint32_t vram_map32(std::uint32_t offset32) noexcept;
  
  private:
@@ -800,6 +891,13 @@ index 83f1e69..2eaa0f5 100644
      struct Target {
          enum Kind { kNone, kBytes, kMmio } kind = kNone;
          std::uint8_t* bytes = nullptr;  // kBytes: host pointer to the first byte
+@@ -269,4 +341,4 @@ private:
+     FaultLog faults_;
+ };
+ 
+-}  // namespace dream::mem
++}  // namespace dream::mem
+\ No newline at end of file
 diff --git a/runtime/include/dream/runtime/sh4/ops.h b/runtime/include/dream/runtime/sh4/ops.h
 index 2c8ccb4..932f833 100644
 --- a/runtime/include/dream/runtime/sh4/ops.h
@@ -1325,10 +1423,25 @@ index 0000000..5ec4b7a
 +
 +}  // namespace dream::hle
 diff --git a/runtime/src/mem/dc_memory.cpp b/runtime/src/mem/dc_memory.cpp
-index 382f4e4..52dbf20 100644
+index 382f4e4..8e4711e 100644
 --- a/runtime/src/mem/dc_memory.cpp
 +++ b/runtime/src/mem/dc_memory.cpp
-@@ -287,13 +287,13 @@ void DcMemory::redo_journal() {
+@@ -256,6 +256,14 @@ void DcMemory::store(std::uint32_t a, T v) {
+                                sizeof(T)});
+         }
+         std::memcpy(t.bytes, &v, sizeof(T));
++        if (on_vram_write) {
++            const std::uint8_t* lo = vram_.get();
++            const std::uint8_t* hi = lo + kVramSize;
++            if (t.bytes >= lo && t.bytes < hi) {
++                const std::uint32_t off = static_cast<std::uint32_t>(t.bytes - lo);
++                on_vram_write(off, off + sizeof(T));
++            }
++        }
+         note_ram_write(a, static_cast<std::uint64_t>(static_cast<std::make_unsigned_t<T>>(v)),
+                        sizeof(T));
+         return;
+@@ -287,13 +295,13 @@ void DcMemory::redo_journal() {
      }
  }
  
@@ -1345,7 +1458,7 @@ index 382f4e4..52dbf20 100644
      if ((a & 0xFFFFFFC0u) == 0xFF000000u) {  // CCN: MMU and cache control, exception registers
          switch (a & 0x3Cu) {
              case 0x20:
-@@ -312,7 +312,7 @@ std::uint32_t DcMemory::read32(std::uint32_t a) {
+@@ -312,7 +320,7 @@ std::uint32_t DcMemory::read32(std::uint32_t a) {
      }
      return load<std::uint32_t>(a);
  }
@@ -1354,7 +1467,7 @@ index 382f4e4..52dbf20 100644
      const Target t = resolve(a, 8, false);
      if (t.kind == Target::kBytes) {
          std::uint64_t v;
-@@ -324,13 +324,13 @@ std::uint64_t DcMemory::read64(std::uint32_t a) {
+@@ -324,13 +332,13 @@ std::uint64_t DcMemory::read64(std::uint32_t a) {
                 (static_cast<std::uint64_t>(t.mmio->read(t.mmio_addr + 4, 4)) << 32);
      return 0;
  }
@@ -1371,7 +1484,7 @@ index 382f4e4..52dbf20 100644
      if ((a & 0xFFFFFFC0u) == 0xFF000000u) {
          switch (a & 0x3Cu) {
              case 0x20:
-@@ -360,7 +360,7 @@ void DcMemory::write32(std::uint32_t a, std::uint32_t v) {
+@@ -360,7 +368,7 @@ void DcMemory::write32(std::uint32_t a, std::uint32_t v) {
      }
      store<std::uint32_t>(a, v);
  }

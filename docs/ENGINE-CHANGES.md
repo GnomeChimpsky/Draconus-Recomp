@@ -1755,6 +1755,23 @@ With entry polls off and nothing excluded, all three reproductions run clean (fr
 18,690), windowed parity is byte-identical, and the runs are faster: an entry poll is a compare per
 call. Interrupt counts stay within 0.1% of the interpreter's.
 
+## Patch 015: a texture updated in place is dropped (2026-11-13)
+
+Textures were decoded once and kept. That is right for the eight megabytes of art a level loads and
+never touches again, and wrong for the textures the console keeps rewriting: the PVR's YUV converter
+(streamed backgrounds and video) and any art the guest uploads into video memory as it goes. The
+symptom was a menu's old picture -- the Crave logo where the intro background should be, broken up
+by whatever had been redrawn over it -- and corrupted text in the save menu.
+
+`DcMemory::on_vram_write` reports every write that lands in video memory, as VRAM offsets; the boot
+merges the ranges and calls the new `TextureCache::invalidate_ranges` once, before the next display
+list is drawn. One `vkDeviceWaitIdle` per frame at most, and only when a cached texture actually
+overlaps a written range.
+
+`invalidate_ranges` reports its drops through the existing "overwritten by a render" counter, so a
+run now shows the dynamic textures being refreshed (21 decoded, 11 overwritten on a title-screen
+run) where it used to show none.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

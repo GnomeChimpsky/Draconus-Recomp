@@ -87,6 +87,26 @@ back-edges and call returns (57,688 deliveries against the interpreter's 57,629 
 `DREAM_TRACE_RTE=path` logs the state at every `rte` from both engines and is what found this.
 
 
+## Renderer: textures updated in place (2026-11-13)
+
+A play-through of the first level surfaced three visual faults: corrupted text in the VMU save menu,
+the intro background replaced by a broken-up Crave logo, and the same on the tree-village loading
+screen. They are one bug: a texture decoded once was kept for ever, so art the guest rewrites in
+video memory -- including everything the PVR's YUV converter produces for streamed backgrounds and
+video -- kept showing the older picture.
+
+`DcMemory::on_vram_write` now reports video-memory writes, the boot merges the ranges, and the
+texture cache drops the covered entries (`invalidate_ranges`) before the next display list is drawn.
+The cache's "overwritten by a render" counter, previously zero on these screens, now shows the
+refreshes happening. Parity is unchanged and the harness is byte-identical.
+
+**Open from the same session: a period of slow simulation with audio crackling**, about three times
+in a level, each lasting around a minute, followed by a brief catch-up. The suspects are scenes that
+fall back to the interpreter (a burst of untranslated calls), a first-use renderer stall (pipeline or
+texture work), or audio-buffer starvation when a frame runs long. The cheap next measurement is
+`DREAM_TRACE_UNTRANSLATED=1` on a run that reaches one of those scenes: the exit report ranks the
+targets, and a dominant entry means discovery missed a routine rather than the renderer stalling.
+
 ## Controllers (2026-11-12)
 
 A pad works on first plug-in and no configuration file is needed. The left stick is the Dreamcast
