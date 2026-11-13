@@ -1780,6 +1780,16 @@ frame, writes the picture and exits. `tools\m3-check.ps1` uses that for the M3 c
 it takes an F11 bundle and replays it, alongside the 600-frame determinism check (two runs, identical
 write-hash files).
 
+## Patch 017: a projection-matrix scan for the widescreen work (2026-11-13)
+
+`DREAM_SCAN_MATRIX=<frame>` (at the vertical blank) and `DREAM_SCAN_MATRIX_RENDER=<frame>` (at a
+display-list submission) scan RAM once for 4x4 float matrices whose x/y scales are in a 4:3 (or
+16:9) ratio, printing each candidate with its address and all sixteen floats. It is how the title's
+projection was looked for. Neither scan point found one: the 4:3-shaped matrices that do appear are
+view rotations (0.7071 = 45 degrees), and no matrix with a perspective row is present in RAM at
+either instant. The projection is therefore built transiently, or is not matrix-shaped at all
+(scale-per-vertex), which changes what the hor+ hook has to patch.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

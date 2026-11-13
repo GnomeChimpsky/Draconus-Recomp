@@ -515,10 +515,10 @@ index 5980e74..554297c 100644
    src/maple/maple.cpp
    src/aica/arm7.cpp
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 9dff7cd..2414346 100644
+index 9dff7cd..5a26c77 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
-@@ -147,15 +147,55 @@ struct Live {
+@@ -147,15 +147,65 @@ struct Live {
          }
          renderer.set_memory(memory_.vram(), dream::mem::DcMemory::kVramSize,
                              pvr_.reg_block() + 0x1000 / 4, palette_format());
@@ -570,11 +570,65 @@ index 9dff7cd..2414346 100644
      void render(const std::vector<std::uint32_t>& stream) {
 +        PhaseTimer timer(render_ns);
          last_stream = stream;  // kept so F11 can write the list that drew what is on screen
++        // DREAM_SCAN_MATRIX_RENDER=<frame>: scan at a display-list submission rather than at the
++        // vertical blank; a projection built for the frame may still be live at this point.
++        {
++            static const char* scan_at = std::getenv("DREAM_SCAN_MATRIX_RENDER");
++            static bool scanned = false;
++            if (scan_at && !scanned && guest_frame >= std::strtoull(scan_at, nullptr, 0)) {
++                scanned = true;
++                scan_projection_candidates();
++            }
++        }
 +        flush_vram_writes();
          decoder.reset();
          decoder.feed_stream(stream.data(), stream.size());
          // The plane the whole frame sits on is not in the stream: the title writes it into the
-@@ -273,6 +313,7 @@ struct Live {
+@@ -270,15 +320,69 @@ struct Live {
+         renderer.textures().invalidate_range(target.address, target.address + bytes);
+     }
+ 
++    // Looks through RAM for projection-matrix candidates: a 4x4 float matrix whose x and y scales
++    // are in a 4:3 (or 16:9) ratio and whose perspective row carries a -1. The title's projection
++    // is one of them; widening its x scale is what hor+ needs. DREAM_SCAN_MATRIX=<frame>.
++    void scan_projection_candidates() {
++        const float* f = reinterpret_cast<const float*>(memory_.ram());
++        const std::size_t words = (16u << 20) / 4;
++        int printed = 0;
++        for (std::size_t i = 0; i + 16 <= words && printed < 12; ++i) {
++            const float* m = f + i;
++            const double m00 = m[0], m11 = m[5], m22 = m[10];
++            if (!(std::isfinite(m00) && std::isfinite(m11) && std::isfinite(m22)))
++                continue;
++            const double ax = std::fabs(m00), ay = std::fabs(m11);
++            if (ax < 0.05 || ay < 0.05 || ax > 100.0 || ay > 100.0)
++                continue;
++            const double ratio = ay > ax ? ay / ax : ax / ay;
++            if (std::fabs(ratio - 4.0 / 3.0) > 0.02 && std::fabs(ratio - 16.0 / 9.0) > 0.02)
++                continue;
++            // A projection has no rotation terms where the first three columns cross rows:
++            // those entries are zero, and the perspective sits at [2][3] or [3][2].
++            const auto zero = [&](int k) { return std::fabs(m[k]) < 1e-6f; };
++            if (!(zero(1) && zero(2) && zero(4) && zero(6) && zero(8) && zero(9)))
++                continue;
++            // A perspective row is what tells it apart from the view rotations that also happen to
++            // have a 4:3-looking diagonal: near/far put a large negative in [2][2].
++            const bool perspective = m[10] < -0.5f || (m[14] < -0.5f);
++            if (!perspective)
++                continue;
++            // Reported, not required: the title may use another perspective convention and the
++            // ratio alone is the thing that identifies a projection candidate.
++            std::printf("matrix %08x ratio %.4f m00 %.4f m11 %.4f m22 %.4f%s:",
++                        0x0C000000u + static_cast<unsigned>(i * 4), ratio, m00, m11, m22,
++                        perspective ? " perspective" : "");
++            for (int k = 0; k < 16; ++k)
++                std::printf(" %.4f", static_cast<double>(m[k]));
++            std::printf("\n");
++            ++printed;
++        }
++        std::printf("projection scan at frame %llu: %d candidate(s)\n",
++                    static_cast<unsigned long long>(guest_frame), printed);
++    }
      // Vertical blank: show what the video hardware would be scanning out, and read the keyboard.
      // Returns false when the user has closed the window.
      bool present(std::uint64_t frame, std::uint64_t guest_cycles) {
@@ -582,7 +636,25 @@ index 9dff7cd..2414346 100644
          guest_frame = frame;
          if (!window.poll())
              return false;
-@@ -302,26 +343,33 @@ struct Live {
+         update_counter(guest_cycles);
+         pump_menu();
+ 
++        // DREAM_SCAN_MATRIX=<frame>: once, look through RAM for 4x4 float matrices whose x/y
++        // scales are in a 4:3 ratio. The title's projection lives in one of them; widening its
++        // x scale is what a hor+ widescreen needs, and this is how the matrix is found.
++        {
++            static const char* scan_at = std::getenv("DREAM_SCAN_MATRIX");
++            static bool scanned = false;
++            if (scan_at && !scanned && frame >= std::strtoull(scan_at, nullptr, 0)) {
++                scanned = true;
++                scan_projection_candidates();
++            }
++        }
++
+         dream::render::FramebufferInfo fb;
+         const bool described = dream::render::describe_framebuffer(pvr_.reg_block(), fb);
+         // The guest is displaying the buffer the renderer drew into, so show what was drawn rather
+@@ -302,26 +406,33 @@ struct Live {
  
          std::uint32_t image = 0;
          VkCommandBuffer cmd = VK_NULL_HANDLE;
@@ -630,7 +702,7 @@ index 9dff7cd..2414346 100644
          VkClearValue clears[2]{};
          clears[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
          clears[1].depthStencil = {0.0f, 0};
-@@ -342,10 +390,13 @@ struct Live {
+@@ -342,10 +453,13 @@ struct Live {
          const VkRect2D scissor{{0, 0}, window.extent()};
          vkCmdSetViewport(cmd, 0, 1, &viewport);
          vkCmdSetScissor(cmd, 0, 1, &scissor);
@@ -647,7 +719,7 @@ index 9dff7cd..2414346 100644
          ++presented;
          if (window.pressed(dream::render::vk::Control::ToggleFps)) {
              show_fps = !show_fps;
-@@ -387,6 +438,10 @@ struct Live {
+@@ -387,6 +501,10 @@ struct Live {
              held |= dream::maple::kX;
          if (window.pad_held(PadControl::Y))
              held |= dream::maple::kY;
@@ -658,7 +730,7 @@ index 9dff7cd..2414346 100644
          if (window.pad_held(PadControl::Start))
              held |= dream::maple::kStart;
          pad.buttons = static_cast<std::uint16_t>(0xFFFFu & ~held);
-@@ -919,6 +974,21 @@ std::string report_text(dream::System& sys, dream::hle::Bios& bios, const dream:
+@@ -919,6 +1037,21 @@ std::string report_text(dream::System& sys, dream::hle::Bios& bios, const dream:
      std::snprintf(buf, sizeof buf, "untranslated call targets: %llu\n",
                    static_cast<unsigned long long>(sys.untranslated.total()));
      s += buf;
@@ -680,7 +752,7 @@ index 9dff7cd..2414346 100644
      s += sys.untranslated.format();
      for (const auto& [target, from] : sys.untranslated_sites) {
          std::snprintf(buf, sizeof buf, "  0x%08x called from 0x%08x\n", target, from);
-@@ -1300,6 +1370,7 @@ int main(int argc, char** argv) {
+@@ -1300,6 +1433,7 @@ int main(int argc, char** argv) {
          else if (!std::strcmp(argv[i], "--screenshot-presented"))
              shot_presented = true;
          else if (!std::strcmp(argv[i], "--present-mode") && i + 1 < argc) {
@@ -688,7 +760,7 @@ index 9dff7cd..2414346 100644
              const char* m = argv[++i];
              using PM = dream::render::vk::Window::PresentMode;
              if (!std::strcmp(m, "mailbox"))
-@@ -1312,6 +1383,13 @@ int main(int argc, char** argv) {
+@@ -1312,6 +1446,13 @@ int main(int argc, char** argv) {
                  std::fprintf(stderr, "unknown present mode %s: vsync, mailbox or immediate\n", m);
                  return 2;
              }
@@ -702,7 +774,7 @@ index 9dff7cd..2414346 100644
          } else if (!std::strcmp(argv[i], "--bindings") && i + 1 < argc) {
              bindings_file = argv[++i];
              bindings_file_set = true;
-@@ -1789,6 +1867,21 @@ int main(int argc, char** argv) {
+@@ -1789,6 +1930,21 @@ int main(int argc, char** argv) {
              // Scripted presses win while they are held, so --press still works with a window open.
              if (replayed.empty() && (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu))
                  live->read_controls(pad_ptr->state);
@@ -724,7 +796,7 @@ index 9dff7cd..2414346 100644
              if (unthrottled)
                  return;
              const auto guest =
-@@ -2102,12 +2195,13 @@ int main(int argc, char** argv) {
+@@ -2102,12 +2258,13 @@ int main(int argc, char** argv) {
      if (dream::devinterp::replay()) {
          dream::devinterp::set_replay(nullptr);
          std::printf(
@@ -740,7 +812,7 @@ index 9dff7cd..2414346 100644
              static_cast<unsigned long long>(replay.skipped_interrupt),
              static_cast<unsigned long long>(replay.skipped_nonlocal),
              static_cast<unsigned long long>(replay.skipped_too_long), replay.divergences().size());
-@@ -2167,6 +2261,20 @@ int main(int argc, char** argv) {
+@@ -2167,6 +2324,20 @@ int main(int argc, char** argv) {
              static_cast<unsigned long long>(live->palette_changes));
          if (live->have_frame)
              std::printf("window: last shown %s\n", live->shown.describe().c_str());

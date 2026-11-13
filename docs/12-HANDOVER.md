@@ -294,6 +294,13 @@ M9 has three parts; one is already done, two need a decision and real work.
    The frame limiter in the boot already knows the guest's 60 Hz cadence, so the first step is
    contained.
 
+**hor+ reconnaissance (2026-11-13):** the projection is not a persistent RAM matrix. `DREAM_SCAN_MATRIX`
+(at the blank) and `DREAM_SCAN_MATRIX_RENDER` (at a display-list submission) both find only view
+rotations in a 4:3 ratio and no matrix with a perspective row in gameplay. So the title either
+builds it transiently inside a frame or projects per vertex with scale constants. The next
+experiment is a debug `--patch ADDR=VALUE` so candidate constants (the 320/640 screen scales, the
+0.75/1.3333 aspect floats) can be poked in RAM one at a time and the picture compared.
+
 ## Next phase
 
 Order is by value per unit of risk, not by size:
