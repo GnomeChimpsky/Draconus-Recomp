@@ -107,6 +107,24 @@ texture work), or audio-buffer starvation when a frame runs long. The cheap next
 `DREAM_TRACE_UNTRANSLATED=1` on a run that reaches one of those scenes: the exit report ranks the
 targets, and a dominant entry means discovery missed a routine rather than the renderer stalling.
 
+## Coverage anomaly found by the untranslated trace (2026-11-13)
+
+`DREAM_TRACE_UNTRANSLATED=1` over an 8,000-frame scripted run had one target that mattered:
+`0x8C187B1C`, **2,736 calls** (about one every three frames), plus 97 single-call bootstrap entries.
+It is a real function entry -- standard prologue -- sitting exactly at the end of the pointer-
+discovered function before it, and the table pass never added it. Seeded in `[functions] extra`;
+the next trace shows only the 97 one-off calls. Parity is unchanged.
+
+This is not the slowdown: 2,736 interpreted calls over 8,000 frames is noise. The slowdown did not
+reproduce for the owner either; it stays on the list as an unexplained, intermittent one.
+
+**Lanterns flicker (open).** Reported from the tree-village level. The renderer draws translucent
+polygons back to front per strip (`renderer.cpp`, the `items` sort) and tests depth without writing
+it; a glow sprite that intersects the surface it lights can therefore alternate between drawn and
+depth-rejected as the camera moves, which reads as flicker. It needs a capture to tell that apart
+from a texture or pipeline cause: `F11` at the moment it flickers gives the display list and video
+memory, and `--polygons` on the capture diffs two frames' polygon lists.
+
 ## Controllers (2026-11-12)
 
 A pad works on first plug-in and no configuration file is needed. The left stick is the Dreamcast
@@ -243,6 +261,15 @@ Build trees: `engine/build-render` (playable, Vulkan + SDL3), `engine/build-repl
 `vcvars64.bat` first) — `cl` needs the MSVC include paths.
 
 The engine changes are in `patches/0001-engine-local-changes.patch`; `setup.ps1` applies them.
+
+## M3 status (2026-11-13)
+
+- **Determinism: passes.** Two 600-frame headless runs with `--write-hash` produce byte-identical
+  files (same SHA-256), so the translated path is deterministic run to run.
+- **Capture replay: blocked on the tool.** `dream_render_view` creates a window and does not return
+  headlessly; it needs an offscreen mode before the M3 check can run in a script.
+- **First non-blank frame vs Flycast: not yet measured.** Flycast is present at the documented path;
+  the capture procedure is in `docs/14-M3-M6-FLYCAST-REFERENCE.md`.
 
 ## Next phase
 

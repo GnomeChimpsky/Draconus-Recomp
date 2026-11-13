@@ -31,7 +31,10 @@ entry = 0x8C010000
 # called ~98,000 times a frame, then the menu cluster) are all found by the table pass.
 pointers = true
 sweep = false
-extra = []
+# 0x0C187B1C is a real function entry the table pass misses: it sits exactly at the end of the
+# pointer-discovered chain before it, and the game calls it about once every three frames (2,736
+# calls in 8,000). Seeded by hand; discovery of the enclosing table is the thing to fix later.
+extra = [0x0C187B1C]
 # Interrupts are polled inside a function and at loop back-edges, not at its entry (2026-11-13).
 # The entry poll could deliver an interrupt at a function entry reached by a tail jump, where PR
 # still holds the jumper's return address; the context a handler saved there resumed into the
