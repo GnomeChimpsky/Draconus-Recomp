@@ -1790,6 +1790,16 @@ view rotations (0.7071 = 45 degrees), and no matrix with a perspective row is pr
 either instant. The projection is therefore built transiently, or is not matrix-shaped at all
 (scale-per-vertex), which changes what the hor+ hook has to patch.
 
+## Patch 018: --patch, a debug memory poke (2026-11-13)
+
+`--patch ADDR=VALUE` writes guest memory once, after the image is loaded and before the first frame.
+A value with a dot is written as a float, anything else as a 32-bit word, so an image constant found
+by scanning can be replaced with the same kind of constant. It exists for the widescreen work: the
+only way to tell what a constant controls is to change it and look at the frame.
+
+Two projection candidates were ruled out this way: the 1.3333 aspect float at 0x0C0B1E90 and the
+adjacent 320/240 screen pair at 0x0C0D8128/2C both leave a gameplay frame byte-identical.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

@@ -515,7 +515,7 @@ index 5980e74..554297c 100644
    src/maple/maple.cpp
    src/aica/arm7.cpp
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 9dff7cd..5a26c77 100644
+index 9dff7cd..7f56efa 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -147,15 +147,65 @@ struct Live {
@@ -752,7 +752,37 @@ index 9dff7cd..5a26c77 100644
      s += sys.untranslated.format();
      for (const auto& [target, from] : sys.untranslated_sites) {
          std::snprintf(buf, sizeof buf, "  0x%08x called from 0x%08x\n", target, from);
-@@ -1300,6 +1433,7 @@ int main(int argc, char** argv) {
+@@ -1270,8 +1403,28 @@ int main(int argc, char** argv) {
+     // functions, because comparing every call is slow.
+     bool replay_all = false, replay_self_check = false;
+     std::string replay_only;
++    // --patch ADDR=VALUE: write the guest's memory before the first frame. The value is a float when
++    // it contains a dot and a 32-bit word otherwise, so a constant found by scanning can be replaced
++    // with the same kind of constant. Debug aid for finding what a value controls; not a feature.
++    std::vector<std::pair<std::uint32_t, std::uint32_t>> patches;
+     for (int i = 1; i < argc; ++i) {
+-        if (!std::strcmp(argv[i], "--config") && i + 1 < argc)
++        if (!std::strcmp(argv[i], "--patch") && i + 1 < argc) {
++            const char* spec = argv[++i];
++            const char* eq = std::strchr(spec, '=');
++            if (eq) {
++                const std::uint32_t addr = static_cast<std::uint32_t>(std::strtoul(spec, nullptr, 0));
++                const char* value = eq + 1;
++                std::uint32_t word = 0;
++                if (std::strchr(value, '.')) {
++                    const float f = static_cast<float>(std::strtod(value, nullptr));
++                    std::memcpy(&word, &f, 4);
++                } else {
++                    word = static_cast<std::uint32_t>(std::strtoul(value, nullptr, 0));
++                }
++                patches.emplace_back(addr, word);
++            }
++        }
++        else if (!std::strcmp(argv[i], "--config") && i + 1 < argc)
+             config = argv[++i];
+         else if (!std::strcmp(argv[i], "--report") && i + 1 < argc)
+             report = argv[++i];
+@@ -1300,6 +1453,7 @@ int main(int argc, char** argv) {
          else if (!std::strcmp(argv[i], "--screenshot-presented"))
              shot_presented = true;
          else if (!std::strcmp(argv[i], "--present-mode") && i + 1 < argc) {
@@ -760,7 +790,7 @@ index 9dff7cd..5a26c77 100644
              const char* m = argv[++i];
              using PM = dream::render::vk::Window::PresentMode;
              if (!std::strcmp(m, "mailbox"))
-@@ -1312,6 +1446,13 @@ int main(int argc, char** argv) {
+@@ -1312,6 +1466,13 @@ int main(int argc, char** argv) {
                  std::fprintf(stderr, "unknown present mode %s: vsync, mailbox or immediate\n", m);
                  return 2;
              }
@@ -774,7 +804,7 @@ index 9dff7cd..5a26c77 100644
          } else if (!std::strcmp(argv[i], "--bindings") && i + 1 < argc) {
              bindings_file = argv[++i];
              bindings_file_set = true;
-@@ -1789,6 +1930,21 @@ int main(int argc, char** argv) {
+@@ -1789,6 +1950,21 @@ int main(int argc, char** argv) {
              // Scripted presses win while they are held, so --press still works with a window open.
              if (replayed.empty() && (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu))
                  live->read_controls(pad_ptr->state);
@@ -796,7 +826,19 @@ index 9dff7cd..5a26c77 100644
              if (unthrottled)
                  return;
              const auto guest =
-@@ -2102,12 +2258,13 @@ int main(int argc, char** argv) {
+@@ -2045,6 +2221,11 @@ int main(int argc, char** argv) {
+     (void)replay_self_check;
+     (void)replay_only;
+ #endif
++    // Debug pokes, applied once the image is in memory and before the first frame runs.
++    for (const auto& [addr, word] : patches) {
++        sys.memory.write32(addr, word);
++        std::printf("patched 0x%08x = 0x%08x\n", addr, word);
++    }
+     dream::sh4::GuestFn entry = dream::sh4::find_function(cfg.entry);
+     if (!entry) {
+         std::fprintf(stderr, "no translated function at entry 0x%08x\n", cfg.entry);
+@@ -2102,12 +2283,13 @@ int main(int argc, char** argv) {
      if (dream::devinterp::replay()) {
          dream::devinterp::set_replay(nullptr);
          std::printf(
@@ -812,7 +854,7 @@ index 9dff7cd..5a26c77 100644
              static_cast<unsigned long long>(replay.skipped_interrupt),
              static_cast<unsigned long long>(replay.skipped_nonlocal),
              static_cast<unsigned long long>(replay.skipped_too_long), replay.divergences().size());
-@@ -2167,6 +2324,20 @@ int main(int argc, char** argv) {
+@@ -2167,6 +2349,20 @@ int main(int argc, char** argv) {
              static_cast<unsigned long long>(live->palette_changes));
          if (live->have_frame)
              std::printf("window: last shown %s\n", live->shown.describe().c_str());
