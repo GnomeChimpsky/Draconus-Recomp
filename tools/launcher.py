@@ -243,14 +243,12 @@ TABS = [
         {"kind": "combo", "key": "scale", "label": "Resolution",
          "values": [("1x - 640 x 480 (native)", 1), ("2x - 1280 x 960", 2),
                     ("3x - 1920 x 1440", 3), ("4x - 2560 x 1920", 4)],
-         "help": "Draws the 3D at a multiple of the guest's resolution and opens the window at "
-                 "that size (16:9 is 2560 x 1440 at 4x); the game still sees 640 x 480, so "
-                 "nothing about it changes."},
+         "help": "Internal rendering, a multiple of native resolution."},
         {"kind": "combo", "key": "aspect", "label": "Widescreen",
          "values": [("Off - 4:3", "off"), ("16:9 - hor+", "16:9"),
                     ("21:9 - hor+", "21:9"), ("Custom ratio - hor+", "custom")],
-         "help": "hor+ widens the field of view instead of stretching it: more world to the sides, "
-                 "and the HUD keeps its shape and moves outward with the frame."},
+         "help": "Hor+ widens the field of view instead of stretching it. The HUD keeps its shape "
+                 "and moves outward with the frame."},
         {"kind": "entry", "key": "aspect_custom", "label": "Custom ratio",
          "depends": ("aspect", "custom"), "width": 10,
          "help": "Two numbers, for example 32:9."},
@@ -260,24 +258,16 @@ TABS = [
                  "repeated unless interpolation is on; a display that cannot show them caps the "
                  "rate rather than slowing the game down."},
         {"kind": "check", "key": "frame_interpolation",
-         "label": "Interpolate extra frames (experimental)",
+         "label": "Interpolation",
          "depends": ("present_rate", (120, 144)),
-         "help": "At 120/144 Hz, draws the geometry between the two 60 Hz frames instead of "
-                 "repeating one, so motion stays smooth without speeding the game up. Menus, "
-                 "movies and frames whose strips changed keep the current picture."},
+         "help": "Interpolates frames up to the rate selected above. Game logic stays at 60 hz."},
         {"kind": "check", "key": "vsync", "label": "VSync",
          "help": "On, the picture is presented in step with the display. Off, it is presented "
                  "immediately, which tears but removes the display's pacing."},
         {"kind": "combo", "key": "display_mode", "label": "Display mode",
          "values": [("Windowed", "windowed"),
                     ("Borderless fullscreen", "borderless"),
-                    ("Exclusive fullscreen", "exclusive")],
-         "help": "Windowed leaves the desktop alone. Borderless fills the display at its own size "
-                 "without changing its mode; exclusive asks for one of the display's fullscreen "
-                 "modes and is the one that can change the panel's refresh timing. Exclusive picks "
-                 "a refresh that is a whole multiple of the game's 60 Hz (120 on a 165 Hz panel), "
-                 "because anything else has to hold some pictures for two refreshes and some for "
-                 "three, which looks like judder even at a steady 60 fps."},
+                    ("Exclusive fullscreen", "exclusive")]},
         {"kind": "check", "key": "fps", "label": "Show the frame counter",
          "help": "Starts with the overlay on. F10 toggles it in game."},
     ]),
@@ -286,8 +276,7 @@ TABS = [
          "help": "Off runs the game silently and skips the audio device entirely."},
         {"kind": "slider", "key": "audio_volume", "label": "Volume", "min": 0, "max": 100,
          "suffix": "%",
-         "help": "Playback volume. It scales what the output device hears; a WAV recording is "
-                 "always the mixer's full-scale output."},
+         "help": "Playback volume."},
         {"kind": "combo", "key": "audio_device", "label": "Output device",
          "values": AUDIO_DEVICES,
          "help": "The SDL playback devices this machine reports. A device that is unplugged is "
@@ -399,8 +388,6 @@ class Launcher(tk.Tk):
         head.pack(fill="x")
         tk.Label(head, text="Settings", bg=self.BG, fg=self.FG,
                  font=("Segoe UI", 16, "bold")).pack(side="left")
-        tk.Label(head, text="changes are saved when you play", bg=self.BG, fg=self.DIM,
-                 font=("Segoe UI", 8)).pack(side="left", padx=12)
 
         nb = ttk.Notebook(parent)
         self.notebook = nb
