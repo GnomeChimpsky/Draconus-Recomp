@@ -2529,6 +2529,33 @@ The patch adds `audio/` to the touched directories. `patches/0001-engine-local-c
 regenerated from the pristine pinned tree; applying it to that tree reproduces `engine/`'s
 `audio/`, `cmake/`, `render/`, `runtime/` and `translator/` exactly.
 
+## Patch 035: a particle effect is not a HUD panel (2026-11-14)
+
+Patch 033's panel test was "a large flat four-vertex quad is a HUD panel". The forest's standing
+stones are ringed by translucent light shafts that are exactly that: 128-230 px flat quads at
+z 0.13-0.25, submitted as particles while the effect plays. The panel pass treated each as a panel
+and multiplied its x by `(4/3)/aspect` about a screen anchor, moving the shafts up to 25 % left.
+The rocks' glow detached from the stones and snapped back when a shaft crossed the 128 px size
+test or changed anchor -- the "geometry snaps apart and comes together" seen in play, always when a
+particle effect was near the object.
+
+The same frames also contain the wheel's panel (256 x 256 at z 7.0711, alpha 0 when closed), so the
+pass cannot simply require `lo > world_z`: the wheel is below the near plane (0.89 of it in patch
+033's capture). A panel is HUD, and HUD is drawn in the near-depth slab; a world-space particle
+billboard is far behind it. The panel test now requires `lo >= world_z * 0.5`: the wheel passes
+(0.89), the shafts do not (0.03). The contents window and the group pass are unchanged. This also
+corrects patch 033's claim that normal gameplay has no such panel: the closed wheel panel is
+present in every gameplay frame, invisible.
+
+Measured on the four F11 captures from the report: the first frame's pass compressed **35**
+polygons before and **15** after, and the other three settle at 15 too. The 20 removed from the
+first are the particle quads (19) and one triangle dragged in with them. Rendering a capture with
+`--aspect 16:9` and diffing it against the raw frame put the before-difference over the light
+shafts and the HUD; after the fix every changed pixel is in the HUD, and the 3D scene above y =
+360 is byte-identical. `render/tests/test_display_list.cpp` gains a case with a near plane at 7.5,
+a 200 px particle at 0.2 and the wheel panel at 7.0: the particle stays put, the panel and its
+model move. The render suite passes 102/102 cases (1,925 assertions).
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

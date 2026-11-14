@@ -324,7 +324,10 @@ and checked.
    x scale turned out to be a plain float, so hor+ is what shipped. The HUD, however, is **not**
    part of that projection: it is screen-space 2D, and the presenter's stretch made it 4/3 too wide.
    Patch 027 compresses the HUD's quads by the same factor about their own anchors, so the stretch
-   restores their shape and keeps the health bar centred and the compass in the corner. Flat 2D
+   restores their shape and keeps the health bar centred and the compass in the corner. Patch 033
+   extends the rule to the item wheel's large flat panel; patch 035 corrects that extension, which
+   was also catching the standing stones' world-space light shafts (128-230 px particle billboards
+   at depth 0.2 against a near plane at 7) and moving them sideways. Flat 2D
    frames (title, menus, loading cards) do not use that projection and are pillarboxed at 4:3
    instead of stretched; see below.
 3. **Render rate decoupled from 60 Hz logic — done.** `--present-rate N` (launcher `-PresentRate`)

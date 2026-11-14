@@ -728,7 +728,7 @@ index b2489da..225222b 100644
      // third of it unsampled, which is the aliasing this exists to remove. The small bias keeps a
      // 1:1 image on the single-tap path, where any averaging would only blur it -- without it a
 diff --git a/render/src/display_list.cpp b/render/src/display_list.cpp
-index 5586152..9390154 100644
+index 5586152..bcdc850 100644
 --- a/render/src/display_list.cpp
 +++ b/render/src/display_list.cpp
 @@ -2,7 +2,10 @@
@@ -742,7 +742,7 @@ index 5586152..9390154 100644
  
  namespace dream::render {
  
-@@ -483,4 +486,286 @@ bool polygon_tiles(const Frame& frame, const Polygon& polygon) {
+@@ -483,4 +486,297 @@ bool polygon_tiles(const Frame& frame, const Polygon& polygon) {
      return false;
  }
  
@@ -797,6 +797,15 @@ index 5586152..9390154 100644
 +    }
 +    if (!std::isfinite(world_z))
 +        return 0;  // a flat frame, presented at 4:3: nothing was squeezed.
++
++    // A HUD panel is drawn at the HUD's own depth, which is at or just behind the world's near
++    // plane. A world-space glow billboard can also be a large flat quad -- the standing stones in
++    // the forest are ringed by 200-pixel light shafts at z ~ 0.2 while the near world is at ~ 7 --
++    // and it is far behind that plane. Without this test the shafts moved 25 % left on a 16:9
++    // frame, which reads as the rocks coming apart and reassembling as they cross the size test.
++    // Half the near depth includes the item wheel (0.89 of it in its capture) and excludes the
++    // shafts (0.03).
++    const float panel_min_z = world_z * 0.5f;
 +
 +    std::size_t adjusted = 0;
 +    // Scale one polygon about `anchor`.
@@ -863,6 +872,8 @@ index 5586152..9390154 100644
 +            const float scale = std::max(1.0f, std::max(std::fabs(lo), std::fabs(hi)));
 +            if (hi - lo > kRelative * scale)
 +                continue;
++            if (lo < panel_min_z)
++                continue;  // a world-space billboard far behind the near plane, not a HUD panel
 +            const float panel_w = max_x - min_x, panel_h = max_y - min_y;
 +            if (panel_w < 128.0f || panel_h < 128.0f || panel_w > width * 0.9f)
 +                continue;
@@ -2720,10 +2731,10 @@ index 0000000..4e550cd
 +
 +}  // namespace dream::render
 diff --git a/render/tests/test_display_list.cpp b/render/tests/test_display_list.cpp
-index d9335ac..c213abd 100644
+index d9335ac..5fb98dd 100644
 --- a/render/tests/test_display_list.cpp
 +++ b/render/tests/test_display_list.cpp
-@@ -578,3 +578,251 @@ TEST_CASE("polygon_tiles tells a mapped texture from a repeated one") {
+@@ -578,3 +578,320 @@ TEST_CASE("polygon_tiles tells a mapped texture from a repeated one") {
      truncated.count = 400;
      CHECK(polygon_tiles(frame, truncated) == false);
  }
@@ -2974,6 +2985,75 @@ index d9335ac..c213abd 100644
 +    // The far pause overlay inside the same rectangle is untouched too.
 +    CHECK(frame.vertices[far_first].x == doctest::Approx(150.0f));
 +    CHECK(frame.vertices[far_first + 1].x == doctest::Approx(180.0f));
++}
++
++// A large flat quad is not a HUD panel just because it is large and flat: a particle effect is one
++// too. The forest's standing stones are ringed by light shafts that are 200-pixel flat quads at
++// z ~ 0.2 while the world's near plane is ~ 7, and the panel pass used to move them 25 % left --
++// the rocks' glow came apart and snapped back as each shaft crossed the 128-pixel size test. A
++// panel is drawn at the HUD's depth, at or just behind the near plane, so a quad far behind that
++// plane is scenery and must stay with the world.
++TEST_CASE("widescreen leaves a world-space particle quad alone") {
++    Frame frame;
++    auto quad = [&](float x0, float y0, float x1, float y1, float z, int list) {
++        Polygon p;
++        p.first = static_cast<u32>(frame.vertices.size());
++        p.count = 4;
++        const float xs[4] = {x0, x1, x0, x1};
++        const float ys[4] = {y0, y0, y1, y1};
++        for (int i = 0; i < 4; ++i) {
++            Vertex v;
++            v.x = xs[i];
++            v.y = ys[i];
++            v.z = z;
++            frame.vertices.push_back(v);
++        }
++        frame.lists[list].push_back(p);
++        return p.first;
++    };
++    // The world puts its near plane at z = 7.5.
++    Polygon world;
++    world.first = 0;
++    world.count = 3;
++    const float wx[3] = {0, 640, 0}, wy[3] = {0, 0, 480}, wz[3] = {0.5f, 0.5f, 7.5f};
++    for (int i = 0; i < 3; ++i) {
++        Vertex v;
++        v.x = wx[i];
++        v.y = wy[i];
++        v.z = wz[i];
++        frame.vertices.push_back(v);
++    }
++    frame.lists[0].push_back(world);
++
++    // The particle: a 200 x 200 flat quad far behind the near plane.
++    const u32 particle = quad(300, 100, 500, 300, 0.2f, 2);
++    // The item wheel's panel at the near depth, and the model inside it.
++    const u32 panel = quad(1, 305, 257, 561, 7.0f, 2);
++    Polygon model;
++    model.first = static_cast<u32>(frame.vertices.size());
++    model.count = 3;
++    const float mx[3] = {100, 150, 120}, my[3] = {350, 350, 400};
++    for (int i = 0; i < 3; ++i) {
++        Vertex v;
++        v.x = mx[i];
++        v.y = my[i];
++        v.z = 7.2f;
++        frame.vertices.push_back(v);
++    }
++    frame.lists[2].push_back(model);
++    const u32 model_first = model.first;
++
++    CHECK(compress_screen_overlays(frame, 0.75f, 640.0f) == 2);
++    // The particle did not move, although it is large enough to look like a panel.
++    CHECK(frame.vertices[particle].x == doctest::Approx(300.0f));
++    CHECK(frame.vertices[particle + 1].x == doctest::Approx(500.0f));
++    // The near panel still does, and carries its model: 100 -> 75.25, 150 -> 112.75,
++    // 120 -> 90.25 about the panel's left edge at x = 1.
++    CHECK(frame.vertices[panel].x == doctest::Approx(1.0f));
++    CHECK(frame.vertices[panel + 1].x == doctest::Approx(193.0f));
++    CHECK(frame.vertices[model_first].x == doctest::Approx(75.25f));
++    CHECK(frame.vertices[model_first + 1].x == doctest::Approx(112.75f));
++    CHECK(frame.vertices[model_first + 2].x == doctest::Approx(90.25f));
 +}
 diff --git a/render/tests/test_input_menu.cpp b/render/tests/test_input_menu.cpp
 index e3100ee..5c0860c 100644
