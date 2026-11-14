@@ -1,3 +1,163 @@
+diff --git a/audio/include/dream/audio/sink.h b/audio/include/dream/audio/sink.h
+index aad4553..4b9bdfe 100644
+--- a/audio/include/dream/audio/sink.h
++++ b/audio/include/dream/audio/sink.h
+@@ -27,13 +27,21 @@ public:
+     Sink(const Sink&) = delete;
+     Sink& operator=(const Sink&) = delete;
+ 
+-    // Opens the default playback device as 16-bit stereo at `rate`. False with error() set when
+-    // there is no device, which is an ordinary outcome on a build machine and not a failure worth
+-    // stopping a run for.
+-    bool open(unsigned rate = 44100);
++    // Opens a playback device as 16-bit stereo at `rate`. An empty `device` means the system
++    // default; a name that cannot be opened falls back to the default and leaves device_name()
++    // naming what was actually used. False with error() set when there is no device at all, which
++    // is an ordinary outcome on a build machine and not a failure worth stopping a run for.
++    bool open(unsigned rate = 44100, const std::string& device = {});
+     void close();
+     bool is_open() const noexcept { return stream_ != nullptr; }
+ 
++    // Playback level, 0 to 1. Applied to what the device hears; --wav records the mixer's output
++    // untouched.
++    void set_volume(float volume);
++    float volume() const noexcept { return volume_; }
++    // The device actually opened, or empty before open().
++    const std::string& device_name() const noexcept { return device_name_; }
++
+     // One stereo sample from the AICA. Buffered until a block is worth sending.
+     void push(std::int16_t left, std::int16_t right);
+     // Sends whatever is buffered, whether or not it fills a block. For the end of a run.
+@@ -57,7 +65,13 @@ private:
+     SDL_AudioStream* stream_ = nullptr;
+     std::vector<std::int16_t> block_;
+     unsigned rate_ = 44100;
++    float volume_ = 1.0f;
++    std::string device_name_;
+     std::string error_;
+ };
+ 
++// The SDL playback devices, in SDL's order, with duplicate names removed. Used by
++// --list-audio-devices so the launcher and the engine agree on what can be opened.
++std::vector<std::string> playback_devices();
++
+ }  // namespace dream::audio
+diff --git a/audio/src/sdl_sink.cpp b/audio/src/sdl_sink.cpp
+index 84d0920..e9aa615 100644
+--- a/audio/src/sdl_sink.cpp
++++ b/audio/src/sdl_sink.cpp
+@@ -3,15 +3,19 @@
+ 
+ #include <SDL3/SDL.h>
+ 
++#include <algorithm>
++#include <cmath>
++
+ namespace dream::audio {
+ 
+ Sink::~Sink() {
+     close();
+ }
+ 
+-bool Sink::open(unsigned rate) {
++bool Sink::open(unsigned rate, const std::string& device) {
+     close();
+     rate_ = rate;
++    error_.clear();
+     // SDL_Init is safe to call again when the window has already initialised the video subsystem;
+     // each subsystem is counted separately.
+     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+@@ -22,7 +26,31 @@ bool Sink::open(unsigned rate) {
+     spec.format = SDL_AUDIO_S16;
+     spec.channels = 2;
+     spec.freq = static_cast<int>(rate);
+-    stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
++
++    SDL_AudioDeviceID device_id = SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
++    if (!device.empty()) {
++        int count = 0;
++        SDL_AudioDeviceID* ids = SDL_GetAudioPlaybackDevices(&count);
++        if (ids) {
++            for (int i = 0; i < count; ++i) {
++                const char* name = SDL_GetAudioDeviceName(ids[i]);
++                if (name && device == name) {
++                    device_id = ids[i];
++                    break;
++                }
++            }
++            SDL_free(ids);
++        }
++    }
++    SDL_AudioDeviceID opened_id = device_id;
++    stream_ = SDL_OpenAudioDeviceStream(device_id, &spec, nullptr, nullptr);
++    // A named device can disappear between enumeration and open, or refuse 44.1 kHz stereo. Falling
++    // back to the default is better than silence; device_name() says which one actually played, and
++    // boot_main prints that when it is not the requested name.
++    if (!stream_ && device_id != SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK) {
++        opened_id = SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
++        stream_ = SDL_OpenAudioDeviceStream(opened_id, &spec, nullptr, nullptr);
++    }
+     if (!stream_) {
+         error_ = std::string("SDL_OpenAudioDeviceStream: ") + SDL_GetError();
+         return false;
+@@ -34,6 +62,8 @@ bool Sink::open(unsigned rate) {
+         close();
+         return false;
+     }
++    const char* actual = SDL_GetAudioDeviceName(opened_id);
++    device_name_ = actual != nullptr ? actual : "system default";
+     block_.reserve(kBlockFrames * 2);
+     return true;
+ }
+@@ -44,6 +74,31 @@ void Sink::close() {
+         stream_ = nullptr;
+     }
+     block_.clear();
++    device_name_.clear();
++}
++
++void Sink::set_volume(float volume) {
++    volume_ = std::clamp(volume, 0.0f, 1.0f);
++}
++
++std::vector<std::string> playback_devices() {
++    std::vector<std::string> names;
++    if (!SDL_InitSubSystem(SDL_INIT_AUDIO))
++        return names;
++    int count = 0;
++    SDL_AudioDeviceID* ids = SDL_GetAudioPlaybackDevices(&count);
++    if (ids) {
++        for (int i = 0; i < count; ++i) {
++            const char* name = SDL_GetAudioDeviceName(ids[i]);
++            if (name != nullptr && *name != '\0'
++                && std::find(names.begin(), names.end(), name) == names.end()) {
++                names.emplace_back(name);
++            }
++        }
++        SDL_free(ids);
++    }
++    SDL_QuitSubSystem(SDL_INIT_AUDIO);
++    return names;
+ }
+ 
+ unsigned Sink::queued_samples() const {
+@@ -58,8 +113,14 @@ unsigned Sink::queued_samples() const {
+ void Sink::push(std::int16_t left, std::int16_t right) {
+     if (!stream_)
+         return;
+-    block_.push_back(left);
+-    block_.push_back(right);
++    auto scaled = [this](std::int16_t sample) -> std::int16_t {
++        if (volume_ >= 0.9995f)
++            return sample;
++        const long value = std::lround(static_cast<double>(sample) * volume_);
++        return static_cast<std::int16_t>(std::clamp(value, -32768L, 32767L));
++    };
++    block_.push_back(scaled(left));
++    block_.push_back(scaled(right));
+     ++pushed;
+     if (block_.size() < kBlockFrames * 2)
+         return;
 diff --git a/cmake/DreamAddGame.cmake b/cmake/DreamAddGame.cmake
 index 0b18bd2..57da442 100644
 --- a/cmake/DreamAddGame.cmake
@@ -3231,7 +3391,7 @@ index 5980e74..554297c 100644
    src/maple/maple.cpp
    src/aica/arm7.cpp
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 9dff7cd..9e4e8c1 100644
+index 9dff7cd..7a5e805 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -16,12 +16,33 @@
@@ -4642,7 +4802,19 @@ index 9dff7cd..9e4e8c1 100644
          "  --flash FILE           a 128 KB console flash image; without it one is synthesised\n"
          "                         Created, blank and formatted, if the path does not exist. A "
          "file\n"
-@@ -1181,6 +2238,13 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1126,6 +2183,11 @@ void usage(const char* argv0, std::FILE* out) {
+         "  --no-create-vmu        fail instead of creating a missing card\n"
+         "  --unthrottled          run as fast as the host can rather than at the guest's clock\n"
+         "  --no-audio / --audio   force sound off, or on for a headless run\n"
++        "  --audio-device NAME    play through this SDL playback device\n"
++        "  --audio-volume N       playback volume, 0-100 (default 100; --wav is unaffected)\n"
++        "  --audio-buffer MS      playback queue target in milliseconds (default 186; lower is\n"
++        "                         lower latency, higher rides out longer stalls)\n"
++        "  --list-audio-devices   print the playback devices, one per line, and exit\n"
+         "\n"
+         "In the window: arrow keys are the d-pad, Z X A S are A B X Y, return is start, Q and W\n"
+         "are the triggers, F10 toggles the frame-rate counter, F11 captures the frame, F12 writes\n"
+@@ -1181,6 +2243,13 @@ void usage(const char* argv0, std::FILE* out) {
  }
  
  int main(int argc, char** argv) {
@@ -4656,7 +4828,18 @@ index 9dff7cd..9e4e8c1 100644
      std::string config, report, sample_file, dump;
      bool stop_on_ta = false;
      // No limit unless one is asked for. A run that stops on its own after a number of frames
-@@ -1238,6 +2302,11 @@ int main(int argc, char** argv) {
+@@ -1189,6 +2258,10 @@ int main(int argc, char** argv) {
+     std::uint64_t max_frames = 0, max_seconds = 0, sample_every = 0;
+     bool interpret_all = false;  // dev builds: run everything through the interpreter
+     std::string wav;             // --wav FILE: record the AICA output (16-bit stereo 44.1 kHz)
++    std::string audio_device;    // --audio-device NAME: an SDL playback device, empty = default
++    int audio_volume = 100;      // --audio-volume N: 0-100, applied to playback only
++    int audio_buffer_ms = 0;     // --audio-buffer MS: queue target; 0 keeps the sink's default
++    bool list_audio_devices = false;  // --list-audio-devices: print devices and exit
+     std::string dump_aram;       // --dump-aram FILE: write the 2 MB of sound RAM at the stop
+     std::string dump_ta;         // --dump-ta FILE: write one render's TA parameter stream
+     // --no-create-vmu: fail rather than make a card when --vmu names nothing. For a scripted run
+@@ -1238,6 +2311,11 @@ int main(int argc, char** argv) {
      // --scale N draws the geometry at N times the guest's resolution; the frame is resampled back
      // into the guest's framebuffer, so the guest never learns its screen changed size.
      bool window_mode = false, validation = false, unthrottled = false, writeback = false;
@@ -4668,7 +4851,7 @@ index 9dff7cd..9e4e8c1 100644
      // --fps: start with the on-screen counter showing. F10 toggles it either way; this only
      // decides where it starts, so a run nobody is sitting at still records the figure.
      bool start_with_fps = false;
-@@ -1245,6 +2314,23 @@ int main(int argc, char** argv) {
+@@ -1245,6 +2323,23 @@ int main(int argc, char** argv) {
      std::string suggest_config;
      std::uint64_t screenshot_at = 0, capture_at = 0;
      unsigned scale = 1;
@@ -4692,7 +4875,7 @@ index 9dff7cd..9e4e8c1 100644
      // --rtc-seed N: a fixed console clock, so two runs of the same build do the same thing and can
      // be compared. Any non-zero value will do; the number itself only changes the date a title
      // shows.
-@@ -1270,8 +2356,28 @@ int main(int argc, char** argv) {
+@@ -1270,8 +2365,28 @@ int main(int argc, char** argv) {
      // functions, because comparing every call is slow.
      bool replay_all = false, replay_self_check = false;
      std::string replay_only;
@@ -4722,7 +4905,7 @@ index 9dff7cd..9e4e8c1 100644
              config = argv[++i];
          else if (!std::strcmp(argv[i], "--report") && i + 1 < argc)
              report = argv[++i];
-@@ -1285,6 +2391,33 @@ int main(int argc, char** argv) {
+@@ -1285,6 +2400,33 @@ int main(int argc, char** argv) {
              sample_file = argv[++i];
          else if (!std::strcmp(argv[i], "--sample") && i + 1 < argc)
              sample_every = std::strtoull(argv[++i], nullptr, 0);
@@ -4756,7 +4939,7 @@ index 9dff7cd..9e4e8c1 100644
          else if (!std::strcmp(argv[i], "--interpret"))
              interpret_all = true;
          else if (!std::strcmp(argv[i], "--wav") && i + 1 < argc)
-@@ -1300,6 +2433,7 @@ int main(int argc, char** argv) {
+@@ -1300,6 +2442,7 @@ int main(int argc, char** argv) {
          else if (!std::strcmp(argv[i], "--screenshot-presented"))
              shot_presented = true;
          else if (!std::strcmp(argv[i], "--present-mode") && i + 1 < argc) {
@@ -4764,7 +4947,7 @@ index 9dff7cd..9e4e8c1 100644
              const char* m = argv[++i];
              using PM = dream::render::vk::Window::PresentMode;
              if (!std::strcmp(m, "mailbox"))
-@@ -1312,6 +2446,13 @@ int main(int argc, char** argv) {
+@@ -1312,6 +2455,13 @@ int main(int argc, char** argv) {
                  std::fprintf(stderr, "unknown present mode %s: vsync, mailbox or immediate\n", m);
                  return 2;
              }
@@ -4778,7 +4961,7 @@ index 9dff7cd..9e4e8c1 100644
          } else if (!std::strcmp(argv[i], "--bindings") && i + 1 < argc) {
              bindings_file = argv[++i];
              bindings_file_set = true;
-@@ -1337,6 +2478,19 @@ int main(int argc, char** argv) {
+@@ -1337,6 +2487,19 @@ int main(int argc, char** argv) {
              max_seconds = std::strtoull(argv[++i], nullptr, 0);
          else if (!std::strcmp(argv[i], "--window"))
              window_mode = true;
@@ -4798,7 +4981,50 @@ index 9dff7cd..9e4e8c1 100644
          else if (!std::strcmp(argv[i], "--validation"))
              validation = true;
          else if (!std::strcmp(argv[i], "--unthrottled"))
-@@ -1393,6 +2547,10 @@ int main(int argc, char** argv) {
+@@ -1363,6 +2526,26 @@ int main(int argc, char** argv) {
+             audio = true;
+         else if (!std::strcmp(argv[i], "--no-audio"))
+             no_audio = true;
++        else if (!std::strcmp(argv[i], "--audio-device") && i + 1 < argc)
++            audio_device = argv[++i];
++        else if (!std::strcmp(argv[i], "--audio-volume") && i + 1 < argc) {
++            char* end = nullptr;
++            const long value = std::strtol(argv[++i], &end, 10);
++            if (end == argv[i] || *end != '\0' || value < 0 || value > 100) {
++                std::fprintf(stderr, "--audio-volume must be 0 to 100\n");
++                return 2;
++            }
++            audio_volume = static_cast<int>(value);
++        } else if (!std::strcmp(argv[i], "--audio-buffer") && i + 1 < argc) {
++            char* end = nullptr;
++            const long value = std::strtol(argv[++i], &end, 10);
++            if (end == argv[i] || *end != '\0' || value < 20 || value > 1000) {
++                std::fprintf(stderr, "--audio-buffer must be 20 to 1000 ms\n");
++                return 2;
++            }
++            audio_buffer_ms = static_cast<int>(value);
++        } else if (!std::strcmp(argv[i], "--list-audio-devices"))
++            list_audio_devices = true;
+         else if (!std::strcmp(argv[i], "--replay"))
+             replay_all = true;
+         else if (!std::strcmp(argv[i], "--replay-self-check"))
+@@ -1385,6 +2568,15 @@ int main(int argc, char** argv) {
+             return 2;
+         }
+     }
++    if (list_audio_devices) {
++#ifdef DREAM_WITH_AUDIO
++        for (const std::string& device : dream::audio::playback_devices())
++            std::printf("%s\n", device.c_str());
++#else
++        std::fprintf(stderr, "audio: this build has no playback (SDL3 was not found)\n");
++#endif
++        return 0;
++    }
+     if (config.empty()) {
+         std::fprintf(stderr, "--config is required\n");
+         return 2;
+@@ -1393,6 +2585,10 @@ int main(int argc, char** argv) {
          std::fprintf(stderr, "--scale must be 1 to 4\n");
          return 2;
      }
@@ -4809,7 +5035,7 @@ index 9dff7cd..9e4e8c1 100644
  #ifndef DREAM_WITH_RENDERER
      if (window_mode) {
          std::fprintf(stderr,
-@@ -1410,6 +2568,33 @@ int main(int argc, char** argv) {
+@@ -1410,6 +2606,33 @@ int main(int argc, char** argv) {
          std::fprintf(stderr, "%s\n", err.c_str());
          return 2;
      }
@@ -4843,7 +5069,7 @@ index 9dff7cd..9e4e8c1 100644
      std::unique_ptr<dream::gdrom::Disc> disc;
      if (cfg.disc_image) {
          disc = dream::gdrom::open_disc(*cfg.disc_image, err);
-@@ -1425,6 +2610,15 @@ int main(int argc, char** argv) {
+@@ -1425,6 +2648,15 @@ int main(int argc, char** argv) {
      }
      std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
  
@@ -4859,7 +5085,7 @@ index 9dff7cd..9e4e8c1 100644
      dream::System sys;
      dream::hle::Bios bios(sys);
      bios.attach_disc(disc.get());
-@@ -1586,6 +2780,13 @@ int main(int argc, char** argv) {
+@@ -1586,6 +2818,13 @@ int main(int argc, char** argv) {
      dream::maple::Bus maple(sys.sched, sys.holly, sys.memory);
      auto pad = std::make_unique<dream::maple::Controller>();
      dream::maple::Controller* pad_ptr = pad.get();
@@ -4873,7 +5099,7 @@ index 9dff7cd..9e4e8c1 100644
      // A memory card in the controller's first expansion slot, where the hardware puts one.
      dream::maple::MemoryCard* card_ptr = nullptr;
      if (!vmu.empty()) {
-@@ -1731,26 +2932,51 @@ int main(int argc, char** argv) {
+@@ -1731,26 +2970,51 @@ int main(int argc, char** argv) {
      // headless run uses. Both hooks may already be taken (--dump-ta captures renders, the scripted
      // presses run at vblank), so each is chained rather than replaced.
      std::unique_ptr<Live> live;
@@ -4926,7 +5152,7 @@ index 9dff7cd..9e4e8c1 100644
          std::printf("F1 (or a pad's select button) opens the controller bindings\n");
          auto previous_render = std::move(pvr.on_render);
          pvr.on_render = [&live, previous_render](const std::vector<std::uint32_t>& stream) {
-@@ -1765,12 +2991,66 @@ int main(int argc, char** argv) {
+@@ -1765,12 +3029,66 @@ int main(int argc, char** argv) {
          // Wall-clock time the guest was stopped for, which the pacing below owes back. Without it
          // the run would sprint to catch up the moment the binding screen closed.
          auto paused_for = std::chrono::steady_clock::duration::zero();
@@ -4994,7 +5220,7 @@ index 9dff7cd..9e4e8c1 100644
              // The binding screen stops the guest rather than drawing over a running one: nobody
              // rebinds a control mid-corner, and a control being captured cannot also be played.
              // The window keeps presenting, so the screen still draws and still answers the player.
-@@ -1789,16 +3069,47 @@ int main(int argc, char** argv) {
+@@ -1789,16 +3107,47 @@ int main(int argc, char** argv) {
              // Scripted presses win while they are held, so --press still works with a window open.
              if (replayed.empty() && (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu))
                  live->read_controls(pad_ptr->state);
@@ -5044,7 +5270,33 @@ index 9dff7cd..9e4e8c1 100644
          };
      }
  #endif
-@@ -1932,7 +3243,7 @@ int main(int argc, char** argv) {
+@@ -1818,10 +3167,22 @@ int main(int argc, char** argv) {
+     dream::audio::Sink sink;
+     const bool want_audio = !no_audio && (audio || window_mode);
+     if (want_audio) {
+-        if (sink.open())
+-            std::printf("audio: playing through the default device\n");
+-        else
++        if (sink.open(44100, audio_device)) {
++            sink.set_volume(static_cast<float>(audio_volume) / 100.0f);
++            if (audio_buffer_ms > 0) {
++                const unsigned samples = static_cast<unsigned>(
++                    44100ull * static_cast<unsigned long long>(audio_buffer_ms) / 1000ull);
++                sink.high_water = std::max(1024u, samples);
++            }
++            if (!audio_device.empty() && sink.device_name() != audio_device)
++                std::printf("audio: could not use '%s'; playing through '%s' at %d%% volume\n",
++                            audio_device.c_str(), sink.device_name().c_str(), audio_volume);
++            else
++                std::printf("audio: playing through '%s' at %d%% volume\n",
++                            sink.device_name().c_str(), audio_volume);
++        } else {
+             std::fprintf(stderr, "audio: %s\n", sink.error().c_str());
++        }
+     }
+ #else
+     // Asking for sound from a build that cannot make any should say so, but it is not worth
+@@ -1932,7 +3293,7 @@ int main(int argc, char** argv) {
                           "first unmapped access by frame %llu (%.3f guest s): pc 0x%08x pr 0x%08x "
                           "r15 0x%08x\n",
                           static_cast<unsigned long long>(sys.spg.frames()),
@@ -5053,7 +5305,7 @@ index 9dff7cd..9e4e8c1 100644
              for (unsigned i = 0; i < 16; i += 4)
                  std::fprintf(stderr, "  r%-2u %08x  r%-2u %08x  r%-2u %08x  r%-2u %08x\n", i,
                               sys.ctx.r[i], i + 1, sys.ctx.r[i + 1], i + 2, sys.ctx.r[i + 2], i + 3,
-@@ -2045,6 +3356,11 @@ int main(int argc, char** argv) {
+@@ -2045,6 +3406,11 @@ int main(int argc, char** argv) {
      (void)replay_self_check;
      (void)replay_only;
  #endif
@@ -5065,7 +5317,7 @@ index 9dff7cd..9e4e8c1 100644
      dream::sh4::GuestFn entry = dream::sh4::find_function(cfg.entry);
      if (!entry) {
          std::fprintf(stderr, "no translated function at entry 0x%08x\n", cfg.entry);
-@@ -2052,6 +3368,9 @@ int main(int argc, char** argv) {
+@@ -2052,6 +3418,9 @@ int main(int argc, char** argv) {
      }
      const char* stop = "returned from the entry function";
      int rc = 0;
@@ -5075,7 +5327,7 @@ index 9dff7cd..9e4e8c1 100644
      const auto t0 = std::chrono::steady_clock::now();
      try {
  #ifdef DREAM_DEV_INTERPRETER
-@@ -2098,16 +3417,19 @@ int main(int argc, char** argv) {
+@@ -2098,16 +3467,19 @@ int main(int argc, char** argv) {
      }
      const double host_s =
          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -5097,7 +5349,7 @@ index 9dff7cd..9e4e8c1 100644
              static_cast<unsigned long long>(replay.skipped_interrupt),
              static_cast<unsigned long long>(replay.skipped_nonlocal),
              static_cast<unsigned long long>(replay.skipped_too_long), replay.divergences().size());
-@@ -2167,8 +3489,59 @@ int main(int argc, char** argv) {
+@@ -2167,8 +3539,59 @@ int main(int argc, char** argv) {
              static_cast<unsigned long long>(live->palette_changes));
          if (live->have_frame)
              std::printf("window: last shown %s\n", live->shown.describe().c_str());
@@ -5157,7 +5409,7 @@ index 9dff7cd..9e4e8c1 100644
          live.reset();
      }
  #endif
-@@ -2237,7 +3610,8 @@ int main(int argc, char** argv) {
+@@ -2237,7 +3660,8 @@ int main(int argc, char** argv) {
          }
      }
      const std::string text = report_text(sys, bios, pvr, stop, host_s, bytes, cfg.link_address,

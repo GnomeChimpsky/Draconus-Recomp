@@ -2495,6 +2495,40 @@ background is whole and the detached piece that used to appear at its lower left
 gameplay has no such panel, so the pass is a no-op there; the render suite passes 101/101 cases
 (1,917 assertions), including the panel/model and far-overlay tests.
 
+## Patch 034: the launcher can choose the sound device, volume and buffer (2026-11-14)
+
+The Audio tab was only a sound on/off checkbox. Three settings now reach the sink:
+
+* **Volume** (`--audio-volume 0..100`, default 100). `Sink::set_volume` scales each sample on its
+  way to the device; a value of 100 is a pass-through, so the old output is byte-identical. `--wav`
+  records the AICA's output before this scale, so a quiet play-through still produces a full-scale
+  reference capture.
+* **Output device** (`--audio-device NAME`, listed by `--list-audio-devices`). `Sink::open` takes the
+  name, resolves it through `SDL_GetAudioPlaybackDevices`/`SDL_GetAudioDeviceName`, and opens that
+  device. A name that has gone away (or refuses 44.1 kHz stereo) falls back to the system default;
+  boot prints `could not use 'X'; playing through 'Y'` so the fallback is visible. The launcher fills
+  its combo from the engine, keeps a vanished saved device as `(not found)`, and refreshes the list
+  when the dropdown opens, so a headset plugged in after startup is selectable.
+* **Buffer / latency** (`--audio-buffer MS`, default 186 ms). This sets the sink's `high_water`: the
+  queue length at which a block is dropped rather than letting sound drift further behind the
+  picture. Lower is tighter and more prone to a busy host dropping blocks; higher rides out longer
+  stalls. The launcher offers 93 / 186 / 372 ms.
+
+The option parser rejects a volume outside 0-100 and a buffer outside 20-1000 ms instead of clamping
+silently. `--list-audio-devices` runs before the config check, prints one name per line and exits 0,
+so it works without a title.
+
+Verified on this machine: the list names six playback devices; `--audio-device "Speakers (GSP 370)"`
+opens that device and prints its name; a missing name falls back to the system default with the
+message above; `--audio-volume 0` opens and feeds silence; `--audio-buffer 93`/`372` are accepted and
+`10`/`1001` are refused; the volume-100 path still produces the M6 capture bit for bit (the M6 gate
+is unaffected). `tools\launcher.py --selftest` and `--smoke` pass, including a check that the volume
+slider reaches `--audio-volume`, 100 % does not, and sound-off passes none of the three flags.
+
+The patch adds `audio/` to the touched directories. `patches/0001-engine-local-changes.patch` was
+regenerated from the pristine pinned tree; applying it to that tree reproduces `engine/`'s
+`audio/`, `cmake/`, `render/`, `runtime/` and `translator/` exactly.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

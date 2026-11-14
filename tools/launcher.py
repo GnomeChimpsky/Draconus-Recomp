@@ -51,6 +51,10 @@ GAME_ID = "draconus"
 SETTINGS_DIR = os.path.dirname(SETTINGS)
 SAVES_DIR = os.path.dirname(vmu.default_path(GAME_ID))
 
+# The output-device combo is built from what the engine reports at startup. The list object is
+# mutated in place (AUDIO_DEVICES[:] = ...) so the TABS entry keeps pointing at it.
+AUDIO_DEVICES = [("System default", "")]
+
 # Everything the tabs can set. A new option is one entry here and one control in TABS.
 DEFAULTS = {
     "scale": 1,
@@ -63,6 +67,9 @@ DEFAULTS = {
     "fps": False,
     "sh4_clock": 200,
     "audio": True,
+    "audio_volume": 100,
+    "audio_device": "",
+    "audio_buffer": 0,
     "path": "translated",
 }
 
@@ -134,6 +141,45 @@ def save_settings(s: dict) -> None:
         pass  # a read-only machine still gets to play with this run's settings
 
 
+def list_audio_devices() -> list[str]:
+    """The playback devices the engine reports, or [] if the build is missing or has no SDL3."""
+    if not os.path.isfile(BINARY):
+        return []
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        proc = subprocess.run(
+            [BINARY, "--list-audio-devices"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            creationflags=flags,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    names: list[str] = []
+    for line in proc.stdout.splitlines():
+        name = line.strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def audio_device_choices(saved: str = "") -> list[tuple[str, str]]:
+    """Rows for the output-device combo. A saved device that is gone stays selectable (and the
+    engine falls back to the default with a message), rather than silently resetting the setting."""
+    names = list_audio_devices()
+    choices = [("System default", "")]
+    choices += [(name, name) for name in names]
+    if saved and saved not in names:
+        choices.append(("%s (not found)" % saved, saved))
+    return choices
+
+
 def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[str]:
     """The boot command line a settings dict describes. Pure, so --selftest can check it."""
     cmd = [BINARY, "--config", CONFIG, "--window"]
@@ -165,6 +211,16 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
         cmd += ["--interpret"]
     if not s.get("audio", True):
         cmd += ["--no-audio"]
+    else:
+        volume = max(0, min(100, int(s.get("audio_volume") or 100)))
+        if volume != 100:
+            cmd += ["--audio-volume", str(volume)]
+        device = str(s.get("audio_device") or "")
+        if device:
+            cmd += ["--audio-device", device]
+        buffer_ms = int(s.get("audio_buffer") or 0)
+        if buffer_ms > 0:
+            cmd += ["--audio-buffer", str(buffer_ms)]
     return cmd + (extra or [])
 
 
@@ -173,7 +229,8 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
 # Each control: kind, key, label, optional help text, and kind-specific fields.
 #   combo   values: [(label, value)]         entry  depends: (key, value)
 #   check   (a checkbox)                      radio  values: [(label, value)]
-#   note    (a grey line of text)             disc   (the disc row, handled specially)
+#   slider  min, max, suffix                  note   (a grey line of text)
+#   disc    (the disc row, handled specially)
 
 TABS = [
     ("Graphics", [
@@ -227,8 +284,23 @@ TABS = [
     ("Audio", [
         {"kind": "check", "key": "audio", "label": "Enable sound",
          "help": "Off runs the game silently and skips the audio device entirely."},
-        {"kind": "note", "text": "Volume and output device selection arrive with the audio "
-                                 "milestone (M6)."},
+        {"kind": "slider", "key": "audio_volume", "label": "Volume", "min": 0, "max": 100,
+         "suffix": "%",
+         "help": "Playback volume. It scales what the output device hears; a WAV recording is "
+                 "always the mixer's full-scale output."},
+        {"kind": "combo", "key": "audio_device", "label": "Output device",
+         "values": AUDIO_DEVICES,
+         "help": "The SDL playback devices this machine reports. A device that is unplugged is "
+                 "kept in the list as '(not found)'; playing then falls back to the system default "
+                 "and the engine says which device it used. The list refreshes when the dropdown "
+                 "opens."},
+        {"kind": "combo", "key": "audio_buffer", "label": "Audio buffer",
+         "values": [("Low latency - 93 ms", 93),
+                    ("Balanced - 186 ms (default)", 0),
+                    ("Safe - 372 ms", 372)],
+         "help": "How much audio the output queue may hold before samples are dropped. Lower keeps "
+                 "sound closer to the picture; higher rides out longer frame stalls on a busy "
+                 "machine. Changes take effect on the next launch."},
     ]),
     ("Gameplay", [
         {"kind": "radio", "key": "path", "label": "Engine path",
@@ -264,6 +336,8 @@ class Launcher(tk.Tk):
         self.geometry("1240x%d" % max(620, min(780, self.winfo_screenheight() - 140)))
         self.minsize(900, 580)
         self.settings = load_settings()
+        # Enumerate once before the tabs are built; the device combo reads this list object.
+        AUDIO_DEVICES[:] = audio_device_choices(self.settings.get("audio_device", ""))
         self.image_path = self._initial_image()
         self.status = tk.StringVar(value="Ready.")
         self.vars: dict[str, tk.Variable] = {}
@@ -391,7 +465,29 @@ class Launcher(tk.Tk):
                                textvariable=var)
             self.combos[key] = box
             box.bind("<<ComboboxSelected>>", lambda _e: self._combo_changed(key))
+            if key == "audio_device":
+                box.configure(postcommand=self._refresh_audio_devices)
             return box
+        if kind == "slider":
+            var = tk.IntVar(value=int(self.settings.get(key, c.get("min", 0))))
+            self.vars[key] = var
+            frame = tk.Frame(tab, bg=self.BG)
+            readout = tk.StringVar()
+
+            def show(value, suffix=c.get("suffix", ""), target=readout):
+                target.set("%d%s" % (int(float(value)), suffix))
+
+            scale = tk.Scale(frame, from_=c.get("min", 0), to=c.get("max", 100),
+                             orient="horizontal", variable=var, showvalue=False,
+                             resolution=1, length=260, width=12,
+                             bg=self.BG, fg=self.FG, troughcolor="#3a2f35",
+                             activebackground="#c9a227", highlightthickness=0, bd=0,
+                             command=show)
+            scale.pack(side="left")
+            tk.Label(frame, textvariable=readout, bg=self.BG, fg=self.FG, width=5,
+                     anchor="w").pack(side="left", padx=(8, 0))
+            show(var.get())
+            return frame
         if kind == "entry":
             var = tk.StringVar(value=str(self.settings.get(key, "")))
             self.vars[key] = var
@@ -456,11 +552,21 @@ class Launcher(tk.Tk):
         self.settings[key] = self._value_for(key)
         self._sync_depends()
 
+    def _refresh_audio_devices(self) -> None:
+        """Re-enumerate when the device dropdown opens, so a headset plugged in after the launcher
+        started is selectable without restarting it."""
+        AUDIO_DEVICES[:] = audio_device_choices(self.settings.get("audio_device", ""))
+        box = self.combos.get("audio_device")
+        if box is not None:
+            box.configure(values=[label for label, _ in AUDIO_DEVICES])
+
     def collect(self) -> dict:
         for _, controls in TABS:
             for c in controls:
                 if c["kind"] == "combo":
                     self.settings[c["key"]] = self._value_for(c["key"])
+                elif c["kind"] == "slider":
+                    self.settings[c["key"]] = int(self.vars[c["key"]].get())
                 elif c["kind"] == "entry":
                     self.settings[c["key"]] = self.vars[c["key"]].get()
                 elif c["kind"] in ("check", "radio"):
@@ -583,6 +689,7 @@ def selftest() -> int:
     base = {"scale": 1, "aspect": "off", "aspect_custom": "16:9", "present_rate": 0,
             "frame_interpolation": False, "display_mode": "windowed",
             "vsync": True, "fps": False, "sh4_clock": 200, "audio": True,
+            "audio_volume": 100, "audio_device": "", "audio_buffer": 0,
             "path": "translated"}
     image = "G:/dumps/draconus.gdi"
 
@@ -620,6 +727,23 @@ def selftest() -> int:
 
     cmd = build_command(image, dict(base, audio=False))
     expect("audio", cmd, ["--no-audio"])
+    for flag in ("--audio-volume", "--audio-device", "--audio-buffer"):
+        if flag in cmd:
+            failures.append("sound off still passed %s" % flag)
+
+    cmd = build_command(image, dict(base, audio_volume=35, audio_device="Speakers (GSP 370)",
+                                    audio_buffer=93))
+    expect("audio options", cmd,
+           ["--audio-volume", "35", "--audio-device", "Speakers (GSP 370)",
+            "--audio-buffer", "93"])
+
+    cmd = build_command(image, dict(base))
+    for flag in ("--audio-volume", "--audio-device", "--audio-buffer"):
+        if flag in cmd:
+            failures.append("audio default still passed %s" % flag)
+
+    if ("System default", "") not in audio_device_choices():
+        failures.append("audio device choices lack the system default")
 
     cmd = build_command(image, dict(base, path="interpreter"))
     expect("path", cmd, ["--interpret"])
@@ -693,6 +817,17 @@ def check_ui(app: Launcher) -> list[str]:
     cmd = build_command(app.image_path or "disc.gdi", app.collect())
     if "--sh4-clock" in cmd:
         failures.append("200 MHz kept --sh4-clock: %s" % " ".join(cmd))
+
+    # The volume slider must reach the command line; a Scale that only moves its own handle is
+    # the same defect as a combo that only changes its text.
+    app.vars["audio_volume"].set(40)
+    cmd = build_command(app.image_path or "disc.gdi", app.collect())
+    if "--audio-volume" not in cmd or "40" not in cmd:
+        failures.append("volume slider lost --audio-volume: %s" % " ".join(cmd))
+    app.vars["audio_volume"].set(100)
+    cmd = build_command(app.image_path or "disc.gdi", app.collect())
+    if "--audio-volume" in cmd:
+        failures.append("100%% volume kept --audio-volume: %s" % " ".join(cmd))
 
     # The tabs that remain, and their order: a removed tab must not come back through a stale spec.
     names = [app.notebook.tab(i, "text") for i in range(len(app.notebook.tabs()))]

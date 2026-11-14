@@ -73,6 +73,9 @@ the command line:
 | | VSync off | `--present-mode immediate` |
 | | frame counter | `--fps` |
 | Audio | sound off | `--no-audio` |
+| | volume | `--audio-volume 0..100` |
+| | output device | `--audio-device NAME` (the engine lists them with `--list-audio-devices`) |
+| | buffer / latency | `--audio-buffer 93/186/372` ms |
 | Gameplay | interpreter | `--interpret` |
 
 Saving and loading are the game's own: the launcher has no card settings and attaches no card, so a

@@ -185,7 +185,9 @@ tabs on the right.
   fullscreen), present rate (60/120/144 Hz against the fixed 60 Hz logic, capped to the display's
   refresh), frame interpolation for the extra presents (experimental, only at 120/144 Hz), VSync and
   the frame counter.
-* **Audio** -- sound on/off.
+* **Audio** -- sound on/off, master volume, output device (the SDL playback devices, refreshed when
+  the dropdown opens) and an audio buffer/latency choice. `--wav` still records the mixer's
+  full-scale output regardless of the playback volume.
 * **Gameplay** -- translated or interpreter engine path, and the game disc.
 * **Bottom bar** -- **Open saves folder** and **Open settings folder** open the per-user card's
   folder (`%APPDATA%\dream-recomp\saves\draconus`) and the launcher's own

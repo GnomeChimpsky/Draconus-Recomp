@@ -451,6 +451,21 @@ byte-identical to the separate 90 s run. No engine change was needed for any of 
 `docs/13-M6-AUDIO-BASELINE.md` has the tables and the capture commands; `tools/audio-check.py` is the
 measurement tool (info, align, compare, gaps, raw2wav).
 
+## Launcher audio controls (2026-11-14)
+
+The Audio tab now has a **volume slider** (0-100 %), an **output-device combo** filled from
+`draconus_boot --list-audio-devices` and refreshed when it opens, and a **buffer/latency** choice
+(93 / 186 / 372 ms). The engine side is `--audio-volume`, `--audio-device` and `--audio-buffer`:
+volume is applied only to playback (so `--wav` stays full-scale), a named device that has gone away
+falls back to the system default with a printed message, and the buffer sets the sink's queue
+high-water mark. The CLI rejects out-of-range values rather than clamping them silently.
+
+Verified: this machine lists six playback devices; a named device opens, a missing one falls back;
+0/100 % volume and 93/372 ms buffers are accepted, 101 and 10 ms are refused. A 90 s run at volume
+100 with the sink open produced the same WAV SHA-256 as the M6 capture, so the pass-through path is
+unchanged. `launcher.py --selftest` and `--smoke` pass, including the slider-to-command-line check.
+`docs/ENGINE-CHANGES.md` patch 034 has the details; the engine patch now also carries `audio/`.
+
 ## Next phase
 
 Order is by value per unit of risk, not by size:
