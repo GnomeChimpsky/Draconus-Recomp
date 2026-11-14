@@ -10,7 +10,7 @@ the difference.
 | The card device (Maple expansion slot 1, block read/write, write-back) | `engine/runtime/src/maple/maple.cpp` |
 | The default per-user card for a windowed run | `engine/runtime/boot/boot_main.cpp` (`default_vmu_path`) |
 | Card reader, blank-card writer, save listing | `tools/vmu.py` |
-| Launcher tab, save selection, boot-into-save | `tools/launcher.py` |
+| Launcher folder buttons (saves, settings) | `tools/launcher.py` |
 
 ## Where the card lives
 
@@ -25,8 +25,8 @@ Linux     $XDG_DATA_HOME/dream-recomp/saves/draconus/vmu_a1.bin
 
 and creates it, blank and formatted, the first time. `a1` is the hardware address the card answers
 on: controller port A, expansion slot 1. `--vmu FILE` (play script: `-Vmu FILE`) still attaches a
-specific image; the launcher always passes one explicitly so it can read the saves off exactly the
-file it hands the game.
+specific image; a windowed launch from the launcher names none, so it gets this per-user card, and the
+game's own Save and Load Game screens are what use it.
 
 **Headless runs stay card-less unless `--vmu` is passed.** A card answers Maple frames and changes
 the write stream, which would invalidate every golden trace; this is the same rule the M2/M3 runs
@@ -46,27 +46,29 @@ python tools\vmu.py --new C:\path\to\card.vmu    # a blank, formatted card
 The lister reads the directory entries and reports each save's name, block count, size and BCD
 timestamp. That is all a Dreamcast tool can know without understanding the title's own save format;
 Draconus's files are named `DRACONUS.001` … `DRACONUS.008`. Only data files (type `0x33`) are
-listed: a VMU mini-game (`0xCC`) is not a save, and leaving it out keeps the launcher's indices
-lined up with the game's own Load Game list.
+listed: a VMU mini-game (`0xCC`) is not a save, and leaving it out keeps the listing lined up with
+the game's own Load Game list.
 
-The blank image is byte-identical to the engine's `MemoryCard::format()`. The launcher's self-test
-checks that equality path indirectly (both write the same image) and parses a fabricated entry back.
+The blank image is byte-identical to the engine's `MemoryCard::format()`: both write the same bytes,
+and `tools\vmu.py` parses a fabricated entry back out of one.
 
-## In the launcher
+## In the game
 
-**Saves** tab:
+Saving and loading are the title's own VMU screens, and the launcher has no settings for them. A
+windowed run gets the per-user card above, exactly as a console with a card in slot A1 would; the
+title's slot picker offers that card, its Save flow writes to it, and its Load Game flow reads it.
+Nothing is faked or driven from outside.
 
-* **Attach a memory card** — off boots with an empty slot, which is how a console with no card in it
-  behaves (the title then says "No VMU Found").
-* **Card file** — the image, with `...` to pick one and **New...** to write a formatted blank card.
-* **Saves on this card** — file name, save date, and block count. A card that does not exist yet
-  says so instead of failing.
-* **Launch straight into a save** — with a save selected, Play passes a `--press` schedule that
-  walks the game's own frontend to its Load Game list, picks the file, and lets the game load it.
-  Nothing is faked: the save is loaded by the game's normal path. The game's list has eight slots,
-  so the launcher refuses a ninth rather than pressing past the end.
+The launcher's bottom bar has **Open saves folder** (the folder holding `vmu_a1.bin`) and **Open
+settings folder** (`%APPDATA%\DraconusRecomp`, with `launcher.json`), which is how to get at the card
+to copy it, inspect it with `tools\vmu.py`, or hand it to an emulator.
 
-## How the boot-into-save schedule was found
+## Driving the frontend to a save by frame number (reference)
+
+This was built for the launcher's old **Launch straight into a save** setting, removed on 2026-11-14
+along with the rest of its Saves tab. The tables and the measurement stay because they are a working
+description of the frontend's timing, and `--press` still takes such a schedule from the command
+line.
 
 The guest clock is deterministic (fixed 1/60 s frames), so the frontend can be driven by frame
 number. Measured on this title, with a card attached:
@@ -81,14 +83,12 @@ number. Measured on this title, with a card attached:
 | 5200 + 120·n | Down × n | walk the list; it has two columns of four but Down walks reading order |
 | 5200 + 120·(n+1) | A | load entry `n` and let the game take over |
 
-The file list is ordered exactly as the card's directory is, and the launcher lists entries in that
-same order, so entry *n* in the launcher is entry *n* on screen. Verified with a card carrying eight
-synthetic entries: two Downs highlighted `DRACONUS.003`, five highlighted `DRACONUS.006`, and the
-launcher's exact schedule for slot 5 (`…,down@5680,a@5800`) ended on the game's own `LOAD ERROR!`
-page — the game read the right directory entry and tried to load the synthetic data.
-
-The launcher's `LOAD_SCHEDULE` + `load_presses()` implement exactly this; `--selftest` pins the
-command line it produces, including the number of Downs for a chosen slot.
+The file list is ordered exactly as the card's directory is, so listing entry *n* with
+`tools\vmu.py` matches screen entry *n*. Verified with a card carrying eight synthetic entries: two
+Downs highlighted `DRACONUS.003`, five highlighted `DRACONUS.006`, and the schedule for slot 5
+(`…,down@5680,a@5800`) ended on the game's own `LOAD ERROR!` page — the game read the right
+directory entry and tried to load the synthetic data. The game's list has eight slots, so a ninth
+has no press schedule that reaches it.
 
 ## What saves, and what does not
 
@@ -114,9 +114,9 @@ What was verified end to end here:
 ## Sharing with an emulator
 
 Flycast keeps a card per title as `<product-id>_vmu_save_A1.bin` (for Draconus, look for
-`T40203N_vmu_save_A1.bin` or the name from your own Flycast data directory). Point the launcher's
-**Card file** at it (or run `play-draconus.ps1 -Vmu <file>`), and the same bytes the emulator wrote
-are what the game reads. Saves made here can be copied back the same way.
+`T40203N_vmu_save_A1.bin` or the name from your own Flycast data directory). Copy it over the
+per-user card, or run `play-draconus.ps1 -Vmu <file>`, and the same bytes the emulator wrote are what
+the game reads. Saves made here can be copied back the same way.
 
 ## Risks and limits
 
@@ -126,7 +126,7 @@ are what the game reads. Saves made here can be copied back the same way.
   one card on port A slot 1, which is what the title's own slot picker offers by default.
 * **No format of existing files.** A 128 KB file without the format marker is refused, not
   reformatted. Make a blank card next to it instead and import saves as needed.
-* **Save data format.** The launcher lists files but does not decode the title's save contents; that
-  would need the game's own structures and is not needed to pick one.
+* **Save data format.** `tools\vmu.py` lists files but does not decode the title's save contents; that
+  would need the game's own structures, and the game is the only thing that loads them.
 * **Headless determinism.** Passing `--vmu` to a headless run changes its Maple traffic and write
   hash. Use a copy of the card per run when comparing traces.

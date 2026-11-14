@@ -26,7 +26,7 @@ engine changes, and the next three tasks. The engine-side findings are in
 `docs/UPSTREAM-REPORT.md` (one proposed fix, one fixed harness bug, one open fault), and
 `docs/ENGINE-CHANGES.md` is the running ledger with every trace and dead end.
 `docs/17-VMU-SAVES.md` covers the virtual memory card: where the per-user card lives, what
-`tools\vmu.py` reads, and how the launcher boots into a chosen save.
+`tools\vmu.py` reads, and how the game's own save and load screens use it.
 
 ## From a fresh clone
 
@@ -136,15 +136,17 @@ rather than overwritten. `python tools\vmu.py <card>` lists what a card holds, a
 `python tools\vmu.py --new <card>` makes a blank one. Headless runs stay card-less unless `--vmu`
 is passed, because a card answers Maple frames and would change their traces.
 
-The launcher's **Saves** tab shows the cards and the save files on them, and **Launch straight into
-a save** boots the game, walks its own Load Game screens to the selected file and loads it. Nothing
-about the save is faked: the game loads it through its normal path.
+Saving and loading happen in the game itself, on its own VMU screens; the launcher has no card
+settings of its own. Its bottom bar has **Open saves folder** and **Open settings folder** buttons,
+which open the per-user card's folder and the one holding `launcher.json`.
 
 **Display.** `-Widescreen` gives hor+ at 16:9: the game's projection is widened and 3D frames are
 presented stretched, so more of the world is visible horizontally and nothing is distorted. The HUD
 is screen-space art rather than projected geometry, so it is compressed by the same factor before
 that stretch and keeps its shape and its place (the health bar stays centred, the compass in the
-corner). Menus, the title and loading cards are flat 2D art, keep their 4:3 shape and are
+corner). The item wheel and its rotating item models are a HUD panel and are compressed with it, so
+the wheel keeps its shape and the model stays in it. Menus, the title and loading cards are flat 2D
+art, keep their 4:3 shape and are
 pillarboxed inside the wide window. `-Aspect 21:9` takes any ratio, `-Scale 2` draws at twice the guest's resolution and
 opens the window at that size (4x at 16:9 is 2560x1440, shrunk to fit a smaller screen), and
 `-DisplayMode` chooses **windowed**, **borderless** (desktop fullscreen at the display's own size,
@@ -172,23 +174,23 @@ device as `XINPUT`.
 
 ## Launcher
 
-`tools\launcher.bat` (or `python tools\launcher.py`) opens the graphical launcher: the game's own
-artwork on the left, and Graphics, Audio and Gameplay tabs on the right.
+`tools\launcher.bat` (or `python tools\launcher.py`) opens the graphical launcher: the project's
+emblem, the author credit and a link to the repository on the left, and Graphics, Audio and Gameplay
+tabs on the right.
 
-* **Graphics** -- internal resolution (1x to 4x, which is also the window size: 4x at 16:9 is
-  2560x1440), widescreen (off, 16:9, 21:9 or a custom ratio, hor+), display mode (windowed,
-  borderless or exclusive fullscreen), present rate (60/120/144 Hz against the fixed 60 Hz logic,
-  capped to the display's refresh), frame interpolation for the extra presents (experimental, only
-  at 120/144 Hz), VSync, the frame counter and the CPU clock (200 MHz is the console; more is an
-  overclock that gives a heavy scene more cycles inside each frame, and can affect game speed and
-  audio on some titles).
-* **Audio** -- sound on/off, and recording the audio to a WAV file.
-* **Gameplay** -- translated or interpreter engine path, the frame limiter, the controller bindings
-  file, and the game disc.
-* **Saves** -- the memory card the game gets (the per-user card by default, or any 128 KB image),
-  the save files on it with their timestamps and block counts, **New...** to make a formatted
-  blank one, and **Launch straight into a save** to load the selected file on Play instead of
-  stopping at the title screen.
+* **Graphics** -- the CPU clock at the top (200 MHz is the console; more is an overclock that gives
+  a heavy scene more cycles inside each frame, and can affect game speed and audio on some titles),
+  internal resolution (1x to 4x, which is also the window size: 4x at 16:9 is 2560x1440), widescreen
+  (off, 16:9, 21:9 or a custom ratio, hor+), display mode (windowed, borderless or exclusive
+  fullscreen), present rate (60/120/144 Hz against the fixed 60 Hz logic, capped to the display's
+  refresh), frame interpolation for the extra presents (experimental, only at 120/144 Hz), VSync and
+  the frame counter.
+* **Audio** -- sound on/off.
+* **Gameplay** -- translated or interpreter engine path, and the game disc.
+* **Bottom bar** -- **Open saves folder** and **Open settings folder** open the per-user card's
+  folder (`%APPDATA%\dream-recomp\saves\draconus`) and the launcher's own
+  (`%APPDATA%\DraconusRecomp`). Saving and loading are the game's own, so there is no card setting
+  here.
 
 The tabs are described by one table in the script (`TABS`) plus their keys in `DEFAULTS`, so adding
 an option is a few lines rather than new layout code. Settings persist under
@@ -199,8 +201,8 @@ produces `--scale 4 --aspect 16:9`, and closes it.
 The resolution list is the scale the 3D is drawn at and the size the window opens at: 4x is
 2560x1920 at 4:3, or 2560x1440 at 16:9 (16:9 keeps the 2560 width and takes the height out of it).
 A window larger than the screen is shrunk to fit, so on a 1080p display 4x opens at the largest
-16:9 the screen allows; **Fullscreen** takes the display's own mode instead, which is how 4x 16:9
-becomes exactly 2560x1440 on a 2560x1440 panel. The game itself always sees its 640x480
+16:9 the screen allows; **Exclusive fullscreen** takes the display's own mode instead, which is how
+4x 16:9 becomes exactly 2560x1440 on a 2560x1440 panel. The game itself always sees its 640x480
 framebuffer, which is why captures and reports say 640x480 at every setting.
 
 ## Rebuild the renderer build

@@ -21,7 +21,7 @@ game/*/extracted/
 capture-*
 *.ppm
 *.png
-!tools/launcher-art.png
+!tools/launcher-*.png
 *.vmu
 *.sav
 screenshot-*.ppm

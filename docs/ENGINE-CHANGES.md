@@ -2464,6 +2464,37 @@ ticks, so this cannot come back unnoticed.
 The lesson worth keeping: an overclock is only correct if *every* device that converts a real-time
 rate into cycles is enumerated, not just the ones that obviously look like they do.
 
+## Patch 033: the item wheel is a panel with a 3D model inside it (2026-11-14)
+
+The wheel that pops up left of the health bar when the player switches item is a **256x256 flat
+four-vertex panel** at depth **7.0711**, drawn below the frame's nearest world depth (7.9831 in the
+capture). Patch 027 only looked at flat quads beyond the world's near depth, so it skipped the
+panel; the item's rotating 3D model is submitted **inside** the panel at depth 7.3-7.9 and was not
+part of any flat group either. At 16:9 the panel was stretched 4/3, and the model, riding the wide
+projection, drifted right toward the health bar.
+
+The render-library pass now treats a large flat four-vertex quad (at least 128 pixels in both
+directions, not the full-screen background) as a **HUD panel**. It compresses the panel and every
+polygon whose rectangle lies inside the panel **and whose depth is within 1.5 of the panel's own
+depth**, about the panel's anchor (the left edge for this wheel). The near-depth window is what
+keeps the panel from swallowing a pass that happens to overlap it: the pause menu's black splash is
+drawn at depth 10.87, far in front of the wheel's 7.07, and used to be torn where it crossed the
+panel's rectangle. The world behind the panel is left alone, and the health bar only overlaps the
+panel's rectangle partly, so it is not dragged into the panel's cluster. The item wheel and its
+models therefore keep their 4:3 size and their place at the left edge; the panel's texture (the
+wheel graphic) is compressed with it.
+
+Verified on a user F11 capture of the phial preview: the frame contains one 256x256 panel at
+`z=7.0711` with 300 polygons of model/glow inside it. With `dream_render_view --aspect 16:9` (the
+new option applies the same compression to a capture), **301 polygons** are compressed; the model
+stays at the wheel's left anchor and the simulated 16:9 presentation keeps it at 4:3 size, with no
+pixels changed outside the wheel/model, health bar and compass. On a user F11 capture of the **pause
+menu** (2,232 polygons), the same pass compresses 105 polygons — the wheel panel and its nearby
+contents — while the pause splash, drawn far in front at depth 10.87, is untouched: the black
+background is whole and the detached piece that used to appear at its lower left is gone. Normal
+gameplay has no such panel, so the pass is a no-op there; the render suite passes 101/101 cases
+(1,917 assertions), including the panel/model and far-overlay tests.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

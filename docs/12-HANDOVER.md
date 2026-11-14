@@ -379,6 +379,17 @@ byte-identical to the pre-change widescreen capture. The presenter also discards
 the image now, which fixes the edge smear that used to appear in letterbox bars. See
 `docs/ENGINE-CHANGES.md` patch 021.
 
+**The item wheel's 3D model (2026-11-14).** The wheel that appears left of the health bar when
+switching item is a 256x256 flat HUD panel at depth 7.07, with the item's rotating 3D model
+submitted inside it at depth 7.3-7.9. The panel sits *below* the frame's nearest world depth, so the
+first overlay pass skipped it; at 16:9 the wheel stretched and the model drifted right into the
+health bar. A large flat four-vertex quad (128 px or more each way, not full-screen) is now treated
+as a panel, and the panel and the contents within 1.5 depth of it inside its rectangle are
+compressed about the panel's anchor. The wheel and its models keep their 4:3 size and left-edge
+placement; the world behind the panel is untouched. The near-depth window also stops the pass from
+tearing the pause menu's black splash, which overlaps the wheel's rectangle but is drawn at depth
+10.87. See `docs/ENGINE-CHANGES.md` patch 033.
+
 ## Saves: a virtual VMU always present (2026-11-14)
 
 A windowed run now always has a memory card — the per-user one for this title
@@ -386,12 +397,17 @@ A windowed run now always has a memory card — the per-user one for this title
 — so the save and load screens work with no flags. `--vmu FILE` (play script `-Vmu`) still names a
 specific image. Headless runs stay card-less so their traces repeat.
 
-The launcher's **Saves** tab lists the cards and the save files on them (`tools/vmu.py` reads the
-VMU filesystem), creates blank cards, and can **launch straight into a save**: it passes a `--press`
-schedule, measured frame by frame, that walks the game's own Load Game screens to the chosen file.
-The list order is the card's directory order, so launcher entry *n* is screen entry *n*; verified
-with eight synthetic entries (two Downs → `.003`, five → `.006`, A on the first → the game's own
-`LOAD ERROR!` for the fake data).
+**Saving and loading are the game's own (2026-11-14).** The launcher's Saves tab was removed: no card
+selection, no save list, no launch-into-a-save. A windowed launch attaches nothing, so the engine's
+per-user card above is what the title's own Save and Load Game screens write to and read from. The
+launcher's bottom bar has **Open saves folder** and **Open settings folder** buttons for finding the
+card and `launcher.json`. The `--press` walk through those screens was measured frame by frame and
+still works from the command line (the table is in `docs/17-VMU-SAVES.md`); it is no longer part of
+the launcher.
+
+The card reader's numbers, kept for reference: the load list is the card's directory order, so entry
+*n* on screen is entry *n* in `tools/vmu.py`'s listing; verified with eight synthetic entries (two
+Downs → `.003`, five → `.006`, A on the first → the game's own `LOAD ERROR!` for the fake data).
 
 One measured surprise: the pause menu's **Set Mark** is a checkpoint, not a card save — accepting it
 reports **0 block writes** and returns to play. A VMU save is written through the game's

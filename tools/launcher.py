@@ -21,43 +21,35 @@ import re
 import subprocess
 import sys
 import tkinter as tk
+import webbrowser
 from tkinter import filedialog, messagebox, ttk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import vmu  # noqa: E402  (the tool beside this script)
+import vmu  # noqa: E402  (the tool beside this script; only its per-user card path is used here)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DISC_TOOL = os.path.join(ROOT, "tools", "draconus-disc")
 CONFIG = os.path.join(ROOT, "engine", "games", "draconus", "draconus.toml")
 BINARY = os.path.join(ROOT, "engine", "build-render", "games", "draconus", "draconus_boot.exe")
-ART = os.path.join(ROOT, "tools", "launcher-art.png")
+# The launcher's emblem: "Draconus Recomped Emblem light.png", trimmed of the transparent margin
+# its artwork leaves on the right and scaled to 320 px wide. The original canvas is 1000 px wide but
+# the banner ends at x=801, so using it unmodified drew the logo noticeably left of the panel's
+# centre; this file is the same artwork, centred in its own canvas.
+ART = os.path.join(ROOT, "tools", "launcher-emblem.png")
+REPOSITORY = "https://github.com/GnomeChimpsky/Draconus-Recomp"
 SETTINGS = os.path.join(
     os.environ.get("APPDATA", os.path.expanduser("~")), "DraconusRecomp", "launcher.json"
-)
-BINDINGS = os.path.join(
-    os.environ.get("APPDATA", os.path.expanduser("~")), "dream-recomp", "dream-recomp",
-    "bindings.txt",
 )
 
 IMAGE_RE = re.compile(r'^\s*image\s*=\s*"(.*)"', re.MULTILINE)
 
 GAME_ID = "draconus"
 
-# The Draconus frontend, in guest frames at 60 Hz. The title is interactive from about frame 1200;
-# Start begins the intro cinematic and a second Start skips it into the main menu, where New Game
-# is the first entry and Load Game the second. The menu and page fades are fixed-length, and the
-# guest runs on a deterministic clock, so one schedule drives the whole walk from power-on to the
-# load screen.
-#
-# Keep these apart from the save-slot presses below: the entry list length depends on the card,
-# but the path to it does not.
-LOAD_SCHEDULE = [
-    (1600, "start"),   # title -> intro cinematic
-    (2300, "start"),   # skip the cinematic -> main menu
-    (3300, "down"),    # New Game -> Load Game
-    (3550, "a"),       # Load Game -> Choose VMU
-    (4700, "a"),       # the card in port A slot 1 -> that card's file list
-]
+# The bottom bar's two folder buttons. The saves folder is the engine's own per-user card folder
+# (the same rule `vmu.default_path` follows), so it holds the card a windowed run writes to even
+# though the launcher no longer attaches it itself.
+SETTINGS_DIR = os.path.dirname(SETTINGS)
+SAVES_DIR = os.path.dirname(vmu.default_path(GAME_ID))
 
 # Everything the tabs can set. A new option is one entry here and one control in TABS.
 DEFAULTS = {
@@ -71,14 +63,7 @@ DEFAULTS = {
     "fps": False,
     "sh4_clock": 200,
     "audio": True,
-    "wav": "",
-    "wav_on": False,
-    "unthrottled": False,
     "path": "translated",
-    "vmu_enabled": True,
-    "vmu_path": vmu.default_path(GAME_ID),
-    "vmu_autoload": False,
-    "save_index": -1,
 }
 
 
@@ -149,34 +134,6 @@ def save_settings(s: dict) -> None:
         pass  # a read-only machine still gets to play with this run's settings
 
 
-def card_path_for(s: dict) -> str:
-    """The memory-card image this settings dict attaches, or "" for none.
-
-    The path defaults to the per-user card the engine itself would pick, so the launcher reads the
-    saves off exactly the file it is about to hand the game.
-    """
-    if not s.get("vmu_enabled", True):
-        return ""
-    return str(s.get("vmu_path", "")).strip() or vmu.default_path(GAME_ID)
-
-
-def load_presses(index: int) -> str:
-    """The --press schedule that walks from power-on to save slot `index` and loads it.
-
-    The frontend reaches its Load Game page at a fixed guest frame, because the guest clock is
-    deterministic and every transition on the way is a fixed-length animation. What varies is the
-    number of entries above the chosen one, and each Down is 120 frames (two seconds) so the
-    cursor is never asked to move twice inside one animation.
-    """
-    presses = list(LOAD_SCHEDULE)
-    frame = 5200  # the file list has finished fading in
-    for _ in range(max(0, int(index))):
-        presses.append((frame, "down"))
-        frame += 120
-    presses.append((frame, "a"))
-    return ",".join("%s@%d" % (button, at) for at, button in presses)
-
-
 def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[str]:
     """The boot command line a settings dict describes. Pure, so --selftest can check it."""
     cmd = [BINARY, "--config", CONFIG, "--window"]
@@ -198,8 +155,6 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
         cmd += ["--present-mode", "immediate"]
     if s.get("fps"):
         cmd += ["--fps"]
-    if s.get("unthrottled"):
-        cmd += ["--unthrottled"]
     # 200 is the console, and passing it would only add a line to every command line and to every
     # settings file ever written, so it is left to the default. `or 200` rather than a defaulted
     # get(): collect() yields None for a key that is not in DEFAULTS, and a stale settings file
@@ -210,27 +165,24 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
         cmd += ["--interpret"]
     if not s.get("audio", True):
         cmd += ["--no-audio"]
-    wav = str(s.get("wav", "")).strip()
-    if s.get("wav_on") and wav:
-        cmd += ["--wav", wav]
-    card = card_path_for(s)
-    if card:
-        cmd += ["--vmu", card]
-    if s.get("vmu_autoload") and int(s.get("save_index", -1)) >= 0:
-        cmd += ["--press", load_presses(int(s["save_index"]))]
     return cmd + (extra or [])
 
 
 # ----------------------------------------------------------------------------- the tabs
 #
 # Each control: kind, key, label, optional help text, and kind-specific fields.
-#   combo   values: [(label, value)]           entry  depends: (key, value)
-#   check   (a checkbox)                        radio  values: [(label, value)]
-#   button  action: name                        note   (a grey line of text)
-#   disc    (the disc row, handled specially)   wav    (checkbox + path + browse)
+#   combo   values: [(label, value)]         entry  depends: (key, value)
+#   check   (a checkbox)                      radio  values: [(label, value)]
+#   note    (a grey line of text)             disc   (the disc row, handled specially)
 
 TABS = [
     ("Graphics", [
+        {"kind": "combo", "key": "sh4_clock", "label": "CPU clock",
+         "values": [("200 MHz (default)", 200), ("250 MHz", 250), ("300 MHz (1.5x)", 300),
+                    ("400 MHz (2x)", 400)],
+         "help": "Overclocking increases the frame budget and can help raise performance when "
+                 "playing at high resolutions. Be advised: overclocks might affect game speed and "
+                 "audio on some machines, use with caution."},
         {"kind": "combo", "key": "scale", "label": "Resolution",
          "values": [("1x - 640 x 480 (native)", 1), ("2x - 1280 x 960", 2),
                     ("3x - 1920 x 1440", 3), ("4x - 2560 x 1920", 4)],
@@ -271,19 +223,10 @@ TABS = [
                  "three, which looks like judder even at a steady 60 fps."},
         {"kind": "check", "key": "fps", "label": "Show the frame counter",
          "help": "Starts with the overlay on. F10 toggles it in game."},
-        {"kind": "combo", "key": "sh4_clock", "label": "CPU clock",
-         "values": [("200 MHz (default)", 200), ("250 MHz", 250), ("300 MHz (1.5x)", 300),
-                    ("400 MHz (2x)", 400)],
-         "help": "Overclocking increases the frame budget and can help raise performance when "
-                 "playing at high resolutions. Be advised: overclocks might affect game speed and "
-                 "audio on some machines, use with caution."},
     ]),
     ("Audio", [
         {"kind": "check", "key": "audio", "label": "Enable sound",
          "help": "Off runs the game silently and skips the audio device entirely."},
-        {"kind": "wav", "key": "wav", "label": "Record the audio to a WAV file",
-         "help": "Writes 16-bit stereo 44.1 kHz beside whatever path you choose. Recording works "
-                 "whether or not sound is enabled."},
         {"kind": "note", "text": "Volume and output device selection arrive with the audio "
                                  "milestone (M6)."},
     ]),
@@ -293,27 +236,7 @@ TABS = [
                     ("Interpreter - reference, slow", "interpreter")],
          "help": "The translated path is the real thing. The interpreter is the reference the "
                  "translation is checked against."},
-        {"kind": "check", "key": "unthrottled", "label": "Unthrottled (benchmarking)",
-         "help": "Runs as fast as the host can instead of at the game's own clock. Useful for "
-                 "measuring; games play wrong at the wrong speed."},
-        {"kind": "button", "action": "bindings", "label": "Controller bindings",
-         "text": "Open bindings file...",
-         "help": "Opens the per-user bindings file. In game, F1 (or the pad's select button) opens "
-                 "the same screen."},
         {"kind": "disc", "label": "Game disc"},
-    ]),
-    ("Saves", [
-        {"kind": "check", "key": "vmu_enabled", "label": "Attach a memory card",
-         "help": "The game saves to a virtual VMU, a 128 KB image in the standard Dreamcast card "
-                 "format, so a save made here opens in Flycast and a Flycast card opens here. "
-                 "Off boots the game without one, which is how it behaves on a console with an "
-                 "empty slot."},
-        {"kind": "vmu", "label": "Card file"},
-        {"kind": "check", "key": "vmu_autoload", "label": "Launch straight into a save",
-         "help": "Pressing Play then walks the game's own Load Game screens to the save selected "
-                 "below and loads it, instead of leaving you at the title screen. Nothing about "
-                 "the save is faked: the game loads it through its normal path."},
-        {"kind": "saves", "label": "Saves on this card"},
     ]),
 ]
 
@@ -330,8 +253,8 @@ class Launcher(tk.Tk):
         self.title("Draconus: Cult of the Wyrm - Launcher")
         self.configure(bg=self.BG)
         try:
-            # The native Windows theme ignores a Treeview's colours, and the Saves tab's list is a
-            # Treeview: claim it with the theme that honours them.
+            # The native Windows theme draws its own backgrounds, which fight the launcher's dark
+            # palette; claim a flat one for the comboboxes, checkboxes and buttons.
             ttk.Style(self).theme_use("clam")
         except tk.TclError:
             pass
@@ -346,10 +269,8 @@ class Launcher(tk.Tk):
         self.vars: dict[str, tk.Variable] = {}
         self.combos: dict[str, ttk.Combobox] = {}
         self._dependent: list[tuple[str, str, tk.Widget]] = []
-        self._saves: list[vmu.SaveFile] = []
         self._build()
         self._sync_depends()
-        self.refresh_saves()
         self.protocol("WM_DELETE_WINDOW", self._close)
 
     def _initial_image(self) -> str:
@@ -376,11 +297,12 @@ class Launcher(tk.Tk):
         tk.Frame(parent, bg=self.BG, height=24).pack()
         try:
             self._art = tk.PhotoImage(file=ART)
-            # Integer subsample only; the art is 560x720 and the panel wants about 280 wide.
-            factor = max(1, round(self._art.width() / 280))
+            # Integer subsample only; the emblem is already sized for the panel (320 px wide in a
+            # 360 px column), so this only shrinks it if a larger file is dropped in.
+            factor = max(1, round(self._art.width() / 300))
             if factor > 1:
                 self._art = self._art.subsample(factor)
-            tk.Label(parent, image=self._art, bg=self.BG, bd=0).pack()
+            tk.Label(parent, image=self._art, bg=self.BG, bd=0).pack(pady=(10, 0))
         except tk.TclError:
             tk.Label(parent, text="(art missing)", bg=self.BG, fg=self.DIM).pack()
         tk.Label(parent, text="DRACONUS", bg=self.BG, fg=self.FG,
@@ -389,6 +311,14 @@ class Launcher(tk.Tk):
                  font=("Georgia", 11, "italic")).pack()
         tk.Label(parent, text="static recompilation", bg=self.BG, fg=self.DIM,
                  font=("Segoe UI", 8)).pack(pady=(6, 0))
+        tk.Label(parent, text="by GnomeChimpsky", bg=self.BG, fg=self.DIM,
+                 font=("Georgia", 10, "italic")).pack(pady=(28, 0))
+        link = tk.Label(parent, text="Github repository", bg=self.BG, fg=self.FG,
+                        font=("Segoe UI", 10, "underline"), cursor="hand2")
+        link.pack(pady=(6, 0))
+        link.bind("<Button-1>", lambda _e: self.open_repository())
+        link.bind("<Enter>", lambda _e: link.configure(fg="#f0c674"))
+        link.bind("<Leave>", lambda _e: link.configure(fg=self.FG))
 
     def _build_right(self, parent: tk.Frame) -> None:
         head = tk.Frame(parent, bg=self.BG)
@@ -408,6 +338,12 @@ class Launcher(tk.Tk):
 
         bar = tk.Frame(parent, bg=self.BG)
         bar.pack(fill="x")
+        # The folders hold the things a player may want to look at outside the launcher: the card
+        # the game saves to, and this window's own settings file.
+        ttk.Button(bar, text="Open saves folder",
+                   command=lambda: self.open_folder(SAVES_DIR)).pack(side="left")
+        ttk.Button(bar, text="Open settings folder",
+                   command=lambda: self.open_folder(SETTINGS_DIR)).pack(side="left", padx=(8, 0))
         ttk.Button(bar, text="Play", command=self.play).pack(side="right")
         ttk.Button(bar, text="Reset", command=self.reset).pack(side="right", padx=8)
         ttk.Button(bar, text="Quit", command=self._close).pack(side="right")
@@ -430,13 +366,7 @@ class Launcher(tk.Tk):
                 row=row, column=0, sticky="w", pady=(10, 0))
             widget = self._control(tab, c)
             if widget is not None:
-                if kind == "saves":
-                    # The list wants the full width and its own row; the label above it stays
-                    # visible instead of being covered by the widget.
-                    widget.grid(row=row + 1, column=0, columnspan=2, sticky="we", pady=(6, 0))
-                    row += 1
-                else:
-                    widget.grid(row=row, column=1, sticky="w", padx=(18, 0), pady=(10, 0))
+                widget.grid(row=row, column=1, sticky="w", padx=(18, 0), pady=(10, 0))
             row += 1
             # The explanation sits under its row rather than in a third column: a long radio label
             # or a wide combo pushed a third column off the edge of the window.
@@ -484,63 +414,12 @@ class Launcher(tk.Tk):
                 ttk.Radiobutton(frame, text=label, value=value, variable=var).pack(
                     anchor="w")
             return frame
-        if kind == "button":
-            return ttk.Button(tab, text=c.get("text", c.get("label", "")),
-                              command=self._action(c["action"]))
-        if kind == "wav":
-            frame = tk.Frame(tab, bg=self.BG)
-            var_on = tk.BooleanVar(value=bool(self.settings.get("wav_on", False)))
-            self.vars["wav_on"] = var_on
-            ttk.Checkbutton(frame, text="record", variable=var_on).pack(side="left")
-            var = tk.StringVar(value=str(self.settings.get("wav", "")))
-            self.vars["wav"] = var
-            ent = ttk.Entry(frame, textvariable=var, width=22)
-            ent.pack(side="left", padx=6)
-            ttk.Button(frame, text="...", width=3,
-                       command=lambda: self._pick_wav()).pack(side="left")
-            return frame
         if kind == "disc":
             frame = tk.Frame(tab, bg=self.BG)
             self.disc_label = tk.Label(frame, text=self._disc_text(), bg=self.BG, fg=self.DIM,
                                        anchor="w")
             self.disc_label.pack(side="left", padx=(0, 8))
             ttk.Button(frame, text="Change disc...", command=self.browse_disc).pack(side="left")
-            return frame
-        if kind == "vmu":
-            frame = tk.Frame(tab, bg=self.BG)
-            var = tk.StringVar(value=str(self.settings.get("vmu_path", "")))
-            self.vars["vmu_path"] = var
-            entry = ttk.Entry(frame, textvariable=var, width=66)
-            entry.pack(side="left")
-            # A per-user path is longer than the field; show its tail, where the file name is.
-            entry.xview_moveto(1.0)
-            ttk.Button(frame, text="...", width=3,
-                       command=self.choose_card).pack(side="left", padx=6)
-            ttk.Button(frame, text="New...", command=self.new_card).pack(side="left")
-            ttk.Button(frame, text="Refresh", command=self.refresh_saves).pack(
-                side="left", padx=6)
-            return frame
-        if kind == "saves":
-            frame = tk.Frame(tab, bg=self.BG)
-            style = ttk.Style(self)
-            style.configure("Vmu.Treeview", background=self.BG, fieldbackground=self.BG,
-                            foreground=self.FG, bordercolor=self.DIM,
-                            selectbackground="#3a2a22", selectforeground=self.FG)
-            style.configure("Vmu.Treeview.Heading", background=self.BG, foreground=self.FG)
-            self.saves_tree = ttk.Treeview(frame, columns=("name", "date", "blocks"),
-                                           show="headings", height=6, selectmode="browse",
-                                           style="Vmu.Treeview")
-            for column, title, width in (("name", "Save file", 220),
-                                         ("date", "Saved", 170),
-                                         ("blocks", "Blocks", 70)):
-                self.saves_tree.heading(column, text=title)
-                self.saves_tree.column(column, width=width, anchor="w")
-            self.saves_tree.pack(fill="x", expand=True)
-            self.saves_tree.bind("<<TreeviewSelect>>", lambda _e: self._save_selected())
-            self.save_status = tk.Label(frame, text="", bg=self.BG, fg=self.DIM, anchor="w",
-                                        justify="left", wraplength=700,
-                                        font=("Segoe UI", 8))
-            self.save_status.pack(fill="x", pady=(6, 0))
             return frame
         return None
 
@@ -577,11 +456,6 @@ class Launcher(tk.Tk):
         self.settings[key] = self._value_for(key)
         self._sync_depends()
 
-    def _action(self, name: str):
-        if name == "bindings":
-            return self.open_bindings
-        return lambda: None
-
     def collect(self) -> dict:
         for _, controls in TABS:
             for c in controls:
@@ -589,22 +463,12 @@ class Launcher(tk.Tk):
                     self.settings[c["key"]] = self._value_for(c["key"])
                 elif c["kind"] == "entry":
                     self.settings[c["key"]] = self.vars[c["key"]].get()
-                elif c["kind"] == "wav":
-                    self.settings["wav"] = self.vars["wav"].get()
-                    self.settings["wav_on"] = self.vars["wav_on"].get()
-                elif c["kind"] == "vmu":
-                    self.settings["vmu_path"] = self.vars["vmu_path"].get()
                 elif c["kind"] in ("check", "radio"):
                     self.settings[c["key"]] = self.vars[c["key"]].get()
         return dict(self.settings)
 
     def reset(self) -> None:
         self.settings = dict(DEFAULTS)
-        for _, controls in TABS:
-            for c in controls:
-                key, kind = c.get("key"), c["kind"]
-                if kind == "combo" and key in self.vars:
-                    pass
         # rebuild the window with the defaults
         for child in list(self.children.values()):
             child.destroy()
@@ -613,31 +477,32 @@ class Launcher(tk.Tk):
         self._dependent.clear()
         self._build()
         self._sync_depends()
-        self.refresh_saves()
 
     # -- actions --------------------------------------------------------------------------
-    def open_bindings(self) -> None:
-        if os.path.exists(BINDINGS):
-            try:
-                os.startfile(BINDINGS)  # type: ignore[attr-defined]
-                self.status.set("Opened " + BINDINGS)
-            except OSError as exc:
-                messagebox.showerror("Bindings", str(exc))
-        else:
-            messagebox.showinfo(
-                "Bindings",
-                "No bindings file yet.\n\nStart the game and press F1 (or the pad's select\n"
-                "button) to open the binding screen; it saves to\n" + BINDINGS,
-            )
+    def open_repository(self) -> None:
+        """Open the project's GitHub page in the default browser."""
+        if not webbrowser.open(REPOSITORY):
+            self.status.set("No browser could be opened; the repository is " + REPOSITORY)
 
-    def _pick_wav(self) -> None:
-        path = filedialog.asksaveasfilename(
-            title="Record the audio to", defaultextension=".wav",
-            filetypes=[("WAV files", "*.wav"), ("All files", "*.*")],
-        )
-        if path:
-            self.settings["wav"] = path
-            self.vars["wav"].set(path)
+    def open_folder(self, path: str) -> None:
+        """Show a folder in the desktop's file manager, creating it if it does not exist yet.
+
+        The saves folder is created by the engine on the first card write and the settings folder
+        by the first Play; opening either before that should still work rather than fail on a path
+        that is not there.
+        """
+        try:
+            os.makedirs(path, exist_ok=True)
+            if hasattr(os, "startfile"):
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except OSError as exc:
+            messagebox.showerror("Folder", "Cannot open %s:\n%s" % (path, exc))
+        else:
+            self.status.set("Opened " + path)
 
     def _disc_text(self) -> str:
         if not self.image_path:
@@ -663,89 +528,6 @@ class Launcher(tk.Tk):
         self.disc_label.configure(text=self._disc_text())
         self.status.set("Disc verified and saved. " + describe_disc(report).splitlines()[0])
 
-    def _card_path_from_ui(self) -> str:
-        var = self.vars.get("vmu_path")
-        return str(var.get()).strip() if var is not None else ""
-
-    def refresh_saves(self) -> None:
-        """Repopulate the save list from the card the entry names.
-
-        A path that does not exist is not an error: the engine creates and formats the card on
-        the first Play, so the row says that instead. A file that exists but is not a card does
-        get reported, because the engine will refuse it too.
-        """
-        if not hasattr(self, "saves_tree"):
-            return
-        tree = self.saves_tree
-        for item in tree.get_children():
-            tree.delete(item)
-        self._saves = []
-        path = self._card_path_from_ui()
-        if not path:
-            self.save_status.configure(text="No card path: nothing will be attached.")
-            return
-        if not os.path.exists(path):
-            self.save_status.configure(
-                text="No card yet. Play creates and formats one at this path.")
-            return
-        try:
-            saves = vmu.read_saves(path)
-        except vmu.VmuError as exc:
-            self.save_status.configure(text=str(exc))
-            return
-        self._saves = saves
-        for save in saves:
-            tree.insert("", "end", iid=str(save.index),
-                        values=(save.name, save.timestamp_text(),
-                                "%d (%d KB)" % (save.blocks, save.size_bytes // 1024)))
-        if not saves:
-            self.settings["save_index"] = -1
-            self.save_status.configure(
-                text="This card has no saves yet. The game writes one at its save points; a "
-                     "card from Flycast works too.")
-            return
-        selected = int(self.settings.get("save_index", -1))
-        if selected < 0 or selected >= len(saves):
-            selected = 0
-        tree.selection_set(str(selected))
-        tree.focus(str(selected))
-        self.settings["save_index"] = selected
-        self.save_status.configure(
-            text="%d save file%s. Select one and tick \"Launch straight into a save\" above to "
-                 "have Play load it." % (len(saves), "" if len(saves) == 1 else "s"))
-
-    def _save_selected(self) -> None:
-        selected = self.saves_tree.selection()
-        if selected:
-            self.settings["save_index"] = int(selected[0])
-
-    def choose_card(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Select a memory card (.vmu) image",
-            filetypes=[("VMU images", "*.vmu *.bin"), ("All files", "*.*")],
-        )
-        if path:
-            self.vars["vmu_path"].set(path)
-            self.settings["vmu_path"] = path
-            self.refresh_saves()
-
-    def new_card(self) -> None:
-        path = filedialog.asksaveasfilename(
-            title="Create a formatted blank memory card", defaultextension=".vmu",
-            filetypes=[("VMU images", "*.vmu"), ("All files", "*.*")],
-        )
-        if not path:
-            return
-        try:
-            vmu.write_blank(path)
-        except OSError as exc:
-            messagebox.showerror("Memory card", "Cannot write %s:\n%s" % (path, exc))
-            return
-        self.vars["vmu_path"].set(path)
-        self.settings["vmu_path"] = path
-        self.refresh_saves()
-        self.status.set("Created a blank, formatted memory card at " + path)
-
     def play(self) -> None:
         if not os.path.exists(BINARY):
             messagebox.showerror("Build", "The recompiled build is missing:\n" + BINARY)
@@ -755,18 +537,6 @@ class Launcher(tk.Tk):
                                  (self.image_path or "(none)"))
             return
         s = self.collect()
-        if s.get("vmu_autoload") and int(s.get("save_index", -1)) < 0:
-            messagebox.showerror(
-                "Save",
-                "There is no save selected to load.\n\nPick one in the Saves tab, or untick\n"
-                "\"Launch straight into a save\".")
-            return
-        if s.get("vmu_autoload") and int(s.get("save_index", -1)) > 7:
-            messagebox.showerror(
-                "Save",
-                "The game's Load Game screen has eight slots, so it cannot reach that file.\n\n"
-                "Pick one of the first eight saves on the card.")
-            return
         save_settings(s)
         cmd = build_command(self.image_path, s)
         self.status.set("Launching...")
@@ -802,27 +572,6 @@ class Launcher(tk.Tk):
 
 # ----------------------------------------------------------------------------- tests
 
-def test_card_with_save(path: str, name: str = "DRACONUS.001") -> None:
-    """Write a card carrying one fabricated save entry, for the self-tests.
-
-    The entry is what the launcher has to read; its data is never opened here, so the bytes can be
-    anything. Written inside the workspace rather than a system temp directory, which this
-    project's sandbox cannot always delete.
-    """
-    image = bytearray(vmu.blank_image())
-    base = vmu.DIRECTORY_HEAD * vmu.BLOCK_SIZE
-    entry = bytearray(32)
-    entry[0] = 0x33
-    entry[2:4] = (199).to_bytes(2, "little")
-    entry[4:16] = name.encode("ascii").ljust(12, b"\x00")
-    entry[0x10:0x18] = bytes((0x20, 0x24, 0x11, 0x14, 0x12, 0x30, 0x00, 0x03))
-    entry[0x18:0x1A] = (23).to_bytes(2, "little")
-    image[base:base + 32] = entry
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(image)
-
-
 def selftest() -> int:
     failures = []
 
@@ -833,35 +582,19 @@ def selftest() -> int:
 
     base = {"scale": 1, "aspect": "off", "aspect_custom": "16:9", "present_rate": 0,
             "frame_interpolation": False, "display_mode": "windowed",
-            "vsync": True, "fps": False, "audio": True, "wav": "",
-            "unthrottled": False, "path": "translated", "vmu_enabled": True,
-            "vmu_path": "C:/saves/card.vmu", "vmu_autoload": False, "save_index": -1}
+            "vsync": True, "fps": False, "sh4_clock": 200, "audio": True,
+            "path": "translated"}
     image = "G:/dumps/draconus.gdi"
 
     cmd = build_command(image, base)
     if "--scale" in cmd or "--aspect" in cmd or "--interpret" in cmd:
         failures.append("defaults: unexpected flags")
-    expect("card", cmd, ["--vmu", "C:/saves/card.vmu"])
-
-    cmd = build_command(image, dict(base, vmu_enabled=False))
-    if "--vmu" in cmd:
-        failures.append("card off: --vmu still passed")
-
-    cmd = build_command(image, dict(base, vmu_autoload=True, save_index=2))
-    presses = cmd[cmd.index("--press") + 1] if "--press" in cmd else ""
-    for want in ("start@1600", "start@2300", "down@3300", "a@3550", "a@4700", "down@5200",
-                 "down@5320", "a@5440"):
-        if want not in presses:
-            failures.append("autoload slot 2: missing %s in %r" % (want, presses))
-
-    cmd = build_command(image, dict(base, vmu_autoload=True, save_index=0))
-    presses = cmd[cmd.index("--press") + 1] if "--press" in cmd else ""
-    if "down@5200" in presses:
-        failures.append("autoload slot 0: unexpected down press")
-
-    cmd = build_command(image, dict(base, vmu_autoload=True, save_index=-1))
-    if "--press" in cmd:
-        failures.append("autoload with no save: --press still passed")
+    # The Saves tab is gone and the audio recording setting with it: the launcher must not attach a
+    # card, schedule a load, or name a WAV file. The game's own VMU screens save and load, and a
+    # windowed run gets the engine's per-user card with no flags.
+    for stale in ("--vmu", "--press", "--wav", "--unthrottled"):
+        if stale in cmd:
+            failures.append("removed option still passed: %s" % stale)
 
     cmd = build_command(image, dict(base, scale=2, aspect="16:9", present_rate=120))
     expect("graphics", cmd, ["--scale", "2", "--aspect", "16:9", "--present-rate", "120"])
@@ -882,11 +615,11 @@ def selftest() -> int:
     cmd = build_command(image, dict(base, aspect="custom", aspect_custom="32:9"))
     expect("custom aspect", cmd, ["--aspect", "32:9"])
 
-    cmd = build_command(image, dict(base, vsync=False, fps=True, unthrottled=True))
-    expect("toggles", cmd, ["--present-mode", "immediate", "--fps", "--unthrottled"])
+    cmd = build_command(image, dict(base, vsync=False, fps=True))
+    expect("toggles", cmd, ["--present-mode", "immediate", "--fps"])
 
-    cmd = build_command(image, dict(base, audio=False, wav="C:/tmp/run.wav", wav_on=True))
-    expect("audio", cmd, ["--no-audio", "--wav", "C:/tmp/run.wav"])
+    cmd = build_command(image, dict(base, audio=False))
+    expect("audio", cmd, ["--no-audio"])
 
     cmd = build_command(image, dict(base, path="interpreter"))
     expect("path", cmd, ["--interpret"])
@@ -897,35 +630,9 @@ def selftest() -> int:
         for c in controls:
             if "key" in c:
                 keys.add(c["key"])
-            if c["kind"] == "wav":
-                keys.add("wav_on")
-            if c["kind"] == "vmu":
-                keys.add("vmu_path")
-            if c["kind"] == "saves":
-                keys.add("save_index")
     missing = set(DEFAULTS) - keys
     if missing:
         failures.append("defaults with no control: " + ", ".join(sorted(missing)))
-
-    # The card reader: a blank image, then one fabricated save entry, parsed back.
-    test_dir = os.path.join(ROOT, "work", "launcher-selftest")
-    card = os.path.join(test_dir, "card.vmu")
-    try:
-        os.makedirs(test_dir, exist_ok=True)
-        vmu.write_blank(card)
-        if os.path.getsize(card) != vmu.IMAGE_SIZE:
-            failures.append("blank card: wrong size")
-        if vmu.read_saves(card):
-            failures.append("blank card: entries reported")
-        test_card_with_save(card, "DRACONUS")
-        saves = vmu.read_saves(card)
-        if len(saves) != 1:
-            failures.append("card entry: expected 1 save, got %d" % len(saves))
-        elif (saves[0].name != "DRACONUS" or saves[0].blocks != 23
-              or saves[0].timestamp_text() != "2024-11-14 12:30:00"):
-            failures.append("card entry: parsed %r" % (saves[0],))
-    except (OSError, vmu.VmuError) as exc:
-        failures.append("card round trip: %s" % exc)
 
     print("FAILED:" if failures else "SELFTEST OK")
     for f in failures:
@@ -987,36 +694,41 @@ def check_ui(app: Launcher) -> list[str]:
     if "--sh4-clock" in cmd:
         failures.append("200 MHz kept --sh4-clock: %s" % " ".join(cmd))
 
-    # The Saves tab: a card with one save must list it, and ticking autoload must build the walk
-    # from the title to that slot.
-    card = os.path.join(ROOT, "work", "launcher-smoke", "card.vmu")
+    # The tabs that remain, and their order: a removed tab must not come back through a stale spec.
+    names = [app.notebook.tab(i, "text") for i in range(len(app.notebook.tabs()))]
+    if names != ["Graphics", "Audio", "Gameplay"]:
+        failures.append("tabs: %r" % names)
+
+    # The bottom bar's folder buttons are what is left of the old Saves tab: saving and loading are
+    # the game's own now, but the card and the settings file still need to be findable.
+    def texts(widget: tk.Widget) -> list[str]:
+        found = []
+        for child in widget.winfo_children():
+            try:
+                found.append(str(child.cget("text")))
+            except tk.TclError:
+                pass
+            found += texts(child)
+        return found
+
+    labels = texts(app)
+    for label in ("Open saves folder", "Open settings folder"):
+        if label not in labels:
+            failures.append("bottom bar: %r button missing" % label)
+    for label in ("by GnomeChimpsky", "Github repository"):
+        if label not in labels:
+            failures.append("left panel: %r missing" % label)
+
+    # The repository link must open the project's page and nothing else.
+    opened: list[str] = []
+    real_open = webbrowser.open
+    webbrowser.open = lambda url: opened.append(url) or True  # type: ignore[assignment]
     try:
-        test_card_with_save(card, "DRACONUS.001")
-        previous = app.vars["vmu_path"].get()
-        app.vars["vmu_path"].set(card)
-        app.refresh_saves()
-        rows = app.saves_tree.get_children()
-        if len(rows) != 1:
-            failures.append("saves tab: expected 1 row, got %d" % len(rows))
-        else:
-            app.saves_tree.selection_set(rows[0])
-            app._save_selected()
-            app.vars["vmu_autoload"].set(True)
-            cmd = build_command(app.image_path or "disc.gdi", app.collect())
-            if card not in cmd:
-                failures.append("saves tab: --vmu missing: %s" % " ".join(cmd))
-            elif "--press" not in cmd:
-                failures.append("saves tab: --press missing: %s" % " ".join(cmd))
-            else:
-                presses = cmd[cmd.index("--press") + 1]
-                if "a@5200" not in presses:
-                    failures.append("saves tab: slot 0 press missing in %r" % presses)
-            app.vars["vmu_autoload"].set(False)
-            app.settings["save_index"] = -1
-        app.vars["vmu_path"].set(previous)
-        app.refresh_saves()
-    except (OSError, vmu.VmuError, tk.TclError) as exc:
-        failures.append("saves tab: %s" % exc)
+        app.open_repository()
+    finally:
+        webbrowser.open = real_open  # type: ignore[assignment]
+    if opened != [REPOSITORY]:
+        failures.append("repository link opened %r, expected %r" % (opened, REPOSITORY))
     return failures
 
 

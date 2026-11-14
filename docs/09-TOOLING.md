@@ -57,24 +57,28 @@ Design constraints honoured by the tool:
 
 ## Launcher (tools\launcher.py, tools\launcher.bat)
 
-A tabbed settings window: the game's own artwork on the left, Graphics / Audio / Gameplay on the
-right, and Play. It builds the boot command line from the settings through a pure `build_command`, so
-everything the window can do is also reachable from the command line:
+A tabbed settings window: the project's emblem, author credit and repository link on the left,
+Graphics / Audio / Gameplay on the right, and Play. It builds the boot command line from the
+settings through a pure `build_command`, so every setting the window changes is also reachable from
+the command line:
 
 | tab | option | flag |
 |---|---|---|
-| Graphics | resolution | `--scale 1..4` (also the window size) |
+| Graphics | CPU clock | `--sh4-clock 200..800` (MHz; 200 is the console, more cycles per frame) |
+| | resolution | `--scale 1..4` (also the window size) |
 | | widescreen | `--aspect 16:9`, `21:9`, `W:H` |
 | | display mode | `--display windowed/borderless/exclusive` (`--fullscreen` = borderless) |
 | | present rate | `--present-rate 60/120/144` (capped to the display's refresh) |
 | | frame interpolation | `--frame-interpolation` (at 120/144 Hz, experimental) |
 | | VSync off | `--present-mode immediate` |
 | | frame counter | `--fps` |
-| | CPU clock | `--sh4-clock 200..800` (MHz; 200 is the console, more cycles per frame) |
 | Audio | sound off | `--no-audio` |
-| | record to WAV | `--wav FILE` |
 | Gameplay | interpreter | `--interpret` |
-| | unthrottled | `--unthrottled` |
+
+Saving and loading are the game's own: the launcher has no card settings and attaches no card, so a
+windowed launch gets the engine's per-user card. Its bottom bar's **Open saves folder** and **Open
+settings folder** buttons open that card's folder (`%APPDATA%\dream-recomp\saves\draconus`) and the
+launcher's own (`%APPDATA%\DraconusRecomp`).
 
 Settings persist in `%APPDATA%\DraconusRecomp\launcher.json`. `--selftest` checks the command each
 setting produces without opening a window; `--smoke` (optionally `--shot FILE`) builds the window and

@@ -568,7 +568,7 @@ index b2489da..225222b 100644
      // third of it unsampled, which is the aliasing this exists to remove. The small bias keeps a
      // 1:1 image on the single-tap path, where any averaging would only blur it -- without it a
 diff --git a/render/src/display_list.cpp b/render/src/display_list.cpp
-index 5586152..8d5ca23 100644
+index 5586152..9390154 100644
 --- a/render/src/display_list.cpp
 +++ b/render/src/display_list.cpp
 @@ -2,7 +2,10 @@
@@ -582,7 +582,7 @@ index 5586152..8d5ca23 100644
  
  namespace dream::render {
  
-@@ -483,4 +486,212 @@ bool polygon_tiles(const Frame& frame, const Polygon& polygon) {
+@@ -483,4 +486,286 @@ bool polygon_tiles(const Frame& frame, const Polygon& polygon) {
      return false;
  }
  
@@ -638,6 +638,108 @@ index 5586152..8d5ca23 100644
 +    if (!std::isfinite(world_z))
 +        return 0;  // a flat frame, presented at 4:3: nothing was squeezed.
 +
++    std::size_t adjusted = 0;
++    // Scale one polygon about `anchor`.
++    auto scale_polygon = [&](Polygon* polygon, float anchor) {
++        const std::size_t first = polygon->first;
++        const std::size_t last = std::min(frame.vertices.size(), first + polygon->count);
++        for (std::size_t i = first; i < last; ++i)
++            frame.vertices[i].x = anchor + (frame.vertices[i].x - anchor) * factor;
++        // The hardware clip rectangle is in screen pixels too, so it has to move with the quad
++        // when a fill is clipped to its current value.
++        if (polygon->tile_clip == 2 || polygon->tile_clip == 3) {
++            auto clip = [&](std::uint16_t v) {
++                const float scaled = anchor + (static_cast<float>(v) - anchor) * factor;
++                return static_cast<std::uint16_t>(std::clamp(std::lround(scaled), 0l, 65535l));
++            };
++            polygon->clip_x0 = clip(polygon->clip_x0);
++            polygon->clip_x1 = clip(polygon->clip_x1);
++        }
++        ++adjusted;
++    };
++    std::vector<const Polygon*> handled;
++    auto is_handled = [&](const Polygon* polygon) {
++        return std::find(handled.begin(), handled.end(), polygon) != handled.end();
++    };
++    auto bounds = [&](const Polygon& polygon, float& lo, float& hi, float& min_x, float& max_x,
++                      float& min_y, float& max_y) {
++        if (polygon.count < 2 || polygon.first >= frame.vertices.size())
++            return false;
++        const std::size_t first = polygon.first;
++        const std::size_t last = std::min(frame.vertices.size(), first + polygon.count);
++        if (last - first < 2)
++            return false;
++        lo = hi = frame.vertices[first].z;
++        min_x = max_x = frame.vertices[first].x;
++        min_y = max_y = frame.vertices[first].y;
++        for (std::size_t i = first + 1; i < last; ++i) {
++            lo = std::min(lo, frame.vertices[i].z);
++            hi = std::max(hi, frame.vertices[i].z);
++            min_x = std::min(min_x, frame.vertices[i].x);
++            max_x = std::max(max_x, frame.vertices[i].x);
++            min_y = std::min(min_y, frame.vertices[i].y);
++            max_y = std::max(max_y, frame.vertices[i].y);
++        }
++        return std::isfinite(lo) && std::isfinite(hi) && std::isfinite(min_x) &&
++               std::isfinite(max_x) && std::isfinite(min_y) && std::isfinite(max_y);
++    };
++
++    // A large flat four-vertex quad is a HUD panel. The item wheel is one: a 256x256 texture drawn
++    // at the near depth, with the item's rotating 3D model submitted inside its bounds. The panel
++    // and everything in front of it inside the panel rectangle move as one element; the title
++    // draws the world as triangles, so a large flat quad is the panel and not scenery.
++    struct Panel {
++        float z = 0, min_x = 0, max_x = 0, min_y = 0, max_y = 0;
++        Polygon* quad = nullptr;
++    };
++    std::vector<Panel> panels;
++    for (auto& list : frame.lists) {
++        for (Polygon& polygon : list) {
++            if (polygon.count != 4)
++                continue;
++            float lo, hi, min_x, max_x, min_y, max_y;
++            if (!bounds(polygon, lo, hi, min_x, max_x, min_y, max_y))
++                continue;
++            const float scale = std::max(1.0f, std::max(std::fabs(lo), std::fabs(hi)));
++            if (hi - lo > kRelative * scale)
++                continue;
++            const float panel_w = max_x - min_x, panel_h = max_y - min_y;
++            if (panel_w < 128.0f || panel_h < 128.0f || panel_w > width * 0.9f)
++                continue;
++            panels.push_back(Panel{lo, min_x, max_x, min_y, max_y, &polygon});
++        }
++    }
++    for (const Panel& panel : panels) {
++        if (is_handled(panel.quad))
++            continue;
++        const float mid = 0.5f * (panel.min_x + panel.max_x);
++        float anchor = width * 0.5f;
++        if (mid < width / 3.0f)
++            anchor = panel.min_x;
++        else if (mid > width * (2.0f / 3.0f))
++            anchor = panel.max_x;
++        for (auto& list : frame.lists) {
++            for (Polygon& polygon : list) {
++                if (is_handled(&polygon))
++                    continue;
++                float lo, hi, min_x, max_x, min_y, max_y;
++                if (!bounds(polygon, lo, hi, min_x, max_x, min_y, max_y))
++                    continue;
++                if (min_x < panel.min_x - 1.0f || max_x > panel.max_x + 1.0f ||
++                    min_y < panel.min_y - 1.0f || max_y > panel.max_y + 1.0f)
++                    continue;
++                // Only the panel's own nearby contents move with it: the item model sits just in
++                // front of the wheel. A pause-menu overlay or a world effect that happens to
++                // overlap the panel's rectangle is far in front of it and stays where it is.
++                if (&polygon != panel.quad &&
++                    (lo <= panel.z + 0.05f || hi > panel.z + 1.5f))
++                    continue;
++                scale_polygon(&polygon, anchor);
++                handled.push_back(&polygon);
++            }
++        }
++    }
++
 +    // A screen-space overlay is a four-vertex quad at one depth in front of the world. The HUD,
 +    // its digits and its text are all drawn that way; the 3D effects that also sit in front of
 +    // the world -- the darkness around the player, a shadow -- are triangles.
@@ -648,25 +750,10 @@ index 5586152..8d5ca23 100644
 +    std::vector<Group> groups;
 +    for (auto& list : frame.lists) {
 +        for (Polygon& polygon : list) {
-+            if (polygon.count != 4 || polygon.first >= frame.vertices.size())
++            if (is_handled(&polygon) || polygon.count != 4)
 +                continue;
-+            const std::size_t first = polygon.first;
-+            const std::size_t last = std::min(frame.vertices.size(), first + 4);
-+            if (last - first != 4)
-+                continue;
-+            float lo = frame.vertices[first].z, hi = lo;
-+            float min_x = frame.vertices[first].x, max_x = min_x;
-+            float min_y = frame.vertices[first].y, max_y = min_y;
-+            for (std::size_t i = first + 1; i < last; ++i) {
-+                lo = std::min(lo, frame.vertices[i].z);
-+                hi = std::max(hi, frame.vertices[i].z);
-+                min_x = std::min(min_x, frame.vertices[i].x);
-+                max_x = std::max(max_x, frame.vertices[i].x);
-+                min_y = std::min(min_y, frame.vertices[i].y);
-+                max_y = std::max(max_y, frame.vertices[i].y);
-+            }
-+            if (!std::isfinite(lo) || !std::isfinite(hi) || !std::isfinite(min_x) ||
-+                !std::isfinite(max_x) || !std::isfinite(min_y) || !std::isfinite(max_y))
++            float lo, hi, min_x, max_x, min_y, max_y;
++            if (!bounds(polygon, lo, hi, min_x, max_x, min_y, max_y))
 +                continue;
 +            const float scale = std::max(1.0f, std::max(std::fabs(lo), std::fabs(hi)));
 +            if (hi - lo > kRelative * scale || lo <= world_z)
@@ -695,7 +782,6 @@ index 5586152..8d5ca23 100644
 +        }
 +    }
 +
-+    std::size_t adjusted = 0;
 +    // Scale one group's quads about `anchor`. A group that spans the screen is the background
 +    // plane (it deliberately overshoots) or a full-screen fade/letterbox, not an aspect-anchored
 +    // element; leave it alone.
@@ -703,21 +789,9 @@ index 5586152..8d5ca23 100644
 +        if (group.max_x - group.min_x > width * 0.9f)
 +            return;
 +        for (Polygon* polygon : group.quads) {
-+            const std::size_t first = polygon->first;
-+            const std::size_t last = std::min(frame.vertices.size(), first + polygon->count);
-+            for (std::size_t i = first; i < last; ++i)
-+                frame.vertices[i].x = anchor + (frame.vertices[i].x - anchor) * factor;
-+            // The hardware clip rectangle is in screen pixels too, so it has to move with the
-+            // quad when a fill is clipped to its current value.
-+            if (polygon->tile_clip == 2 || polygon->tile_clip == 3) {
-+                auto clip = [&](std::uint16_t v) {
-+                    const float scaled = anchor + (static_cast<float>(v) - anchor) * factor;
-+                    return static_cast<std::uint16_t>(std::clamp(std::lround(scaled), 0l, 65535l));
-+                };
-+                polygon->clip_x0 = clip(polygon->clip_x0);
-+                polygon->clip_x1 = clip(polygon->clip_x1);
-+            }
-+            ++adjusted;
++            if (is_handled(polygon))
++                continue;
++            scale_polygon(polygon, anchor);
 +        }
 +    };
 +
@@ -1274,13 +1348,56 @@ index 0000000..f2f25e4
 +
 +}  // namespace dream::render
 diff --git a/render/src/view_main.cpp b/render/src/view_main.cpp
-index 8cd6e3a..b03678c 100644
+index 8cd6e3a..b0c9cb8 100644
 --- a/render/src/view_main.cpp
 +++ b/render/src/view_main.cpp
-@@ -264,8 +264,11 @@ int main(int argc, char** argv) {
+@@ -95,6 +95,7 @@ int main(int argc, char** argv) {
+     const char* vram_path = nullptr;
+     bool stats = false, polygons = false;
+     const char* regs_path = nullptr;
++    double aspect = 0.0;
+     dream::render::vk::FrameGeometry geometry;
+     for (int i = 1; i < argc; ++i) {
+         if (!std::strcmp(argv[i], "--frames") && i + 1 < argc)
+@@ -121,11 +122,24 @@ int main(int argc, char** argv) {
+             polygons = true;
+         else if (!std::strcmp(argv[i], "--regs") && i + 1 < argc)
+             regs_path = argv[++i];
++        else if (!std::strcmp(argv[i], "--aspect") && i + 1 < argc) {
++            const char* spec = argv[++i];
++            const char* colon = std::strchr(spec, ':');
++            if (colon) {
++                const double aw = std::strtod(spec, nullptr);
++                const double ah = std::strtod(colon + 1, nullptr);
++                if (aw > 0.0 && ah > 0.0)
++                    aspect = aw / ah;
++            } else {
++                aspect = std::strtod(spec, nullptr);
++            }
++        }
+         else if (argv[i][0] != '-')
+             path = argv[i];
+     }
+     if (!path) {
+-        std::fprintf(stderr, "usage: dream_render_view FILE.bin [--width N] [--height N]\n");
++        std::fprintf(stderr,
++                     "usage: dream_render_view FILE.bin [--width N] [--height N] [--aspect W:H]\n");
+         return 2;
+     }
+ 
+@@ -264,8 +278,20 @@ int main(int argc, char** argv) {
          }
      }
  
++    // --aspect: apply the same HUD/overlay compression the boot uses, for checking a captured
++    // frame at a widescreen aspect. The viewer window stays 4:3; the compressed image is what the
++    // presenter would stretch into the wide window.
++    if (aspect > 0.0) {
++        const std::size_t n = dream::render::compress_screen_overlays(
++            decoder.frame(), static_cast<float>((4.0 / 3.0) / aspect), geometry.width);
++        std::printf("  widescreen: %zu overlay polygon(s) compressed\n", n);
++    }
++
 +    // A screenshot is a one-frame job: without --frames the viewer is interactive and would wait
 +    // for the window to close, which turned every scripted capture replay into a hang.
 +    const int loop_frames = frames > 0 ? frames : (screenshot ? 1 : 0);
@@ -1291,10 +1408,20 @@ index 8cd6e3a..b03678c 100644
          VkCommandBuffer cmd = VK_NULL_HANDLE;
          if (!window.begin_frame(image, cmd)) {
 diff --git a/render/src/vk/offscreen.cpp b/render/src/vk/offscreen.cpp
-index 41d2488..be44236 100644
+index 41d2488..c11e591 100644
 --- a/render/src/vk/offscreen.cpp
 +++ b/render/src/vk/offscreen.cpp
-@@ -16,10 +16,11 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
+@@ -1,6 +1,9 @@
+ // See offscreen.h.
+ #include "dream/render/vk/offscreen.h"
+ 
++#include <algorithm>
++#include <cmath>
++
+ namespace dream::render::vk {
+ 
+ Offscreen::~Offscreen() {
+@@ -16,10 +19,11 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
          return false;
      }
  
@@ -1309,7 +1436,7 @@ index 41d2488..be44236 100644
                          VK_IMAGE_ASPECT_COLOR_BIT)) {
          error_ = "could not create the offscreen colour attachment";
          return false;
-@@ -38,8 +39,10 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
+@@ -38,8 +42,10 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
      attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
      attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
      attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -1322,7 +1449,7 @@ index 41d2488..be44236 100644
      attachments[1].format = depth_format;
      attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
      attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-@@ -56,15 +59,15 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
+@@ -56,15 +62,15 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
      subpass.colorAttachmentCount = 1;
      subpass.pColorAttachments = &colour_ref;
      subpass.pDepthStencilAttachment = &depth_ref;
@@ -1342,7 +1469,7 @@ index 41d2488..be44236 100644
  
      VkRenderPassCreateInfo rpci{};
      rpci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-@@ -112,12 +115,15 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
+@@ -112,12 +118,15 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
      }
      VkFenceCreateInfo fci{};
      fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -1359,7 +1486,7 @@ index 41d2488..be44236 100644
          error_ = "could not allocate the readback buffer";
          return false;
      }
-@@ -127,6 +133,10 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
+@@ -127,6 +136,10 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
  void Offscreen::destroy() {
      if (ctx_ && ctx_->device()) {
          VkDevice dev = ctx_->device();
@@ -1370,7 +1497,7 @@ index 41d2488..be44236 100644
          if (fence_)
              vkDestroyFence(dev, fence_, nullptr);
          if (pool_)
-@@ -145,12 +155,44 @@ void Offscreen::destroy() {
+@@ -145,12 +158,44 @@ void Offscreen::destroy() {
      colour_.destroy();
      depth_.destroy();
      have_pixels_ = false;
@@ -1416,7 +1543,7 @@ index 41d2488..be44236 100644
      vkResetCommandBuffer(cmd_, 0);
      VkCommandBufferBeginInfo bi{};
      bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-@@ -160,6 +202,7 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -160,6 +205,7 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
          return false;
      }
  
@@ -1424,7 +1551,7 @@ index 41d2488..be44236 100644
      renderer.prepare(cmd_, frame);  // texture uploads happen outside the render pass
  
      VkClearValue clears[2]{};
-@@ -181,14 +224,39 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -181,14 +227,39 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
      vkCmdSetScissor(cmd_, 0, 1, &scissor);
      renderer.draw(cmd_, frame, geometry, extent_);
      vkCmdEndRenderPass(cmd_);
@@ -1471,7 +1598,7 @@ index 41d2488..be44236 100644
      if (vkEndCommandBuffer(cmd_) != VK_SUCCESS) {
          error_ = "vkEndCommandBuffer failed";
          return false;
-@@ -203,14 +271,72 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -203,14 +274,72 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
          error_ = "vkQueueSubmit failed";
          return false;
      }
@@ -2433,10 +2560,10 @@ index 0000000..4e550cd
 +
 +}  // namespace dream::render
 diff --git a/render/tests/test_display_list.cpp b/render/tests/test_display_list.cpp
-index d9335ac..1622edd 100644
+index d9335ac..c213abd 100644
 --- a/render/tests/test_display_list.cpp
 +++ b/render/tests/test_display_list.cpp
-@@ -578,3 +578,166 @@ TEST_CASE("polygon_tiles tells a mapped texture from a repeated one") {
+@@ -578,3 +578,251 @@ TEST_CASE("polygon_tiles tells a mapped texture from a repeated one") {
      truncated.count = 400;
      CHECK(polygon_tiles(frame, truncated) == false);
  }
@@ -2602,6 +2729,91 @@ index d9335ac..1622edd 100644
 +    CHECK(compress_screen_overlays(frame, 1.0f, 640.0f) == 0);
 +    Frame flat;
 +    CHECK(compress_screen_overlays(flat, 0.75f, 640.0f) == 0);
++}
++
++// The item wheel is a large flat HUD panel with a rotating 3D model submitted inside its bounds.
++// The panel is drawn below the world's near depth, so it is not one of the small overlay quads;
++// the panel pass has to move the model with it or the model drifts out of the wheel.
++TEST_CASE("widescreen carries a HUD panel's 3D model with the panel") {
++    Frame frame;
++    auto quad = [&](float x0, float y0, float x1, float y1, float z, int list) {
++        Polygon p;
++        p.first = static_cast<u32>(frame.vertices.size());
++        p.count = 4;
++        const float xs[4] = {x0, x1, x0, x1};
++        const float ys[4] = {y0, y0, y1, y1};
++        for (int i = 0; i < 4; ++i) {
++            Vertex v;
++            v.x = xs[i];
++            v.y = ys[i];
++            v.z = z;
++            frame.vertices.push_back(v);
++        }
++        frame.lists[list].push_back(p);
++        return p.first;
++    };
++    // The world's near plane is z = 2.0, above the panel's own depth.
++    const u32 world = quad(400, 400, 420, 420, 0.5f, 0);
++    frame.vertices[world + 1].z = 2.0f;
++    // The wheel panel: 200 x 200 at z = 1.0, left of the health bar.
++    const u32 panel = quad(100, 100, 300, 300, 1.0f, 2);
++    // The item model inside it, in front of the panel.
++    Polygon model;
++    model.first = static_cast<u32>(frame.vertices.size());
++    model.count = 3;
++    const float mx[3] = {150, 180, 165}, my[3] = {150, 150, 180}, mz[3] = {1.5f, 1.5f, 1.6f};
++    for (int i = 0; i < 3; ++i) {
++        Vertex v;
++        v.x = mx[i];
++        v.y = my[i];
++        v.z = mz[i];
++        frame.vertices.push_back(v);
++    }
++    frame.lists[2].push_back(model);
++    const u32 model_first = model.first;
++    // A world polygon behind the panel inside the same rectangle must stay put.
++    Polygon behind;
++    behind.first = static_cast<u32>(frame.vertices.size());
++    behind.count = 3;
++    const float bx[3] = {150, 180, 165}, by[3] = {190, 190, 220};
++    for (int i = 0; i < 3; ++i) {
++        Vertex v;
++        v.x = bx[i];
++        v.y = by[i];
++        v.z = 0.5f;
++        frame.vertices.push_back(v);
++    }
++    frame.lists[2].push_back(behind);
++    const u32 behind_first = behind.first;
++    // A pause overlay far in front of the panel but inside its rectangle must not be dragged
++    // into the wheel's compression.
++    Polygon far;
++    far.first = static_cast<u32>(frame.vertices.size());
++    far.count = 3;
++    for (int i = 0; i < 3; ++i) {
++        Vertex v;
++        v.x = mx[i];
++        v.y = my[i];
++        v.z = 5.0f;
++        frame.vertices.push_back(v);
++    }
++    frame.lists[2].push_back(far);
++    const u32 far_first = far.first;
++
++    CHECK(compress_screen_overlays(frame, 0.75f, 640.0f) == 2);
++    // The panel keeps its left edge at 100 and shrinks its width to 150.
++    CHECK(frame.vertices[panel].x == doctest::Approx(100.0f));
++    CHECK(frame.vertices[panel + 1].x == doctest::Approx(250.0f));
++    // The model moves with it: 150 -> 137.5, 180 -> 160, 165 -> 148.75.
++    CHECK(frame.vertices[model_first].x == doctest::Approx(137.5f));
++    CHECK(frame.vertices[model_first + 1].x == doctest::Approx(160.0f));
++    CHECK(frame.vertices[model_first + 2].x == doctest::Approx(148.75f));
++    // The world behind it is untouched.
++    CHECK(frame.vertices[behind_first].x == doctest::Approx(150.0f));
++    CHECK(frame.vertices[behind_first + 1].x == doctest::Approx(180.0f));
++    // The far pause overlay inside the same rectangle is untouched too.
++    CHECK(frame.vertices[far_first].x == doctest::Approx(150.0f));
++    CHECK(frame.vertices[far_first + 1].x == doctest::Approx(180.0f));
 +}
 diff --git a/render/tests/test_input_menu.cpp b/render/tests/test_input_menu.cpp
 index e3100ee..5c0860c 100644
