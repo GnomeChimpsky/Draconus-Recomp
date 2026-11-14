@@ -23,8 +23,12 @@ IntPtr h,IntPtr a,int x,int y,int cx,int cy,uint f);}'
 
 then `PIL.ImageGrab.grab()` and restore with `[IntPtr](-2)`.
 
-`flycast.exe` has no audio-recording option and its config exposes only texture dumps
-(`rend.DumpTextures`), so **visual** reference is available here but audio reference is not.
+`flycast.exe` has no "record audio" menu item, but its SDL2 audio backend can be pointed at SDL's
+disk driver, which writes the mixed output to a file. Set `SDL_AUDIODRIVER=disk` and
+`SDL_DISKAUDIOFILE=<raw>`, and pass `-config audio:backend=sdl2`. The file is raw s16le stereo
+44.1 kHz; `tools/audio-check.py raw2wav` converts it. `tools/flycast-m6.ps1` wraps the whole
+procedure, including the Lua script that presses START and A on chosen guest frames. That gives a
+digital audio oracle, not a loopback recording.
 
 ## Title screen, ours vs Flycast
 
@@ -89,9 +93,10 @@ Attaching a VMU did **not** change the title's silence (the capture is the same 
 5-12 s then quiet), so the warning was not muting anything. Audio still appears only when the
 game reaches menus/gameplay, which the 100 s capture shows as continuous from 25 s.
 
-From here:
+The digital capture settled the title question: Flycast is silent on the title screen too. With
+START pressed at guest frame 1800, Flycast's intro runs from 7.55 s to 15.55 s, the title is silent
+from 15.55 s to 33.5 s, and the menu music starts at 33.5 s. Ours has the same sequence eight
+seconds earlier. The 10 s comparison and the ten-minute run are in `docs/13-M6-AUDIO-BASELINE.md`.
 
-1. Capture Flycast audio by loopback (WASAPI) while it plays, or on a machine with a recording
-   device, and compare 10 s of spectra — the only missing piece for the M6 gate.
-2. Fix the like-for-like state (VMU on both sides, 4:3 in Flycast) before any pixel diff for
-   M3, and use `--screenshot-at N` on our side against the same point in Flycast's timeline.
+For M3, the remaining like-for-like differences are state: a VMU on both sides and a 4:3 Flycast
+window. Use `--screenshot-at N` on our side against the same point in Flycast's timeline.

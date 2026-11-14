@@ -1,6 +1,6 @@
 # Handover — state of the project
 
-Updated 2026-11-10, after the translated-path fault was found and fixed. The project's records are
+Updated 2026-11-14, after M6 audio was verified against Flycast. The project's records are
 elsewhere: `docs/ENGINE-CHANGES.md` is the running ledger with every trace and dead end,
 `docs/UPSTREAM-REPORT.md` is the engine-side report, and `docs/07-ROADMAP.md` is the milestone plan
 this is measured against. This file is the pick-up point.
@@ -20,6 +20,7 @@ this is measured against. This file is the pick-up point.
 | Speed | translated path | **4.5x at 400 frames, 3.6x at 5,000, 3.0x over 20,000 frames of gameplay; 1.0x windowed** |
 | Fresh clone | `setup.ps1 -SkipBuild`, `import-disc`, `setup.ps1` | engine patched, dump extracted, built, **600 frames clean** |
 | Engine test suite | `ctest` in `engine/build-test` | 6/6 (76 runtime cases incl. the new regression) |
+| Audio (M6) | `tools\m6-check.ps1` | 10 s spectra at 1.0000 sample correlation; 600 s with no gap that Flycast does not also have |
 
 **The translated path is now the fast one (2026-11-11).** It had been 0.15x — slower than the
 interpreter — because most of the title's code was running in the development interpreter. Three
@@ -118,12 +119,45 @@ the next trace shows only the 97 one-off calls. Parity is unchanged.
 This is not the slowdown: 2,736 interpreted calls over 8,000 frames is noise. The slowdown did not
 reproduce for the owner either; it stays on the list as an unexplained, intermittent one.
 
-**Lanterns flicker (open).** Reported from the tree-village level. The renderer draws translucent
-polygons back to front per strip (`renderer.cpp`, the `items` sort) and tests depth without writing
-it; a glow sprite that intersects the surface it lights can therefore alternate between drawn and
-depth-rejected as the camera moves, which reads as flicker. It needs a capture to tell that apart
-from a texture or pipeline cause: `F11` at the moment it flickers gives the display list and video
-memory, and `--polygons` on the capture diffs two frames' polygon lists.
+**Lanterns: captured, and the depth theory is out (2026-11-14).** Reported from the tree-village
+level. Two `F11` bundles were taken at the moment -- guest frames 13,305 and 13,520, at 4x
+(2560x1920) -- and both replay through `dream_render_view` to the pictures the run presented (mean
+2.7/255 after the 4x downscale, the differences at resampling edges and thin HUD lines), so each
+bundle is complete and the renderer is faithful to it.
+
+At the near lantern:
+
+| | capture 000 | capture 001 |
+|---|---|---|
+| lantern body (640x480 guest px) | 33.7 x 37.0 | 33.5 x 36.8 |
+| glow quad sizes (px) | 92.8 / 57.4 / 21.9 | 77.0 / 41.8 / 6.5 |
+| their vertex alphas | 45 / 202 / 105 | 111 / 201 / 31 |
+| glow 1/w | 0.1041 / 0.1041 / 0.1040 | 0.1037 / 0.1036 / 0.1036 |
+| lantern front pane 1/w | 0.1059 | 0.1055 |
+
+The body is the same size, and the glow texture -- `tcw c80c5ff0`, a 64x64 VQ RGB565 mipmap at
+0x62FF80 -- is byte-identical in both captures. Only the three additive screen-space quads behind
+the lamp change (`tsp 849024db`, source alpha / one, four vertices at one 1/w each). The far lantern
+changes with them: outer and middle sizes shrink by nearly the same factors (x0.84 and x0.76 there
+against x0.83 and x0.73 here), and the outer/inner alphas move by the same amounts (+64/-74 against
++66/-74). So the pulse is one shared parameter applied to every lantern, not per-lamp noise. The
+middle layer does not follow a single scale (alpha +47 there, -1 here), so it is not one uniform
+factor either.
+
+That is evidence against the open theory. The glow is not intersecting the surface it lights: it sits
+at 1/w 0.104, behind the lantern's own front pane (0.1055-0.1059, a gap of 0.0018) and well in front
+of the wall behind (about 0.05). That order and that gap hold in both frames, so the glow cannot
+cross into depth rejection. Nor is it the texture cache or a pipeline: the same list replays to the
+same picture, and the texture bytes do not change.
+
+So the flicker is in the guest's own list: a global pulse moves light between the outer halo and the
+inner core and scales all three quads. What is still open is whether that pulse is the game's
+intended lantern animation or whether this build drives it wrongly (frame rate, or the timer or
+random source it reads). Two frames 215 apart cannot answer that. The next measurement is a burst of
+five or six `F11` presses inside a second at the same lantern: a smooth step through the burst is a
+designed pulse, and its period can then be compared with Flycast at the same spot. The quads are easy
+to read out of any capture: `dream_render_view capture-NNN.ta --polygons`, then the `tcw c80c5ff0`
+lines with four vertices.
 
 ## Controllers (2026-11-12)
 
@@ -278,17 +312,21 @@ The engine changes are in `patches/0001-engine-local-changes.patch`; `setup.ps1`
 
 ## M9 plan (2026-11-13)
 
-M9 is done as of 2026-11-13: all three parts are implemented and checked.
+M9 is done as of 2026-11-13, with a HUD correction on 2026-11-14: all three parts are implemented
+and checked.
 
 1. **Internal resolution scaling — done.** `--scale N` draws the geometry at N x 640x480 and resamples
    on the way into video memory, so the guest still sees 640x480. Checked at N=2: "drawing at
    1280x960".
-2. **16:9/21:9 with undistorted HUD — done as hor+ for 3D, 4:3 for flat screens.** The PVR receives
-   already projected coordinates at 4:3, so the alternatives were pillarbox, a stretched 3D frame
-   with a per-polygon HUD split, or hor+. The title's projection x scale turned out to be a plain
-   float, so hor+ is what shipped, with the HUD riding the same projection and keeping its shape.
-   Flat 2D frames (title, menus, loading cards) do not use that projection and are now pillarboxed
-   at 4:3 instead of stretched; see below.
+2. **16:9/21:9 with undistorted HUD — done as hor+ for 3D, 4:3 for flat screens, and an overlay
+   pass for the HUD.** The PVR receives already projected coordinates at 4:3, so the alternatives
+   were pillarbox, a stretched 3D frame with a per-polygon HUD split, or hor+. The title's projection
+   x scale turned out to be a plain float, so hor+ is what shipped. The HUD, however, is **not**
+   part of that projection: it is screen-space 2D, and the presenter's stretch made it 4/3 too wide.
+   Patch 027 compresses the HUD's quads by the same factor about their own anchors, so the stretch
+   restores their shape and keeps the health bar centred and the compass in the corner. Flat 2D
+   frames (title, menus, loading cards) do not use that projection and are pillarboxed at 4:3
+   instead of stretched; see below.
 3. **Render rate decoupled from 60 Hz logic — done.** `--present-rate N` (launcher `-PresentRate`)
    presents each guest frame `N/60` times with an even cadence; the guest is untouched. 300-frame
    runs at 60/120/144 give identical guest reports (same cycles and pc) with presented counts
@@ -312,8 +350,20 @@ with `--aspect 16:9` (launcher: `-Widescreen`, or `-Aspect 21:9`). The boot patc
 presenter stretches the frames that carry depth. Verified at 1280x720 and 1680x720: more world
 horizontally, no distortion. 4:3 stays the default and parity is unaffected.
 
-The HUD goes through the title's own projection, so it is squeezed with the world and stretched back
-by the presenter: it keeps its shape and moves outward with the frame.
+**The HUD is screen-space, not projected (2026-11-14).** The earlier claim that it rides the
+title's projection was wrong, and a user reported the consequence at 16:9. The same guest frame
+captured at 4:3 and 16:9 has **identical** HUD coordinates (health bar x 192..448, compass
+x 568..632, at 640x480), while the 3D geometry moves: the patch at `0x0C098640` never touches the
+HUD. The presenter then stretches the frame x2/1.5, so the HUD came out 4/3 too wide (the compass
+ring measured 188x141 against 141x139 at 4:3). `compress_screen_overlays()` in the render library now
+compresses the flat quads that sit beyond the frame's nearest world depth by the projection's own
+`(4/3)/aspect`. Parts of one element that overlap or sit within 16 px -- the compass ring and its
+needle, the health bar and its digits -- share one anchor, and a small glyph joins a nearby larger
+element (the wisp counter sits inside the compass cluster); only a genuinely stand-alone glyph is
+scaled about its own centre. The presenter's stretch restores their shape without moving them: the
+compass is 140x139, the health bar's red fill 252 pixels wide (4:3: 141x139 and 251), the needle
+keeps the same 30-pixel offset from the ring's centre, and the wisp counter sits within one pixel
+of the wisp's centre, as at 4:3. See `docs/ENGINE-CHANGES.md` patch 027.
 
 **4:3 menus and loading screens (2026-11-13).** The title, menus, story/location cards and loading
 screens are flat 2D art. They do not use the projection (a menu frame rendered with the x scale
@@ -322,11 +372,68 @@ distortion. The boot now classifies each submitted display list with `frame_uses
 with a depth span = 3D) and stretches only a 3D frame that came from the renderer; everything else
 is fitted at 4:3 and pillarboxed inside the wide window. (A pause or quit dialog drawn over the live
 world stays widescreen, because the frame still contains the world; separating a 2D overlay from the
-3D scene needs its own signal.) Verified at 1280x720: a 960x720 centred
+3D scene needs its own signal. Its text is screen-space, so patch 027 keeps that text's 4:3 shape
+even though the world behind it stays wide.) Verified at 1280x720: a 960x720 centred
 image with 160-pixel black bars for the title and menu cards, and an in-game cutscene frame that is
 byte-identical to the pre-change widescreen capture. The presenter also discards fragments outside
 the image now, which fixes the edge smear that used to appear in letterbox bars. See
 `docs/ENGINE-CHANGES.md` patch 021.
+
+## Saves: a virtual VMU always present (2026-11-14)
+
+A windowed run now always has a memory card — the per-user one for this title
+(`%APPDATA%\dream-recomp\saves\draconus\vmu_a1.bin`), created blank and formatted on the first run
+— so the save and load screens work with no flags. `--vmu FILE` (play script `-Vmu`) still names a
+specific image. Headless runs stay card-less so their traces repeat.
+
+The launcher's **Saves** tab lists the cards and the save files on them (`tools/vmu.py` reads the
+VMU filesystem), creates blank cards, and can **launch straight into a save**: it passes a `--press`
+schedule, measured frame by frame, that walks the game's own Load Game screens to the chosen file.
+The list order is the card's directory order, so launcher entry *n* is screen entry *n*; verified
+with eight synthetic entries (two Downs → `.003`, five → `.006`, A on the first → the game's own
+`LOAD ERROR!` for the fake data).
+
+One measured surprise: the pause menu's **Set Mark** is a checkpoint, not a card save — accepting it
+reports **0 block writes** and returns to play. A VMU save is written through the game's
+`VMSSavePage` → `SavePage` flow at the title's own save points/level transitions, and a Draconus
+card file is `DRACONUS.001`…`.008`. `docs/17-VMU-SAVES.md` has the frame table, the checks and the
+risks; `docs/ENGINE-CHANGES.md` patch 025 has the engine side.
+
+## Launcher book-keeping (2026-11-14)
+
+**Left empty for now.** The launcher records nothing about a launch beyond its own settings file
+(`%APPDATA%\DraconusRecomp\launcher.json`); this is the place to keep that record if it is ever
+wanted.
+
+## M6 audio: done (2026-11-14)
+
+The missing half of M6 was a Flycast audio reference. Flycast's SDL2 backend can be forced onto
+SDL's disk audio driver, so it writes raw s16le stereo 44.1 kHz with no loopback and no system
+sounds:
+
+```powershell
+tools\flycast-m6.ps1 -Seconds 600 -Out work\m6\flycast_10min.wav
+tools\m6-check.ps1
+```
+
+`flycast-m6.ps1` also drives the emulator through its Lua API: START on guest frame 1800, A on 2100,
+30-frame holds, exit on 36000. It prefers the retail v1.000 GDI by name and refuses ambiguous discs.
+
+**Ten seconds of menu music** at 34.0 s in Flycast / 26.1 s in ours: sample correlation **1.0000**,
+99.55 % of samples differ by an RMS of **1.1 LSB** (worst 5), spectral correlation median **1.0000**
+(min 0.9999), every octave band within **0.00 dB**, **12/12** dominant peaks, centroid 286.0 Hz both.
+
+**The title is silent in Flycast too** (15.55-33.55 s), so the baseline's open question is closed;
+ours is silent 12.8-25.6 s only because START is scripted earlier.
+
+**Ten minutes:** ours has seven silent runs; Flycast has the same seven at the same points. The three
+long ones (about 54.5 s each, every ~145 s) are the game's **DEMO PLAY** attract screen, which stops
+its music; a screenshot at 474 s shows it. No gap in ours is sounding in Flycast, so there are no
+dropouts. The 600 s run has 1,870 key-ons, 6 active channels and 0 faults; its first 90 s are
+byte-identical to the separate 90 s run. No engine change was needed for any of this.
+
+`docs/13-M6-AUDIO-BASELINE.md` has the tables and the capture commands; `tools/audio-check.py` is the
+measurement tool (info, align, compare, gaps, raw2wav).
 
 ## Next phase
 
@@ -338,9 +445,9 @@ Order is by value per unit of risk, not by size:
    discovery/emission blocker in `docs/11-M2-RESULTS.md` (the seeds cover what the first 300 frames
    reached, not what later gameplay will). `DREAM_TRACE_UNTRANSLATED` names what a new scene is
    missing.
-3. **M3 visual parity and M6 audio.** Flycast is installed and boots the disc; driving it and
-   capturing is in `docs/14-M3-M6-FLYCAST-REFERENCE.md`. Audio still reaches a WAV file rather than
-   the speakers, and the title screen is silent (`docs/13-M6-AUDIO-BASELINE.md`).
+3. **M3 visual parity.** Flycast is installed and boots the disc; driving it and capturing is in
+   `docs/14-M3-M6-FLYCAST-REFERENCE.md`. The remaining like-for-like state is a VMU on both sides
+   and a 4:3 Flycast window; M6 audio is now closed.
 
 ## Owner items
 
@@ -351,6 +458,69 @@ it).
 The fresh-clone path is now closed: `setup.ps1` applies the engine patches from `patches/` after
 fetching the pinned commit, keeps an already-imported disc image when re-run, and extracts the boot
 executable from that dump when it is missing. Verified end to end on a clean clone.
+
+## Performance pass: 60 Hz at 1440p (2026-11-14)
+
+The target is 60 fps all the time at 1440p 16:9 (`--fullscreen --scale 4 --aspect 16:9`), hitches
+and loads aside. The renderer was deciding it: **every presented frame went GPU → CPU → GPU**, a
+19.7 MB readback and a 19.7 MB upload at 4x, plus a fence wait that stopped the CPU every frame.
+`Offscreen` now keeps the frame in `SHADER_READ_ONLY` for the presenter to sample where it lies
+(`Presenter::use_image`), and only brings the pixels back for the callers that need them — a render
+to texture, `--framebuffer-writeback`, a screenshot, a capture, the frame counter.
+
+| measure (4x 16:9, 6,500-frame title/intro run) | before | after |
+|---|---|---|
+| vblank cost (draw + present) | 1.49 ms | **0.29 ms** |
+| present | 1.51 ms | **0.28 ms** |
+| frame mean | 8.45 ms | **6.64 ms** |
+| frames over 16.67 ms | 19 | **4** |
+| worst frame | 297 ms | 29 ms (a load) |
+
+The new `DREAM_TRACE_FRAME_HIST=1` measures what matters — the distribution, not the average, plus
+CPU per frame and a line every 600 frames. An 18,000-frame run through the first level (title →
+main menu → character select → Celanarin), fullscreen 1440p: **6.14 ms of CPU per frame over the
+whole run, 12.4 ms in the heaviest gameplay window, and 13 frames of 18,000 over 16.67 ms** — every
+one of them a load, with under 0.3 ms spent in the vblank. `DREAM_PROFILE=<ms>` and
+`tools\profile-map.py` are the host profiler that says where the rest goes (emitted code, then the
+non-RAM memory accesses, then the AICA). Parity and determinism are unchanged; see
+`docs/ENGINE-CHANGES.md` patch 028.
+
+### The frame counter was not free either (patch 030)
+
+One of the things that list says still needs host pixels is the frame counter, and that turned out
+to be ruinously expensive rather than merely un-optimised. With `F10`/`--fps` on at `--scale 4`,
+CPU per frame went from **5.20 ms to 16.06 ms** and frames over 20 ms from 4 to 47 — the "dips into
+the 40s" that made the game feel like it was slowing down, with the audio crackling because the
+AICA queue is filled from the same thread once a frame.
+
+The counter's translucent panel blends src-over-dst, so it read each destination pixel from
+`Presenter`'s staging buffer, which is write-combined memory: ~175 ns a pixel, 9.5 ms a frame at 4x,
+scaling with the panel's area rather than with anything that was being drawn. The overlay now takes
+the frame as `under` — a cached-memory source for the destination side of the blend — so the staging
+buffer is only written. The counter costs **1.5 ms** again. If you want it to cost nothing, the
+remaining change is to composite it in `present.frag` on the GPU, which is named at the end of patch
+030 and deliberately not done here.
+
+### Judder with a steady frame rate (patch 031)
+
+A steady 59-60 fps that does not feel smooth is not a frame rate problem, and no frame rate counter
+can show it. A picture only changes on a vertical blank, so it is held for a whole number of
+refreshes, and the number is `refresh / pictures-per-second`. `--display exclusive` was taking the
+highest refresh the panel offers — 165.00 Hz against 59.94 pictures a second is **2.753**, so
+pictures were held for two refreshes and then three: a 33 % swing in how long each is displayed,
+about fifteen times a second. Exclusive fullscreen now takes the highest refresh that is a whole
+multiple of the picture rate (119.98 Hz here, two refreshes each), states what it achieved, and names
+the rates that would work when none divides evenly.
+
+`DREAM_TRACE_PACING=1` reports the ratio, and whether presents are repeating a picture the title did
+not re-render. That second number cleared the renderer: where it happens the guest asked for fewer
+renders than there were presents, so the title was skipping them itself. Read the counter with that
+in mind — it counts presents, so a title rendering 52 pictures a second still reads 60 FPS.
+
+`DREAM_TRACE_FRAMES=<file>` dumps every frame's interval and vblank cost. It also settled the pacing
+sleep: sd 0.76 ms with a lag-1 autocorrelation of -0.46, real but sub-millisecond and not what judder
+looks like. A sleep-then-spin pacer cut it to 0.49 ms for 7 % of a core; rejected, with the numbers
+in the comment.
 
 ## Things that cost time and should not be repeated
 

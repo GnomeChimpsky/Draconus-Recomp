@@ -1940,6 +1940,530 @@ presented frames were 5,912 / 10,674 / 11,679.
 
 Verified: render suite 85/85 (1,392 assertions), including the present-rate cap cases.
 
+## Patch 024: frame interpolation for present rates above 60 (2026-11-14)
+
+`--present-rate` decoupled presentation from the 60 Hz logic by repeating the current picture. That
+smooths the display but cannot show motion the guest did not compute. `--frame-interpolation`
+(launcher: **Interpolate extra frames**, play script: `-Interpolate`) draws the intermediate frame
+from the two guest submissions instead.
+
+The renderer already receives screen-space vertices with 1/w depth and texture coordinates, so two
+consecutive frames of a scene carry the same corners twice. `render/interpolate.{h,cpp}` matches
+polygons on their render state (vertex count and the PCW/ISP/TSP/TCW words, clip rectangle) in
+submission order, and moves a matched polygon's corners halfway by `t`. Depth is interpolated as
+1/w, which is what is linear in screen space; the depth range is recomputed for the result. The
+matching is deliberately conservative: a pair is used only when its centroid is within 32 px, its
+mean corner distance within 48 px and its mean w ratio within 0.7–1.4, and the first plausible of at
+most two same-signature candidates is taken rather than the closest of a far group. A strip with no
+plausible predecessor keeps its current corners, so a culled or streamed-away polygon can pop but
+cannot smear. A frame whose matched corners move more than 48 px on average is a cut, and falls back
+to the current picture rather than morphing one scene into another.
+
+Wiring: `Live` keeps the decoded `Frame` of the previous and current renders (render-to-texture
+draws are left out), builds the intermediate at the first present of each guest frame, and rasterises
+it into a second offscreen target with the same renderer and geometry. The present loop spaces the
+presents of one guest frame evenly and ends with the frame itself (`1/N … 1`), so for a 120 Hz
+display the sequence is mid(N-1,N), N, mid(N,N+1), N+1; for 144 Hz it is two thirds, one third and
+the frame. A frame that is not 3D (`frame_uses_depth`), a movie, a menu and a frame that is behind
+its clock present the current picture, exactly as before.
+
+Measured, windowed, 640x480, AMD/NVIDIA RTX 3080:
+
+| run | interpolated | fell back | partial | render failures | speed |
+|---|---|---|---|---|---|
+| 5,750 guest frames, 120 Hz | 1,428 | 0 | 318 | 0 | 1.0x |
+| 6,200 guest frames, 120 Hz | 1,800 | 0 | 373 | 0 | 1.0x |
+| 4,000 guest frames, 144 Hz | 166 | 0 | 0 | 0 | 1.0x |
+
+No fallback means every attempted pair had at least one match; "partial" counts frames where fewer
+than half the strips matched (the forest scene has ~40–60% in most frames, the cutscene ~100%). The
+extra render costs 0.57 ms per present against 0.22 ms for a repeat at native resolution (0.61 ms
+per draw); the guest still runs at 1.0x, because the work fits the 8.3 ms 120 Hz interval.
+
+Visual check at guest frame 5700 (previous, intermediate, current): the intermediate has the same
+edge energy as the two source frames (2.493 against 2.491 and 2.493; a naive 50/50 blend measures
+2.432), so it is a re-rasterised frame rather than a cross-fade, and only 0.3% of pixels move at
+that instant. The limitation is visible there too: texture content is not interpolated, so a video
+or streamed background snaps at the current frame, and unmatched strips are drawn at the current
+position, which biases a partly matched frame towards the newer picture. The intermediate also
+introduces half a present interval of latency.
+
+Covered by `render/tests/test_interpolate.cpp`: matching, first-candidate and cut rejection, 1/w
+depth, UV movement, unmatched/removed strips, modifiers and clamping. The render suite is 96 cases
+(1,433 assertions).
+
+## Patch 025: a memory card without asking for one (2026-11-14)
+
+`--vmu FILE` had existed since the card work, but nothing attached a card unless the command line
+named one. A windowed run therefore booted with an empty expansion slot: the title showed "No VMU
+Found", refused to save, and a first-time player had no reason to know the flag existed. The
+packet's `tools\launcher.py` now always passes a card, but a run started from
+`play-draconus.bat` should not behave differently.
+
+A windowed run now defaults to `%APPDATA%\dream-recomp\saves\<game id>\vmu_a1.bin`
+(`Application Support` on macOS, `$XDG_DATA_HOME` or `~/.local/share` on Linux). The directories are
+created and, when the file is missing, the same `MemoryCard::format()` blank card is written — so
+the first run can save, and the card is the standard 128 KB image, shareable with Flycast. If the
+platform's data directory cannot be made, the run continues without a card rather than failing to
+start over a convenience.
+
+**Headless runs stay card-less.** A card answers Maple frames and changes the write stream, which
+would invalidate every golden trace; the default is guarded on `window_mode` for that reason, and
+`--vmu` still attaches one explicitly when a scripted run needs it.
+
+Verified with `APPDATA` redirected to a workspace directory (the development sandbox denies the
+real one to child processes): `memory card: default card for draconus is …vmu_a1.bin`, then
+`created, formatted and empty`, and the file is exactly 131,072 bytes. The card's bytes are
+identical to `tools/vmu.py`'s `blank_image()`, and the launcher reads its saves with the same
+module.
+
+## Patch 026: windowed, borderless and exclusive display modes (2026-11-14)
+
+The launcher's **Fullscreen** checkbox is now a **Display mode** choice: windowed, borderless or
+exclusive. The engine gained `dream::render::vk::DisplayMode` and `Window::create` takes it instead
+of a boolean.
+
+`--display windowed|borderless|exclusive` selects it (`--fullscreen` remains as the old name for
+borderless, and either implies `--window`). Windowed keeps the 90%-of-usable-area sizing.
+Borderless is SDL's fullscreen window at desktop resolution (`SDL_WINDOW_FULLSCREEN`), which changes
+no display mode; it is what the old `--fullscreen` did. Exclusive asks SDL for one of
+`SDL_GetFullscreenDisplayModes`, preferring the display's **current** mode first (no resolution or
+refresh change) and then the highest refresh at the desktop resolution, calls
+`SDL_SetWindowFullscreenMode` + `SDL_SetWindowFullscreen`, and `SDL_SyncWindow` before the swapchain
+is built. If the window system refuses the mode change, it falls back to borderless with a warning
+rather than failing the launch. `DREAM_TRACE_DISPLAY=1` prints the desktop mode and the modes the
+display reports.
+
+This host refused every exclusive mode with `ChangeDisplaySettingsEx() failed: DISP_CHANGE_FAILED`,
+including 640x480@60 and a standalone SDL3 probe that does nothing but request it, so the exclusive
+path could not be observed succeeding here; the fallback to borderless is what the run reports.
+Borderless was verified at 2560x1440, windowed at 960x720.
+
+The launcher also gained the interpolation presentation rule from patch 024's review: **Interpolate
+extra frames** is labelled experimental, is enabled only when the present rate is 120 or 144, and
+`build_command` passes `--frame-interpolation` only above 60 Hz. Settings that only had the old
+`fullscreen` boolean migrate to `display_mode = borderless` when it was true. The launcher selftest
+covers windowed (no flag), borderless, exclusive and the 60 Hz interpolation case.
+
+## Patch 027: the HUD does not ride the projection (2026-11-14)
+
+Patch 019 shipped hor+ assuming the HUD went through the title's projection. It does not. The HUD
+is screen-space geometry, and at 16:9 the presenter stretched it 4/3 too wide.
+
+The reproduction boots the retail disc into gameplay with the schedule used for the VMU work
+(`start@1150 ... a@11000, start@13500, down@13700, down@13850, a@14000, a@14200`) and captures the
+same guest frame twice, at 4:3 and with `--aspect 16:9`. The two display lists differ only in the
+3D geometry; the HUD quads have **identical** screen coordinates in both:
+
+| element | coordinates (640x480 guest screen) | depth |
+|---|---|---|
+| health bar frame | x 192..448, y 400..464 | 8.071 |
+| health bar fill | x 192..429, y 400..464 | 9.071 |
+| "1000" digits | x 300..343, y 418.5..435.5 | 10.071 |
+| compass | x 568..632, y 392..456 | 10900 |
+| "0" / icons | x 532..628, y 304..434 | 10990..11102 |
+
+The x-scale patch at `0x0C098640` never touches them, so the QVGA x squeeze that corrects the world
+does not correct the HUD. The presenter then maps 640x480 to 1280x720 (x2 horizontally, 1.5x
+vertically): the world, squeezed by 0.75 first, comes back correct; the HUD comes back 4/3 too wide.
+Measured on the presented image at the same guest frame: the compass ring was **188x141** in 16:9
+against **141x139** at 4:3, and the health bar's "1000" was visibly wide.
+
+The fix is a render-library pass, `compress_screen_overlays(Frame& frame, float factor, float width)`,
+unit-tested in `render/tests/test_display_list.cpp`:
+
+* It finds the frame's nearest world depth from the polygons that carry a depth span. The title
+  draws its HUD, menu text and counters beyond it, in front of the near plane, as flat four-vertex
+  quads; the 3D effects that also sit in front of the world (the darkness around the player) are
+  triangles and are left alone.
+* Quads at one depth are grouped into one element (the digits of a counter, the glyphs of a menu
+  line). Parts of one element that overlap or sit within 16 px of each other -- the compass ring,
+  its needle and the icons above it; the health bar and its digits -- are clustered and share one
+  anchor, so a child cannot drift inside its parent. A cluster's anchor is the centre line for a
+  centred element and the near edge for one at the side.
+* A small glyph joins a nearby larger element when it has one: the wisp counter sits inside the
+  compass cluster and moves with it. Only a genuinely stand-alone glyph (a damage number) is
+  scaled about its own centre, so it stays on the thing it labels.
+* The group's x is multiplied by the same `(4/3)/aspect` the projection was multiplied by; the
+  presenter's stretch then restores the original width and height. The anchor is what keeps the
+  element where it was, so the health bar stays centred and the compass stays in the corner.
+* Hardware clip rectangles move with their quad, for a bar clipped to its current value.
+* 4:3 is a no-op. A title with no `[widescreen]` hook leaves `wide_x_factor` at 1.0, because its
+  world was not squeezed and its overlays must not be either.
+
+The boot calls it only for a frame that carries depth, which is exactly the set the presenter
+stretches; a flat 2D screen (title, menus, loading cards) is pillarboxed and untouched.
+`DREAM_TRACE_SCENE=1` prints the number of quads compressed per frame in a windowed run.
+
+Verified on the retail disc at 1280x720, same guest frame: the compass is **140x139** (4:3:
+141x139) and the health bar's red fill is 252 pixels wide (4:3: 251), so the HUD keeps its absolute
+size and its anchors; the "SAVING" text and the pause-menu lines keep their 4:3 aspect. The
+compass needle sits **30 pixels left of the ring's centre** at both 4:3 and 16:9, and the wisp
+counter sits within **one pixel** of the wisp's centre (4:3: about 1.5 px); the first pass anchored
+each depth layer separately and moved the needle 13 pixels too far left, which is what the cluster
+pass fixes.
+The world is untouched: every pixel that differs from the pre-fix capture is inside a HUD region
+(the health bar, the right-hand icons, the "SAVING" text); every pixel outside them is
+byte-identical. The render suite passes 97/97 cases (1,459 assertions), including grouping, anchor,
+clip, full-screen and no-op cases. See also patch 019, whose claim that the HUD rides the projection was wrong, and patch 021,
+which handles flat screens.
+
+## Patch 028: the frame stays on the GPU, and the frame time is measured (2026-11-14)
+
+The target is 60 Hz at 1440p 16:9 — `--fullscreen --scale 4 --aspect 16:9`, where the guest draws
+2560x1920 and the window shows 2560x1440. The question was not the average frame time but the tail:
+one frame in two hundred that takes 20 ms is a visible hitch even when the run averages 8 ms.
+
+**Measured first.** Two diagnostics were added (below) and the whole run — title, menu, intro,
+character select, first level — was timed frame by frame. Windowed 4x 16:9, unthrottled, 6,500
+frames of the title and intro: **8.45 ms mean, p99 14.60 ms, 19 frames over 16.67 ms, one 297 ms
+stall**. `DREAM_TRACE_FRAME_TIME` split it:
+
+```
+window: 1.57 ms per draw, 1.51 ms per present
+window: present split: begin 0.02, upload 1.23, draw 0.00, end 0.08 ms
+```
+
+**The cause was the round trip, still.** Every presented frame went GPU → CPU → GPU.
+`Offscreen::render` copied the whole colour image into a host-visible buffer and waited on the
+fence; `Presenter::upload` copied it again into a staging buffer and recorded a buffer-to-image
+copy; the window then sampled that copy. At 640x480 that is 1.2 MB each way per frame, which is why
+it never showed up before — at 2560x1920 it is **19.7 MB each way, 60 times a second**, plus a
+GPU→CPU synchronisation point that stops the CPU dead every frame. The 297 ms stall was this
+machinery meeting a driver hiccup.
+
+**The fix: the frame is shown where it lies.**
+
+* The offscreen colour image is created with `VK_IMAGE_USAGE_SAMPLED_BIT` and its render pass now
+  leaves it in `SHADER_READ_ONLY_OPTIMAL`, not `TRANSFER_SRC_OPTIMAL`.
+* `Presenter::use_image(view, w, h)` binds a second descriptor set to that image; the present pass
+  samples the renderer's own target. Nothing is copied for a frame the window shows.
+* `Offscreen::render(..., readback=false)` skips the copy and the fence wait. The wait moved to the
+  *start* of the next render, so the CPU runs the next guest frame while the GPU is still drawing
+  this one, and the wait a frame later costs nothing.
+* The host pixels are still produced when something needs them, through `Offscreen::read_back()`:
+  a render to texture (which the guest samples), `--framebuffer-writeback`, a screenshot, a
+  capture, the frame-time probe and the on-screen counter. The display path no longer pays for
+  them. `DREAM_PRESENT_CPU=1` forces the old upload path so the two can be compared.
+
+**Result, same run:** vblank cost **1.49 → 0.29 ms** mean, present **1.51 → 0.28 ms**, frame mean
+**8.45 → 6.64 ms**, frames over 16.67 ms **19 → 4**, and the 297 ms stall is gone. The direct path's
+screenshot is **byte-identical** to the upload path's (`DREAM_PRESENT_CPU`), so nothing about the
+picture changed.
+
+**Then a full run with gameplay.** 18,000 frames covering title → main menu → character select →
+Celanarin (the first level), fullscreen 2560x1440, unthrottled:
+
+| measure | value |
+|---|---|
+| CPU per frame, whole run | **6.14 ms** (36 % of one core at 60 Hz) |
+| heavy gameplay window (frames 16,800-17,400) | **12.42 ms** CPU mean, p99 in-frame vblank 0.33 ms |
+| frames over 16.67 ms | **13 of 18,000 (0.07 %)**, every one of them a load |
+| frames whose vblank exceeded 3 ms | 356, worst 14.16 ms (texture/pipeline first use) |
+
+The 13 misses all have **under 0.3 ms in the vblank**: the renderer and presenter were idle; the
+time went into the guest's own work in that frame (level/scene transitions — the disc reads and the
+decompression that follow them), which is the "loads and hitches" the target excludes. Steady
+gameplay has 4.2 ms of headroom on this machine.
+
+**Renderer CPU work, kept down as well.** Two per-frame costs in the draw path are gone: the polygon
+scratch list is a member (`items_`) rather than a fresh `std::vector` per frame, and the pipeline
+lookup goes through a direct-mapped 256-slot front (`pipeline_cache_`) before the hash map, which
+mattered because neighbouring polygons almost always share render state. Pixel-identical at guest
+frame 16,102; the timing gain is inside the noise, but neither allocates per polygon any more.
+
+**Diagnostics added (all opt-in, no cost when unset).**
+
+* `DREAM_TRACE_FRAME_HIST=1` — the distribution that matters: mean/p50/p90/p99/max, the count over
+  16.67/20/25/33 ms, the worst frames by guest number, the vblanks over 3 ms, a line every 600
+  frames (mean, max, vblank, **CPU per frame**), and the run's total CPU per frame.
+* `DREAM_PROFILE=<ms>` — a sampling profiler for the *host*: a thread suspends the emulating thread
+  on that interval, reads its instruction pointer and counts it; the report resolves each address to
+  its module, and `tools\profile-map.py <draconus_boot.map> <run output>` turns the launcher's own
+  addresses into `fn_0c…` / `DcMemory::read32` names. It is what showed that the round trip, the
+  heap and the audio chip are worth measuring at all; at 2 ms it costs about 10 % of the run.
+* `DREAM_PRESENT_CPU=1` — force the CPU upload path, for comparing the two presentations.
+
+**Profile of the final build** (18,000 frames, 46,052 samples): the emitted game code is the bulk and
+is spread across thousands of addresses, as it should be; then `DcMemory::read32`/`write32` ~10 %
+(the non-RAM accesses: video memory, registers, sound RAM), the AICA (ARM7, mixer, DSP) ~5 %,
+`call_indirect` ~1 %, `devinterp::run` 0.3 % (the residual untranslated calls). `ntdll` was 12 % in
+an unthrottled run, almost all of it one `NtWaitForMultipleObjects` — the main thread waiting for a
+swapchain image, which is wall time, not work; the CPU-per-frame figure above excludes it.
+
+**Verified.** `tools\parity-check.ps1`: stop, frames, PVR and Maple counters identical, cycles
+identical to the cycle (3,635,956,132 in both), screenshot byte-identical. Two 600-frame headless
+runs with `--write-hash` and the same seed produce identical files. The direct-present screenshot
+matches the upload path's, and the renderer change matches the previous build's at guest frame
+16,102.
+
+## Patch 029: the jump pack is a device, and its effects reach the pad (2026-11-14)
+
+Draconus's options screen has had a **JUMPPACK / PACK OFF / PACK ON** row all along, and its script
+language has `vibrate_purupuru(num,num,num,num)`, but the runtime had no vibration device, so the row
+could not do anything. The game enumerates expansion devices from the controller's reply, so a pack
+that is not there is not merely ignored: the title never has an effect to send.
+
+`maple::JumpPack` is now attached to port A's second expansion slot, next to the memory card in the
+first. It answers Device Request and All Status Request as a Puru Puru pack (function 0x00010000,
+one motor, seven power levels, "Puru Puru Pack", 20/160 mA, Flycast's capability string), reports the
+last effect from Get Condition, and implements Set Condition, Get Media Info, Block Read and Block
+Write. The effect decoding is Flycast's `maple_sega_purupuru`: the two three-bit drive fields give
+power, `freq` and the signed `inc` give the duration, and the pack's auto-stop time caps it.
+
+The decoded effect goes to `Window::rumble`, which plays it on every attached pad's ordinary rumble
+motors through `SDL_RumbleGamepad` (and `XInputSetState` when SDL found no pad and the input is coming
+through the XInput fallback). Both motors get the same strength, because the Dreamcast pack has one
+and splitting it would make the feel depend on which motors a particular pad has. A zero effect stops
+immediately; a window that closes stops a running effect rather than leaving it to a driver's timeout.
+A headless run leaves the handler empty, so traces and parity are unchanged.
+
+**Verified.** The runtime unit suite passes (78 cases, 121,176 assertions), including a new case that
+attaches a pack in slot 1, checks the controller advertises 0x22, sends the KallistiOS "basic thud"
+(`0x011A7010`: power 1, 26 Hz, 269 ms) and checks that a zero effect reaches the host as a stop.
+
+In the game, `DREAM_MAPLE_TRACE=1` shows the title probing address 0x02 on the sixth Maple frame,
+which is the proof the device is visible; the first frame to 0x02 is a Device Request, not a timeout.
+Opening **Options → JUMPPACK** sends `0x010FF010` (power 1, 15 Hz, convergent, 466 ms), and
+`DREAM_RUMBLE_TRACE=1` shows the host call with that power and duration. The game's option is off by
+default, so a player selects **PACK ON** on that row; the row previews the pack as it is highlighted,
+which is the effect above. Gameplay rumble then uses the title's own `vibrate_purupuru` calls, exactly
+as it would on hardware.
+
+`DREAM_MAPLE_TRACE=1` (every frame, recipient, command and first arguments) and
+`DREAM_RUMBLE_TRACE=1` (each host effect) are opt-in and cost nothing when unset.
+
+## Patch 030: the overlay blends the frame, not the staging buffer (2026-11-14)
+
+Turning on the on-screen counter (`F10`, `--fps`) cost **~11 ms of the 16.67 ms frame budget** at
+`--scale 4`. `DREAM_TRACE_FRAME_HIST=1`, 1,800 frames, same scene, windowed:
+
+| | counter off | counter on (before) |
+|---|---:|---:|
+| CPU per frame | 5.20 ms | **16.06 ms** |
+| vblank (render + present) | 0.48 ms | **11.69 ms** |
+| present | 0.50 ms | **12.40 ms** |
+| frame p99 / max | 18.43 / 613 ms* | **25.13 / 612 ms*** |
+| frames over 20 / 25 / 33 ms | 4 / 4 / 1 | **47 / 19 / 10** |
+
+<sub>*the max in both runs is the first frame, before the window is up.</sub>
+
+That is the reported "dips into the 40s". At 16.06 ms of work the frame no longer fits 16.67 ms, so
+the pacer cannot sleep, the guest falls behind its own clock, and the AICA queue — filled from the
+same thread once a frame — underruns. The crackle is not a separate fault; it is the same stall.
+
+Two things composed, and only the second is a bug.
+
+**The cost of the CPU path is known and bounded.** `overlay` (the counter, or the bindings screen)
+drops presentation back to the upload path, because the direct-present change (patch 028) only
+applies to a frame nothing is drawn over. That round trip — readback, fence waits, 19.7 MB out and
+back — measures ~2.3 ms of the total at 4x.
+
+**The bug: the overlay read the write-combined staging buffer, one uncached access per pixel.**
+`draw_text`'s panel is translucent, so it blends src-over-dst and must read the destination pixel.
+The destination is `Presenter`'s staging buffer, which is host-visible but deliberately *not*
+host-cached — `HostBuffer::ensure` takes the plain coherent type unless `cpu_reads` is set — so it
+is a write-combined window onto video memory. One blended pixel is therefore one uncached round
+trip:
+
+| `--scale` | panel pixels | upload (with decorate) | per pixel |
+|---|---:|---:|---:|
+| 1 (640x480) | 3,492 | 0.67 ms | 172 ns |
+| 2 (1280x960) | 13,968 | 2.93 ms | 210 ns |
+| 4 (2560x1920) | 55,872 | 10.76 ms | 171 ns |
+
+A flat ~175 ns a pixel is **22 MB/s**, against 16 GB/s for that same buffer written in one `memcpy`
+— so this was latency, not bandwidth, and it scaled with the panel's *area* rather than with the
+picture. The isolation run makes it unambiguous: forcing the same CPU path with
+`DREAM_PRESENT_CPU=1` and no counter costs 1.20 ms of upload at 4x, so 9.55 ms of the 10.76 ms was
+the blend and 1.20 ms was the round trip. `--present-rate 120` doubled it again — the extra presents
+are dropped once a frame is late, so the display gains nothing and the blend is paid twice.
+
+`fill_rect` and `draw_text` now take the picture as `under`: the destination side of the blend comes
+from the caller's own pixel buffer, which is ordinary cached memory, and the staging buffer is only
+ever written. `Presenter::upload` passes its `rgba` to the decorate callback for exactly this, and
+`InputMenu::draw` passes it to the one translucent fill it makes — the full-screen shade, which at
+4x was 4.9 million read-modify-writes whenever the binding screen was open.
+
+**Verified, same run after the change:**
+
+| | counter off | counter on (before) | counter on (after) |
+|---|---:|---:|---:|
+| CPU per frame | 5.20 ms | 16.06 ms | **6.69 ms** |
+| vblank | 0.48 ms | 11.69 ms | **2.35 ms** |
+| present | 0.50 ms | 12.40 ms | **2.49 ms** |
+| frames over 20 / 25 / 33 ms | 4 / 4 / 1 | 47 / 19 / 10 | **3 / 3 / 1** |
+
+The counter now costs **1.5 ms** instead of 10.9 ms, and the tail is indistinguishable from not
+having it on. `render.unit` passes — 100 cases, 1,907 assertions — with two new cases: a poison
+destination proves the blend never reads what it overwrites, and a pixel-for-pixel comparison proves
+drawing over `under` is identical to drawing over a copy of the frame. The binding screen gets its
+own equivalence case. A presented screenshot diffed against the same frame taken with the counter
+off differs in 2,560 pixels, all of them inside the panel's rectangle. `tools/parity-check.ps1`
+still reports `PARITY OK`, screenshot byte-identical.
+
+**Left on the table.** The counter still forces the upload path, so it costs 1.5 ms rather than
+nothing. Removing that means compositing the counter in the presenter on the GPU — a small overlay
+texture and a second sampler in `present.frag`, with the alpha blend done there instead of in cached
+memory — which would leave `--fps` at the direct-present cost. Not done here because it changes the
+present pipeline for a development readout, and the 1.5 ms no longer threatens the budget.
+
+## Patch 031: the panel can show the picture evenly (2026-11-14)
+
+Reported as: 59-60 fps on the counter, 0.98-0.99x, and visibly uneven motion — worst crossing the
+bridge in the first area. The frame rate was never the problem, and no frame rate could have shown
+this, because the picture was arriving at the right rate and being *held* for the wrong times.
+
+**A picture can only change on a vertical blank.** It is therefore on the glass for a whole number
+of refreshes, and the number is `refresh / pictures-per-second`. `--display exclusive` took the
+highest refresh the panel offers — 165.00 Hz — and the title presents 59.94 pictures a second.
+165 / 59.94 = **2.753**: not a whole number, so pictures were held for two refreshes (12.12 ms) and
+then three (18.18 ms), a 33 % swing in how long each one is displayed, repeating about fifteen times
+a second, everywhere in the game.
+
+`DREAM_TRACE_PACING=1` reports the ratio and whether the cadence can be even:
+
+```
+pacing: display 165.00 Hz, 59.93 presents/s -> 2.753 refreshes per picture
+pacing: NOT a whole number of refreshes per picture: the display has to hold some pictures for 2
+        refreshes and others for 3, so the cadence is uneven whatever the frame rate says.
+        A display at 59.9 Hz or 119.9 Hz would make it even
+```
+
+`Window::set_content_hz` now tells the window what rate pictures arrive at — the title's 60 Hz, or
+`--present-rate` when that asks for more — and exclusive fullscreen prefers the highest refresh that
+is a whole multiple of it. On this panel that is 119.98 Hz, which holds every picture for exactly two
+refreshes; 120 Hz also gives 8 ms of slack for a frame that is late, where a 59.94 Hz mode would have
+none. The window states what it achieved, measured from the mode actually running rather than the one
+requested, and when nothing divides evenly it keeps the old choice and names the two rates that would
+work:
+
+```
+display: 119.98 Hz holds 1.999 pictures per refresh -- a whole number, so every picture is shown
+         for the same time
+```
+
+**Tried and rejected: a precise pacer.** The pacing sleep rounds up to the system timer, so intervals
+alternate. `DREAM_TRACE_FRAMES=<file>` dumps every interval; over 1,600 frames of play the mean was
+16.68 ms, sd 0.76 ms, lag-1 autocorrelation **-0.46**. Sleeping to within 1.2 ms of the deadline and
+spinning the rest cut sd to 0.49 ms and put 96 % of frames within 1 ms of nominal (from 82 %), but
+the alternation stayed — the work inside a frame varies by more than the sleep overshoot, because the
+present blocks on the swapchain — and it cost 7 % of a core in idle spin. Sub-millisecond jitter is
+not what judder looks like. Reverted; the measurement is in the comment so it is not tried again.
+
+**Cleared: the presenter repeating frames.** Where motion stalls for a frame, a present shows a
+picture that was not re-rendered. That is not the renderer dropping frames: the pacing report counts
+the guest's *own* render starts alongside the repeats, and in the windows where it happens — the
+intro movie, the menus — **460 renders were asked for and 461 pictures were new**. The title did not
+request a render on those vblanks. A capture's `.txt` now reads
+`renders N (M asked for by the guest)` so the two can be told apart in a bug report, and
+`DREAM_TRACE_FRAMES` records the interval and the vblank cost of every frame.
+
+This is worth knowing when reading the counter: it counts *presents*, so a title that renders 52
+pictures a second and presents 60 still reads 60 FPS. The counter is honest about the window and
+says nothing about how often the picture changed.
+
+**Cleared as well: the modelled PVR render time.** `Core::start_render` schedules the render-done
+interrupt at `200,000 + 4 x TA words` cycles and the guest waits for it, so the model sits on the
+guest's critical path — the obvious suspect for a scene that draws less often than it presents. Two
+experiments settle it. Inflating it tenfold (~11 ms a frame) collapsed gameplay from 600 renders per
+600 vblanks to exactly **200**, a hard `frame budget / render time` floor, so the dependency is real.
+Removing it entirely changed **nothing**: 460, 428, 599, 599 renders per window, identical to the
+shipped values. It is not what limits this title today. Both measurements were taken with the model
+restored afterwards; `pvr/core.h` is byte-identical to the pinned engine.
+
+**What the counts look like in a real session** (4,000 frames, windowed, 4x): the title asked for
+2,930 renders and got 2,930 — the renderer dropped nothing. Every repeated picture was a vblank the
+title chose not to draw on, and the window lines say which: 599/600 in menus and 3D gameplay,
+~460/600 through the 30 fps intro movie, 392/600 on a static story screen, and 513/600 in a heavy
+spot (~51 pictures a second). A scene drawing 513 pictures a second cannot look like 60 pictures a
+second, and no presenter change can invent the missing ones.
+
+**Verified.** All six suites pass; `tools/parity-check.ps1` reports `PARITY OK` with a byte-identical
+screenshot — this is display timing only and the guest is untouched. The frame rate and the cost of
+the counter are unchanged (0.10 ms per draw, 2.47 ms per present at 4x with `--fps`).
+
+## Patch 032: --sh4-clock, or making the console faster than the console (2026-11-14)
+
+A guest frame is one vertical blank, and a vertical blank is a fixed number of cycles — 3,333,333
+at 60 Hz. The console's budget for a frame is therefore fixed, and however fast the host is it does
+not buy the guest a single extra cycle: the host's only job is to stay ahead of the clock. A title
+whose work does not fit that budget does not slow down smoothly, it misses the blank and draws
+nothing, which on screen is judder. That is what the bridge is.
+
+The one lever that changes it is to give the guest more cycles per blank: `--sh4-clock MHz` raises
+the clock the runtime schedules against. `sched::kSh4Clock` was already the single place the frame's
+budget came from — the SPG derives a scanline's length from it (`spg.cpp`), and the TMU, the Maple
+bus and the interrupt clamps convert their own real-time rates through it — so it became a runtime
+value and those three conversions follow it. Video, audio and the disc keep their own timing — see
+the amendment below, which is where the first cut of this got that claim wrong; the pacer divides by
+the same clock, so the title still runs at its own speed (verified: 11,500 frames in 191.7 s at 2x,
+exactly 60 fps).
+
+Measured on the same scripted session, as a share of vertical blanks the title actually drew on:
+
+| scene | 200 MHz | 300 MHz | 400 MHz |
+|---|---:|---:|---:|
+| 2D transition A | 460/600 (77 %) | 508/600 (85 %) | 531/600 (89 %) |
+| 2D transition B | 428/600 (71 %) | 485/600 (81 %) | 514/600 (86 %) |
+| open 3D gameplay | 599/600 | 599/600 | 599/600 |
+
+So those scenes were cycle-starved rather than "30 fps by design" — a correction to the note in
+patch 031. Half of the deficit goes at 1.5x, most of it at 2x, and what remains is the title not
+drawing on every blank even with double the budget.
+
+**Cost to the host**, at 4x 1440p with `--fps` and audio, 1,500 frames: 6.36 ms of CPU per frame at
+200 MHz, 8.25 at 300, 10.07 at 400 — still 1.0x with 6.6 ms of the 16.67 ms frame to spare on this
+machine.
+
+**Not the default, deliberately.** 200 is the console, and defaulting to more would (a) stop the
+emulator modelling the hardware, invalidating every recorded baseline and the Flycast comparisons;
+(b) apply a timing assumption to every title in the tree that only some titles tolerate — anything
+that measures elapsed time in CPU cycles rather than in blanks runs fast; (c) spend the host
+headroom that keeps 1.0x, which on weaker hardware turns judder into slow motion (worse: it
+desynchronises audio and input); and (d) erase the signal that we are slower than hardware, which is
+exactly the evidence the next piece of work — a per-opcode cycle model — would need to calibrate
+against. It is a tool for a title and a scene, not a default for a machine.
+
+**Verified.** Default 200 is byte-identical: `tools/parity-check.ps1` reports `PARITY OK` with the
+same cycle count (3,635,956,128) and an identical screenshot, and all six suites pass. A clock
+outside 100–800 MHz is refused with a message rather than silently producing a run at a speed
+nobody can explain.
+
+### The first cut scaled the wrong devices, and the game ran fast
+
+The first version above was wrong in a way that players found in one session: **the bridge stopped
+juddering and everything else sped up.** The clue is the shape of the fault — 60 frames a second on
+the counter, motion 1.5x too quick.
+
+Only the devices that *divide by a real-time constant* had been moved onto the runtime clock (the
+SPG's scanline, the Maple bus bit rate). Three things were left on the old 200 MHz assumption, and
+all three are timer-like:
+
+* **The timer unit** counts in cycles: `counter()` was `now() >> shift`, one tick per `2^shift`
+  cycles, so at 300 MHz a tick was 1.5x shorter in real time. KallistiOS builds its millisecond
+  clock on TMU0, so *every* game timer advanced 1.5x too fast — the game moved faster per frame
+  while still drawing 60 frames a second. This is what "gameplay is sped up" was.
+* **The sound chip** used `kSh4CyclesPerSample = 200'000'000 / 44100`, so 300 MHz produced 66,150
+  samples a second: the music would play at the wrong pitch.
+* **G2 DMA** used a hardcoded four cycles a byte, so disc and texture transfers completed 1.5x too
+  fast.
+
+`Tmu` now converts every cycle it looks at onto the console's 200 MHz timeline (`console_cycles()`,
+a reduced fraction so it is a multiply and a divide, and the identity at 200), and converts the wait
+back into CPU cycles when arming the event. `Aica::sh4_cycles_per_sample()` and `g2dma`'s
+`cycles_per_byte()` derive their period from the runtime clock. The result is the model that was
+wanted all along: **only the CPU gets more cycles per blank; the rest of the console keeps its own
+timing.**
+
+Measured after the fix: audio is 1,316,739 samples in 29.857 s at 200 MHz and 1,319,287 in 29.912 s
+at 300 — both 44,100/s (it was ~66,150 before). A new runtime case runs one second of scheduler time
+at each clock and checks the timer reading is identical, and that it really counted 12.5 million
+ticks, so this cannot come back unnoticed.
+
+The lesson worth keeping: an overclock is only correct if *every* device that converts a real-time
+rate into cycles is enumerated, not just the ones that obviously look like they do.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

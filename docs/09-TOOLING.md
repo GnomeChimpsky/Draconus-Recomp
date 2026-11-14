@@ -65,10 +65,12 @@ everything the window can do is also reachable from the command line:
 |---|---|---|
 | Graphics | resolution | `--scale 1..4` (also the window size) |
 | | widescreen | `--aspect 16:9`, `21:9`, `W:H` |
-| | fullscreen | `--fullscreen` |
+| | display mode | `--display windowed/borderless/exclusive` (`--fullscreen` = borderless) |
 | | present rate | `--present-rate 60/120/144` (capped to the display's refresh) |
+| | frame interpolation | `--frame-interpolation` (at 120/144 Hz, experimental) |
 | | VSync off | `--present-mode immediate` |
 | | frame counter | `--fps` |
+| | CPU clock | `--sh4-clock 200..800` (MHz; 200 is the console, more cycles per frame) |
 | Audio | sound off | `--no-audio` |
 | | record to WAV | `--wav FILE` |
 | Gameplay | interpreter | `--interpret` |
@@ -78,6 +80,41 @@ Settings persist in `%APPDATA%\DraconusRecomp\launcher.json`. `--selftest` check
 setting produces without opening a window; `--smoke` (optionally `--shot FILE`) builds the window and
 exits, which is also how the layout is reviewed. The tabs are one table (`TABS`) plus their keys in
 `DEFAULTS`, so a new option is a few lines rather than new layout code.
+
+## Audio checks (M6)
+
+`tools/audio-check.py` measures WAV captures with numpy/scipy: format and level, a per-second RMS
+table, non-silent runs, octave-band levels, dominant peaks and spectral correlation. It also converts
+the raw PCM that Flycast's SDL disk driver writes.
+
+```powershell
+python tools\audio-check.py info      work\m6\ours_10min.wav
+python tools\audio-check.py align     work\m6\flycast_90s.wav work\m6\ours_90s.wav
+python tools\audio-check.py compare   work\m6\flycast_90s.wav work\m6\ours_90s.wav --gate
+python tools\audio-check.py gaps      work\m6\ours_10min.wav --reference work\m6\flycast_10min.wav --gate
+python tools\audio-check.py raw2wav   work\fc.raw work\fc.wav
+```
+
+The ten-second comparison aligns the two captures from their loudness envelopes, refines to the
+sample, then reports sample correlation, sample difference in 16-bit LSB, per-frame spectral
+correlation, octave-band differences, dominant-peak agreement and spectral centroid. The gate is
+`--gate`; without it the command only reports.
+
+`tools/m6-check.ps1` runs the whole milestone: it captures our 90 s and 600 s runs, captures the
+Flycast reference if it is missing, and calls `compare` and `gaps --reference`. The reference
+capture uses `tools/flycast-m6.ps1`, which drives Flycast with its Lua scripting and records through
+SDL's disk audio driver:
+
+```powershell
+tools\flycast-m6.ps1 -Seconds 600 -Out work\m6\flycast_10min.wav
+tools\m6-check.ps1
+```
+
+`SDL_AUDIODRIVER=disk` plus `SDL_DISKAUDIOFILE` makes Flycast write raw s16le stereo 44.1 kHz; no
+loopback device and no system sound is involved. The generated Lua file presses START at guest frame
+1800 and A at 2100, waits 30 frames per press, and exits at the requested frame. The schedule gives
+Flycast's slower boot and longer title screen time to settle before the same menus/gameplay ours
+reaches at frames 1150 and 1400.
 
 ## Engine build (already staged under `engine/`)
 

@@ -4,11 +4,23 @@
 #   .\play-draconus.ps1 -Scale 2           # 1280x960 window
 #   .\play-draconus.ps1 -Scale 4 -Widescreen -Fullscreen   # 2560x1440 full screen
 #   .\play-draconus.ps1 -Interpret         # the development interpreter, for comparison
+#   .\play-draconus.ps1 -Vmu .\card.vmu    # attach a particular memory card
 #   .\play-draconus.ps1 --max-frames 600   # extra args pass straight through
 #
 # Both paths run the game (docs/ENGINE-CHANGES.md). The translated path is the default because it
 # is the faster one (1.2x real time headless, about 0.8x windowed at 1,800 frames, against the
 # interpreter's 0.25x) and the two agree frame for frame (tools\parity-check.ps1).
+#
+# A windowed run always has a memory card: the per-user card for this title, created blank and
+# formatted on the first run, so the game's save and load screens work with no setup. The
+# launcher's Saves tab manages cards and can boot straight into a chosen save.
+#
+# PositionalBinding=$false is what makes the last line above true. Without it PowerShell binds an
+# argument it does not recognise to the first declared parameter that takes one, so
+# `--max-frames 600` became `-Scale` and failed to convert, and `-Scale 2 --fps` would have been
+# quietly swallowed by `-Aspect`. Every setting below is therefore named only, and everything the
+# script does not recognise goes to the engine as written.
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [switch]$Interpret,
     [switch]$Translated,
@@ -19,14 +31,25 @@ param(
     # -Aspect takes any ratio, for example 21:9.
     [switch]$Widescreen,
     [string]$Aspect = "",
+    # -DisplayMode: windowed (default), borderless (desktop fullscreen at the display's own size)
+    # or exclusive (a fullscreen display mode, which can change the panel's refresh timing). A
+    # system that refuses exclusive falls back to borderless.
+    [ValidateSet("windowed", "borderless", "exclusive")][string]$DisplayMode = "windowed",
     # -Fullscreen: fill the display at its own size instead of opening the window the scale names.
     [switch]$Fullscreen,
     # -PresentRate 120: present the display at that rate while the game logic keeps running at
-    # 60 Hz. The extra presents repeat the current image; 0 leaves one present per game frame.
+    # 60 Hz. The extra presents repeat the current image unless -Interpolate asks for the geometry
+    # between the two frames to be drawn instead.
     [int]$PresentRate = 0,
+    # -Interpolate: with a present rate above 60, draw the frame between the two guest frames
+    # instead of repeating one. The guest and the game speed are untouched; 2D screens and frames
+    # whose strips changed keep the current picture.
+    [switch]$Interpolate,
+    # -Vmu FILE: attach this 128 KB card image. Without it the default per-user card is used
+    # (%APPDATA%\dream-recomp\saves\draconus\vmu_a1.bin), created on the first run.
+    [string]$Vmu = "",
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$Extra
 )
-
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $exe = Join-Path $root "engine\build-render\games\draconus\draconus_boot.exe"
@@ -64,6 +87,9 @@ $ratio = if ($Aspect) { $Aspect } elseif ($Widescreen) { "16:9" } else { "" }
 if ($ratio) { $arguments += @("--aspect", $ratio) }
 if ($Fullscreen) { $arguments += "--fullscreen" }
 if ($PresentRate -gt 0) { $arguments += @("--present-rate", "$PresentRate") }
+if ($Interpolate) { $arguments += "--frame-interpolation" }
+if ($DisplayMode -ne "windowed") { $arguments += @("--display", $DisplayMode) }
+if ($Vmu) { $arguments += @("--vmu", $Vmu) }
 if ($Interpret -and -not $Translated) { $arguments += "--interpret" }
 if ($Extra) { $arguments += $Extra }
 

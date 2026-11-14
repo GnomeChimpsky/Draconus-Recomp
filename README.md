@@ -17,13 +17,16 @@ not vendored here.
 
 ## Where the work stands
 
-Audio baseline: `docs/13-M6-AUDIO-BASELINE.md` (what plays, what does not, and why).
+Audio (M6) is verified against Flycast: `docs/13-M6-AUDIO-BASELINE.md` has the captures, the
+spectral match and the ten-minute dropout run. `tools\m6-check.ps1` reruns the gate.
 
 
 `docs/12-HANDOVER.md` is the state of play: what works, what does not, the list of local
 engine changes, and the next three tasks. The engine-side findings are in
 `docs/UPSTREAM-REPORT.md` (one proposed fix, one fixed harness bug, one open fault), and
 `docs/ENGINE-CHANGES.md` is the running ledger with every trace and dead end.
+`docs/17-VMU-SAVES.md` covers the virtual memory card: where the per-user card lives, what
+`tools\vmu.py` reads, and how the launcher boots into a chosen save.
 
 ## From a fresh clone
 
@@ -64,6 +67,16 @@ tools\parity-check.ps1
 ```
 
 It passes when the stop reason, frame count, PVR/Maple counters and the screenshot are identical.
+
+The audio gate is one command. It compares ten seconds of spectra and ten minutes of dropouts
+against Flycast, capturing whichever side is missing:
+
+```powershell
+tools\m6-check.ps1
+```
+
+`tools\flycast-m6.ps1` makes the Flycast reference on its own; `tools\audio-check.py` has the
+individual `info`, `align`, `compare`, `gaps` and `raw2wav` commands.
 
 ## Graphical launcher
 
@@ -114,18 +127,42 @@ remaining work.
 Controls: arrows = d-pad, `Z` `X` `A` `S` = A, B, X, Y, Enter = Start, `Q`/`W` = triggers,
 `F1` rebinds, `F10` frame counter, `F12` screenshot, Escape quits.
 
+**Saves.** A windowed run always has a virtual VMU: the per-user card for this title,
+`%APPDATA%\dream-recomp\saves\draconus\vmu_a1.bin`, created blank and formatted on the first run.
+It is the standard 128 KB Dreamcast card image, so a save made here opens in Flycast and a card
+from Flycast or another emulator opens here — point `-Vmu <card>` at an existing one to use it
+instead. Writes go back to the file as the game saves, and a file that is not a card is refused
+rather than overwritten. `python tools\vmu.py <card>` lists what a card holds, and
+`python tools\vmu.py --new <card>` makes a blank one. Headless runs stay card-less unless `--vmu`
+is passed, because a card answers Maple frames and would change their traces.
+
+The launcher's **Saves** tab shows the cards and the save files on them, and **Launch straight into
+a save** boots the game, walks its own Load Game screens to the selected file and loads it. Nothing
+about the save is faked: the game loads it through its normal path.
+
 **Display.** `-Widescreen` gives hor+ at 16:9: the game's projection is widened and 3D frames are
-presented stretched, so more of the world is visible horizontally and nothing is distorted. Menus,
-the title and loading cards are flat 2D art, keep their 4:3 shape and are pillarboxed inside the
-wide window. `-Aspect 21:9` takes any ratio, `-Scale 2` draws at twice the guest's resolution and
-opens the window at that size (4x at 16:9 is 2560x1440, shrunk to fit a smaller screen),
-`-Fullscreen` fills the display instead of opening a window, and `-PresentRate 120` presents the
-display at up to that rate while the game logic keeps its 60 Hz (the extra presents repeat the
-current image; a slower display caps the rate instead of slowing the game down).
+presented stretched, so more of the world is visible horizontally and nothing is distorted. The HUD
+is screen-space art rather than projected geometry, so it is compressed by the same factor before
+that stretch and keeps its shape and its place (the health bar stays centred, the compass in the
+corner). Menus, the title and loading cards are flat 2D art, keep their 4:3 shape and are
+pillarboxed inside the wide window. `-Aspect 21:9` takes any ratio, `-Scale 2` draws at twice the guest's resolution and
+opens the window at that size (4x at 16:9 is 2560x1440, shrunk to fit a smaller screen), and
+`-DisplayMode` chooses **windowed**, **borderless** (desktop fullscreen at the display's own size,
+which changes no display mode) or **exclusive** (one of the display's fullscreen modes, which can
+change the panel's refresh; a system that refuses it falls back to borderless). `-PresentRate 120`
+presents the display at up to that rate while the game logic keeps its 60 Hz (the extra presents
+repeat the current image; a slower display caps the rate instead of slowing the game down).
+`-Interpolate` turns the repeats into drawn intermediate frames: the geometry between the two 60 Hz
+submissions is rendered, so motion is smooth without changing game speed. Menus, movies and frames
+whose strips changed keep the current picture.
 
 **Controllers.** A pad works on first plug-in: the left stick is the Dreamcast analogue stick, the
 face buttons are A/B/X/Y, the d-pad is the d-pad, Start is Start, the shoulders are C and Z, and the
-triggers are L and R. Pads SDL knows are mapped automatically; a generic pad that arrives as a raw
+triggers are L and R. A jump pack is always attached, so the game's rumble reaches the pad's own
+rumble motors: the pack's single motor is played on both of a pad's motors at the strength and for
+the duration the game asked for, and a stop stops them immediately. Draconus ships with that pack
+switched off in its own settings, so enable **Options → JUMPPACK → PACK ON**; highlighting that row
+plays a short test burst, which is the quickest way to confirm the pad is being reached. Pads SDL knows are mapped automatically; a generic pad that arrives as a raw
 joystick gets the standard DirectInput layout instead (anything wrong can be rebound in `F1`). The
 launcher prints which devices it found at start (`input: KEYBOARD, <pad>`), a pad can be plugged in
 while the game runs, and `DREAM_INPUT_TRACE=1` prints the state the guest receives whenever it
@@ -139,12 +176,19 @@ device as `XINPUT`.
 artwork on the left, and Graphics, Audio and Gameplay tabs on the right.
 
 * **Graphics** -- internal resolution (1x to 4x, which is also the window size: 4x at 16:9 is
-  2560x1440), widescreen (off, 16:9, 21:9 or a custom ratio, hor+), fullscreen at the display's own
-  size, present rate (60/120/144 Hz against the fixed 60 Hz logic, capped to the display's refresh),
-  VSync and the frame counter.
+  2560x1440), widescreen (off, 16:9, 21:9 or a custom ratio, hor+), display mode (windowed,
+  borderless or exclusive fullscreen), present rate (60/120/144 Hz against the fixed 60 Hz logic,
+  capped to the display's refresh), frame interpolation for the extra presents (experimental, only
+  at 120/144 Hz), VSync, the frame counter and the CPU clock (200 MHz is the console; more is an
+  overclock that gives a heavy scene more cycles inside each frame, and can affect game speed and
+  audio on some titles).
 * **Audio** -- sound on/off, and recording the audio to a WAV file.
 * **Gameplay** -- translated or interpreter engine path, the frame limiter, the controller bindings
   file, and the game disc.
+* **Saves** -- the memory card the game gets (the per-user card by default, or any 128 KB image),
+  the save files on it with their timestamps and block counts, **New...** to make a formatted
+  blank one, and **Launch straight into a save** to load the selected file on Play instead of
+  stopping at the title screen.
 
 The tabs are described by one table in the script (`TABS`) plus their keys in `DEFAULTS`, so adding
 an option is a few lines rather than new layout code. Settings persist under
@@ -193,9 +237,14 @@ memory finished the job (`docs/ENGINE-CHANGES.md`). Building now takes about fiv
 the generated C++ is ~100 MB; if a later scene is still slow, `tools\diagnose-speed.bat` names the
 hotspots.
 
-Audio works in menus and gameplay but not on the title screen, and the title's silence is
-unexplained (`docs/13-M6-AUDIO-BASELINE.md`). Visual comparison against Flycast has started:
-the title screen matches apart from VMU state and aspect (`docs/14-M3-M6-FLYCAST-REFERENCE.md`).
+**Audio (M6) is done.** Flycast's SDL disk driver gives a digital oracle, so the comparison is a WAV
+diff rather than a loopback recording. Ten seconds of menu music after START match at **1.0000
+sample correlation**, identical dominant peaks and octave-band levels within **0.01 dB**; the title
+screen is **silent in Flycast too**, so our title silence is correct. A **600-second** run has seven
+silent runs and every one is also silent in Flycast (the long ones are the game's attract-mode
+gaps), with no dropouts (`docs/13-M6-AUDIO-BASELINE.md`). Visual comparison against Flycast has
+started: the title screen matches apart from VMU state and aspect
+(`docs/14-M3-M6-FLYCAST-REFERENCE.md`).
 
 The engine fixes developed here are listed in `docs/UPSTREAM-REPORT.md`: hook dispatch at the
 interpreter's fetch boundary, an instruction-level tracer, a `--replay` false-positive fix that

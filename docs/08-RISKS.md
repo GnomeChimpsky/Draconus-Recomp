@@ -90,6 +90,10 @@ tests.
 ADPCM loop behaviour. Getting registers "close enough" produces silence or artefacts.
 
 **Mitigation:** M6 is isolated; compare against Flycast spectra; use WAV capture diffs.
+**Resolved for this title (2026-11-14):** Flycast's SDL disk audio driver gives a digital reference;
+10 s of music matches at 1.0000 sample correlation and 0.01 dB per octave, and a 600 s run has no
+gap that is not also silent in Flycast. See `docs/13-M6-AUDIO-BASELINE.md`. CD-audio (CDDA) and the
+AICA register-to-wave-memory DMA remain unimplemented, but this title uses neither.
 
 ## 7. Dump validity and scope (low, checkable)
 
@@ -105,7 +109,9 @@ in Flycast before M2; keep the CHD as a cross-check (needs `chdman`).
 be tied to the 4:3 frustum. Every reference port reports per-scene fixes.
 
 **Mitigation:** M9 only; keep "Original" profile provably untouched; add HUD anchors
-per element rather than globally stretching.
+per element rather than globally stretching. Patch 027 does the second part: the screen-space HUD
+and text are compressed about their own centre/edge before the presenter stretches the 3D frame, so
+each element keeps its shape and place at 16:9. The frontend is pillarboxed instead.
 
 ## 9. Legal (medium)
 

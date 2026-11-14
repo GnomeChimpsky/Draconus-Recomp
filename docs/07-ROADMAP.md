@@ -72,11 +72,22 @@ the tool for any new divergence; it is described in `docs/UPSTREAM-REPORT.md`.
 Use the engine's Flycast oracle to compare the first cycles and identify which
 register or entry assumption differs, before translating more of the binary.
 
+### M6 — done (2026-11-14)
+
+Flycast's SDL2 audio backend can write to SDL's disk driver, so the project now has a digital audio
+oracle (`tools/flycast-m6.ps1`). Ten seconds of menu music after START match ours at sample
+correlation 1.0000 (RMS difference 1.1 LSB, worst 5 LSB), identical dominant peaks, and octave-band
+levels within 0.01 dB. Flycast is silent on the title screen too, so the baseline's title silence is
+correct behaviour, not a missing cue. A 600-second run has seven silent runs and every one is also
+silent in Flycast at the same point; the long ones are the game's own attract-mode gaps. The gate and
+the measurements are in `docs/13-M6-AUDIO-BASELINE.md`; `tools/m6-check.ps1` reruns it.
+
 ### M3–M7 — fidelity
 
 Order is deliberate: boot, then frontend, then one level, then audio, then everything.
 Audio is late because the ARM7 program is the most self-contained subsystem and its
-failure mode (silence) does not block visual parity.
+failure mode (silence) does not block visual parity. M6 is now done; M3's remaining clause
+is a like-for-like Flycast frame comparison, and M4/M5/M7 continue on input and coverage.
 
 ### M8–M10 — product
 
