@@ -1,0 +1,440 @@
+diff --git a/render/include/dream/render/input.h b/render/include/dream/render/input.h
+index 9727846..b9afcf4 100644
+--- a/render/include/dream/render/input.h
++++ b/render/include/dream/render/input.h
+@@ -15,6 +15,7 @@
+ #include <cstdint>
+ #include <string>
+ #include <string_view>
++#include <vector>
+ 
+ namespace dream::render {
+ 
+@@ -94,4 +95,30 @@ struct Bindings {
+     static Bindings from_text(std::string_view text, std::string* warnings = nullptr);
+ };
+ 
++// How the title is played. Classic is the Dreamcast pad layout; Modern is the optional twin-stick
++// layout: left stick strafes and moves, right stick turns, the left trigger blocks and the right
++// trigger attacks. The preset is a layer over the player's own bindings, not a separate file, so F1
++// keeps editing the player's layout and switching presets does not lose it.
++enum class InputPreset : unsigned { Classic, Modern };
++
++// A second physical source for one guest control. The binding model otherwise has exactly one
++// source per control, which is why Modern needs this: A must stay on the A button *and* answer the
++// left trigger, and X must stay on the X button *and* answer the right trigger.
++struct ExtraBinding {
++    PadControl control = PadControl::Count;
++    Binding binding;
++};
++
++// What the window resolves for a poll. `gamepad` is the player's set after the preset's overrides;
++// `extra_gamepad` holds the controls that answer to a second physical input.
++struct EffectiveBindings {
++    DeviceBindings keyboard;
++    DeviceBindings gamepad;
++    std::vector<ExtraBinding> extra_gamepad;
++};
++
++// Classic returns the player's sets untouched. Modern overrides only the gamepad stick and trigger
++// controls and adds the A/X extras; every other control, and the whole keyboard set, is left alone.
++EffectiveBindings effective_bindings(const Bindings& base, InputPreset preset);
++
+ }  // namespace dream::render
+diff --git a/render/include/dream/render/vk/window.h b/render/include/dream/render/vk/window.h
+index 55f7c37..5e957a5 100644
+--- a/render/include/dream/render/vk/window.h
++++ b/render/include/dream/render/vk/window.h
+@@ -119,6 +119,12 @@ public:
+     void set_bindings(const Bindings& b);
+     const Bindings& bindings() const noexcept { return bindings_; }
+ 
++    // Classic is the Dreamcast layout. Modern layers the twin-stick/trigger preset over the
++    // player's gamepad set without changing it: F1 still edits the base layout, and switching back
++    // to Classic restores it exactly.
++    void set_input_preset(InputPreset preset);
++    InputPreset input_preset() const noexcept { return preset_; }
++
+     bool pad_held(PadControl c) const noexcept;
+     bool pad_pressed(PadControl c) const noexcept;
+     // 0 to 1. A digital source reads 1 while held, except that a trigger with the ramp enabled
+@@ -196,9 +202,15 @@ private:
+         int code = 0;
+         int sign = 1;
+     };
++    struct ExtraResolved {
++        PadControl control = PadControl::Count;
++        Resolved source;
++    };
+     Bindings bindings_;
++    InputPreset preset_ = InputPreset::Classic;
+     Resolved key_[kPadControlCount]{};
+     Resolved gpad_[kPadControlCount]{};
++    std::vector<ExtraResolved> extra_gpad_;
+     bool pad_held_[kPadControlCount]{};
+     bool pad_pressed_[kPadControlCount]{};
+     float pad_value_[kPadControlCount]{};
+diff --git a/render/src/input.cpp b/render/src/input.cpp
+index 6848380..56fb224 100644
+--- a/render/src/input.cpp
++++ b/render/src/input.cpp
+@@ -192,6 +192,26 @@ std::string Bindings::to_text() const {
+     return o.str();
+ }
+ 
++EffectiveBindings effective_bindings(const Bindings& base, InputPreset preset) {
++    EffectiveBindings out{base.keyboard, base.gamepad, {}};
++    if (preset != InputPreset::Modern)
++        return out;
++    auto axis = [](const char* name, int sign) { return Binding{BindSource::Axis, name, sign}; };
++    // The game's own movement is tank-like: stick Y is forward/back, stick X turns, and the
++    // triggers strafe. Modern moves the horizontal halves apart: the left stick's X drives the
++    // strafe triggers, the right stick's X drives the turn, and the left stick's Y stays forward
++    // and back. The right trigger is the attack button's second source, not a trigger any more.
++    out.gamepad[PadControl::LeftTrigger] = axis("leftx", -1);
++    out.gamepad[PadControl::RightTrigger] = axis("leftx", 1);
++    out.gamepad[PadControl::StickLeft] = axis("rightx", -1);
++    out.gamepad[PadControl::StickRight] = axis("rightx", 1);
++    out.gamepad[PadControl::StickUp] = axis("lefty", -1);
++    out.gamepad[PadControl::StickDown] = axis("lefty", 1);
++    out.extra_gamepad.push_back({PadControl::A, axis("lefttrigger", 1)});
++    out.extra_gamepad.push_back({PadControl::X, axis("righttrigger", 1)});
++    return out;
++}
++
+ Bindings Bindings::from_text(std::string_view text, std::string* warnings) {
+     // Start from the defaults rather than from nothing: a file that sets half the controls leaves
+     // the other half working, and a file that is complete nonsense leaves the game playable. A
+diff --git a/render/src/vk/window.cpp b/render/src/vk/window.cpp
+index 88cceec..f88c2b2 100644
+--- a/render/src/vk/window.cpp
++++ b/render/src/vk/window.cpp
+@@ -44,8 +44,8 @@ constexpr SDL_GamepadButton kNavButtons[static_cast<unsigned>(Control::Count)] =
+ // triggers, and hat 0 as the d-pad. It is close enough to play, and F1 rebinds it.
+ constexpr const char* kGenericPadBinds =
+     ",generic pad,a:b0,b:b1,x:b2,y:b3,back:b6,start:b7,leftshoulder:b4,rightshoulder:b5,"
+-    "dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,leftx:a0,lefty:a1,lefttrigger:a4,"
+-    "righttrigger:a5";
++    "dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,leftx:a0,lefty:a1,rightx:a2,righty:a3,"
++    "lefttrigger:a4,righttrigger:a5";
+ 
+ void map_unrecognised_pads() {
+     int ng = 0;
+@@ -681,36 +681,53 @@ void Window::refresh_devices() {
+ 
+ void Window::set_bindings(const Bindings& b) {
+     bindings_ = b;
++    const EffectiveBindings effective = effective_bindings(bindings_, preset_);
+     // Names to codes once, here. Doing it per frame would mean a string lookup per control per
+     // frame, and would also mean a typo in the file costing performance rather than being noticed.
+-    auto resolve = [](const DeviceBindings& d, Resolved* out, bool keyboard) {
+-        for (unsigned i = 0; i < kPadControlCount; ++i) {
+-            const Binding& bind = d.b[i];
+-            out[i] = Resolved{};
+-            if (!bind.bound())
+-                continue;
+-            if (keyboard && bind.source == BindSource::Key) {
+-                const SDL_Scancode sc = SDL_GetScancodeFromName(bind.code.c_str());
+-                if (sc != SDL_SCANCODE_UNKNOWN)
+-                    out[i] = Resolved{BindSource::Key, static_cast<int>(sc), 1};
+-            } else if (!keyboard && bind.source == BindSource::Button) {
+-                const SDL_GamepadButton bt = SDL_GetGamepadButtonFromString(bind.code.c_str());
+-                if (bt != SDL_GAMEPAD_BUTTON_INVALID)
+-                    out[i] = Resolved{BindSource::Button, static_cast<int>(bt), 1};
+-            } else if (!keyboard && bind.source == BindSource::Axis) {
+-                const SDL_GamepadAxis ax = SDL_GetGamepadAxisFromString(bind.code.c_str());
+-                if (ax != SDL_GAMEPAD_AXIS_INVALID)
+-                    out[i] = Resolved{BindSource::Axis, static_cast<int>(ax), bind.sign};
+-            }
+-            // Anything that did not resolve stays unbound: an unknown name must not throw, and
+-            // must not silently become scancode 0, which is a real key.
++    auto resolve_one = [](const Binding& bind, bool keyboard) {
++        Resolved out{};
++        if (!bind.bound())
++            return out;
++        if (keyboard && bind.source == BindSource::Key) {
++            const SDL_Scancode sc = SDL_GetScancodeFromName(bind.code.c_str());
++            if (sc != SDL_SCANCODE_UNKNOWN)
++                out = Resolved{BindSource::Key, static_cast<int>(sc), 1};
++        } else if (!keyboard && bind.source == BindSource::Button) {
++            const SDL_GamepadButton bt = SDL_GetGamepadButtonFromString(bind.code.c_str());
++            if (bt != SDL_GAMEPAD_BUTTON_INVALID)
++                out = Resolved{BindSource::Button, static_cast<int>(bt), 1};
++        } else if (!keyboard && bind.source == BindSource::Axis) {
++            const SDL_GamepadAxis ax = SDL_GetGamepadAxisFromString(bind.code.c_str());
++            if (ax != SDL_GAMEPAD_AXIS_INVALID)
++                out = Resolved{BindSource::Axis, static_cast<int>(ax), bind.sign};
+         }
++        // Anything that did not resolve stays unbound: an unknown name must not throw, and must
++        // not silently become scancode 0, which is a real key.
++        return out;
++    };
++    auto resolve = [&resolve_one](const DeviceBindings& d, Resolved* out, bool keyboard) {
++        for (unsigned i = 0; i < kPadControlCount; ++i)
++            out[i] = resolve_one(d.b[i], keyboard);
+     };
+-    resolve(bindings_.keyboard, key_, true);
+-    resolve(bindings_.gamepad, gpad_, false);
++    resolve(effective.keyboard, key_, true);
++    resolve(effective.gamepad, gpad_, false);
++    extra_gpad_.clear();
++    for (const ExtraBinding& extra : effective.extra_gamepad) {
++        const Resolved source = resolve_one(extra.binding, false);
++        if (source.source != BindSource::None)
++            extra_gpad_.push_back({extra.control, source});
++    }
+     SDL_ClearError();
+ }
+ 
++void Window::set_input_preset(InputPreset preset) {
++    if (preset_ == preset)
++        return;
++    preset_ = preset;
++    // Re-resolve against the same player layout rather than trying to undo the previous override.
++    set_bindings(bindings_);
++}
++
+ void Window::begin_capture() noexcept {
+     capturing_ = true;
+     captured_ = false;
+@@ -827,6 +844,37 @@ bool Window::poll() {
+     dt = std::clamp(dt, 0.0f, 0.25f);  // a long stall must not jump the ramp to full
+ 
+ const float dead = static_cast<float>(bindings_.deadzone_percent) / 100.0f;
++    // A second physical source for a guest control (the Modern preset's A-on-LT and X-on-RT).
++    // Evaluated exactly like the primary gamepad source, and only while not capturing, so binding
++    // a key cannot also drive the control it is being bound to.
++    auto sample_extra = [&](const Resolved& source, bool& digital_on, float& analogue) {
++        if (source.source == BindSource::Button) {
++            for (SDL_Gamepad* g : pads_)
++                if (g && SDL_GetGamepadButton(g, static_cast<SDL_GamepadButton>(source.code))) {
++                    digital_on = true;
++                    break;
++                }
++        } else if (source.source == BindSource::Axis) {
++            for (SDL_Gamepad* g : pads_) {
++                if (!g)
++                    continue;
++                const float raw = static_cast<float>(SDL_GetGamepadAxis(
++                                      g, static_cast<SDL_GamepadAxis>(source.code))) /
++                                  32767.0f;
++                const float half = source.sign < 0 ? -raw : raw;
++                // Triggers are not sticks. This pad reports 96/255 (0.38) at rest, which is above
++                // the stick dead zone, so treating a trigger like a stick left block and attack
++                // held permanently. A trigger has to pass half travel to count as pressed.
++                const bool trigger_axis =
++                    source.code == static_cast<int>(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) ||
++                    source.code == static_cast<int>(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
++                const float threshold = trigger_axis ? std::max(dead, 0.5f) : dead;
++                if (half > threshold)
++                    analogue = std::max(
++                        analogue, std::min(1.0f, (half - threshold) / (1.0f - threshold)));
++            }
++        }
++    };
+ #if defined(_WIN32)
+     // XInput only when SDL has no gamepad at all: a pad SDL sees is already read below, and taking
+     // it twice would apply the dead zone twice and fight itself.
+@@ -857,15 +905,46 @@ const float dead = static_cast<float>(bindings_.deadzone_percent) / 100.0f;
+                 if (raw > dead)
+                     xin_analogue[static_cast<unsigned>(pos)] = (raw - dead) / (1.0f - dead);
+             };
+-            axis(p.thumb_lx, PadControl::StickLeft, PadControl::StickRight);
+-            // XInput's Y is the one axis that does not follow the screen: positive is *up*. SDL
+-            // negates it for its own convention for the same reason, so the halves swap here or
+-            // pushing forward walks backwards.
+-            axis(p.thumb_ly, PadControl::StickDown, PadControl::StickUp);
+-            xin_analogue[static_cast<unsigned>(PadControl::LeftTrigger)] =
+-                static_cast<float>(p.left_trigger) / 255.0f;
+-            xin_analogue[static_cast<unsigned>(PadControl::RightTrigger)] =
+-                static_cast<float>(p.right_trigger) / 255.0f;
++            if (preset_ == InputPreset::Classic) {
++                axis(p.thumb_lx, PadControl::StickLeft, PadControl::StickRight);
++                // XInput's Y is the one axis that does not follow the screen: positive is *up*.
++                // SDL negates it for its own convention for the same reason, so the halves swap
++                // here or pushing forward walks backwards.
++                axis(p.thumb_ly, PadControl::StickDown, PadControl::StickUp);
++                xin_analogue[static_cast<unsigned>(PadControl::LeftTrigger)] =
++                    static_cast<float>(p.left_trigger) / 255.0f;
++                xin_analogue[static_cast<unsigned>(PadControl::RightTrigger)] =
++                    static_cast<float>(p.right_trigger) / 255.0f;
++            } else {
++                // The Modern layer, for the XInput fallback. It is the same remap
++                // effective_bindings() gives the SDL path, expressed directly: the left stick's X
++                // drives the strafe triggers, the right stick's X drives turning, the left stick's
++                // Y stays forward/back, and the two triggers join A and X.
++                auto half = [&](int v, bool negative) {
++                    const float raw = static_cast<float>(v) / 32767.0f;
++                    const float amount = negative ? -raw : raw;
++                    return amount > dead
++                               ? std::min(1.0f, (amount - dead) / (1.0f - dead))
++                               : 0.0f;
++                };
++                xin_analogue[static_cast<unsigned>(PadControl::LeftTrigger)] =
++                    half(p.thumb_lx, true);
++                xin_analogue[static_cast<unsigned>(PadControl::RightTrigger)] =
++                    half(p.thumb_lx, false);
++                xin_analogue[static_cast<unsigned>(PadControl::StickLeft)] =
++                    half(p.thumb_rx, true);
++                xin_analogue[static_cast<unsigned>(PadControl::StickRight)] =
++                    half(p.thumb_rx, false);
++                xin_analogue[static_cast<unsigned>(PadControl::StickUp)] =
++                    half(p.thumb_ly, false);
++                xin_analogue[static_cast<unsigned>(PadControl::StickDown)] =
++                    half(p.thumb_ly, true);
++                const float trigger_threshold = std::max(dead, 0.5f);
++                if (static_cast<float>(p.left_trigger) / 255.0f > trigger_threshold)
++                    xin_digital[static_cast<unsigned>(PadControl::A)] = true;
++                if (static_cast<float>(p.right_trigger) / 255.0f > trigger_threshold)
++                    xin_digital[static_cast<unsigned>(PadControl::X)] = true;
++            }
+         }
+     }
+ #endif
+@@ -900,6 +979,9 @@ const float dead = static_cast<float>(bindings_.deadzone_percent) / 100.0f;
+                     }
+                 }
+             }
++            for (const ExtraResolved& extra : extra_gpad_)
++                if (static_cast<unsigned>(extra.control) == i)
++                    sample_extra(extra.source, digital_on, analogue);
+         }
+ 
+ #if defined(_WIN32)
+diff --git a/render/tests/test_input.cpp b/render/tests/test_input.cpp
+index b46d2cc..9e5e731 100644
+--- a/render/tests/test_input.cpp
++++ b/render/tests/test_input.cpp
+@@ -109,3 +109,39 @@ TEST_CASE("a silly dead zone is clamped, not obeyed") {
+     CHECK(Bindings::from_text("deadzone = 5000\n").deadzone_percent == 90);
+     CHECK(Bindings::from_text("deadzone = -3\n").deadzone_percent == 0);
+ }
++
++TEST_CASE("modern controls change only the gamepad sticks, triggers and the A/X extras") {
++    const Bindings base = Bindings::defaults();
++
++    const EffectiveBindings classic = effective_bindings(base, InputPreset::Classic);
++    for (unsigned i = 0; i < kPadControlCount; ++i) {
++        const auto c = static_cast<PadControl>(i);
++        CHECK(classic.gamepad[c] == base.gamepad[c]);
++        CHECK(classic.keyboard[c] == base.keyboard[c]);
++    }
++    CHECK(classic.extra_gamepad.empty());
++
++    const EffectiveBindings modern = effective_bindings(base, InputPreset::Modern);
++    // The left stick's horizontal half drives strafing, the right stick's drives turning, and the
++    // left stick's vertical half stays forward/back.
++    CHECK(modern.gamepad[PadControl::LeftTrigger].text() == "axis:leftx-");
++    CHECK(modern.gamepad[PadControl::RightTrigger].text() == "axis:leftx+");
++    CHECK(modern.gamepad[PadControl::StickLeft].text() == "axis:rightx-");
++    CHECK(modern.gamepad[PadControl::StickRight].text() == "axis:rightx+");
++    CHECK(modern.gamepad[PadControl::StickUp].text() == "axis:lefty-");
++    CHECK(modern.gamepad[PadControl::StickDown].text() == "axis:lefty+");
++    // A and X keep their own bindings; the triggers join them rather than replacing them.
++    CHECK(modern.gamepad[PadControl::A] == base.gamepad[PadControl::A]);
++    CHECK(modern.gamepad[PadControl::X] == base.gamepad[PadControl::X]);
++    CHECK(modern.gamepad[PadControl::B] == base.gamepad[PadControl::B]);
++    REQUIRE(modern.extra_gamepad.size() == 2);
++    CHECK(modern.extra_gamepad[0].control == PadControl::A);
++    CHECK(modern.extra_gamepad[0].binding.text() == "axis:lefttrigger+");
++    CHECK(modern.extra_gamepad[1].control == PadControl::X);
++    CHECK(modern.extra_gamepad[1].binding.text() == "axis:righttrigger+");
++    // The keyboard is not part of the pad preset.
++    for (unsigned i = 0; i < kPadControlCount; ++i) {
++        const auto c = static_cast<PadControl>(i);
++        CHECK(modern.keyboard[c] == base.keyboard[c]);
++    }
++}
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index 7a5e805..3da0e28 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -1403,6 +1403,10 @@ struct Live {
+             std::printf("bindings: %s\n", bindings_path.c_str());
+         }
+         window.set_bindings(b);
++        window.set_input_preset(modern_controls ? dream::render::InputPreset::Modern
++                                                : dream::render::InputPreset::Classic);
++        if (modern_controls)
++            std::printf("controls: modern (left stick strafe, right stick turn, LT block, RT attack)\n");
+     }
+ 
+     bool save_bindings() const {
+@@ -1629,6 +1633,9 @@ struct Live {
+     // usable, or SDL could not name a settings directory on this host.
+     std::string bindings_path;
+     bool bindings_dirty = false;  // changed since the screen was opened
++    // --controls modern: a layer over the gamepad bindings, not a replacement for the file. F1
++    // keeps editing the player's layout, and the preset is re-applied whenever it is saved.
++    bool modern_controls = false;
+     // Escape closes the screen and also quits: quit stays disarmed until the key comes back up.
+     bool rearm_escape = false;
+     // --screenshot-at N / --capture-at N: the same thing F12 and F11 do, at the Nth presented
+@@ -2167,6 +2174,10 @@ void usage(const char* argv0, std::FILE* out) {
+         "  --present-mode M       vsync (default), mailbox or immediate. The default paces the\n"
+         "                         whole run to the panel, so --unthrottled with a window measures\n"
+         "                         the refresh rate rather than the emulator.\n"
++        "  --controls MODE        classic (default) or modern. Modern is the twin-stick layer:\n"
++        "                         the left stick strafes and still moves forward/back, the right\n"
++        "                         stick turns, LT blocks and RT attacks. A and X keep their own\n"
++        "                         bindings too; menus use the right stick or the d-pad.\n"
+         "  --bindings FILE        controller bindings; the default is one file per user, shared\n"
+         "                         by every title. F1 (or a pad's select button) opens the screen\n"
+         "                         that edits them, and writes them back here.\n"
+@@ -2279,6 +2290,9 @@ int main(int argc, char** argv) {
+     // the host's per-user settings directory, so one layout follows the player across every title.
+     std::string bindings_file;
+     bool bindings_file_set = false;
++    // --controls modern: layer the twin-stick preset over the player's gamepad bindings. The base
++    // layout is untouched, so F1 still edits it and Classic restores it exactly.
++    bool modern_controls = false;
+     std::string flash_dump;           // --dump-flash FILE: write the flash out at the stop, so a
+                                       // synthesised one can be compared against a reference.
+     std::string bios_image;           // --bios FILE: the owner's 2 MB boot ROM. Only its data is
+@@ -2465,6 +2479,16 @@ int main(int argc, char** argv) {
+         } else if (!std::strcmp(argv[i], "--bindings") && i + 1 < argc) {
+             bindings_file = argv[++i];
+             bindings_file_set = true;
++        } else if (!std::strcmp(argv[i], "--controls") && i + 1 < argc) {
++            const char* mode = argv[++i];
++            if (!std::strcmp(mode, "modern")) {
++                modern_controls = true;
++            } else if (!std::strcmp(mode, "classic")) {
++                modern_controls = false;
++            } else {
++                std::fprintf(stderr, "--controls: expected classic or modern, got \"%s\"\n", mode);
++                return 2;
++            }
+         } else if (!std::strcmp(argv[i], "--bios") && i + 1 < argc) {
+             bios_image = argv[++i];
+         } else if (!std::strcmp(argv[i], "--flash") && i + 1 < argc) {
+@@ -3008,6 +3032,7 @@ int main(int argc, char** argv) {
+         // After the window, because resolving a binding's name to a code needs SDL initialised.
+         live->bindings_path =
+             bindings_file_set ? bindings_file : dream::render::vk::default_bindings_path();
++        live->modern_controls = modern_controls;
+         live->load_bindings();
+         // A windowed run has pads to feel it through. Headless runs leave the handler empty, so
+         // tracing and parity are unaffected by whether the host can rumble.
+@@ -3110,9 +3135,11 @@ int main(int argc, char** argv) {
+             if (std::getenv("DREAM_INPUT_TRACE")) {
+                 static std::uint16_t last_buttons = 0xFFFF;
+                 static std::uint8_t last_joy_x = 0x80, last_joy_y = 0x80;
++                static std::uint8_t last_lt = 0, last_rt = 0;
+                 const auto& pad_state = pad_ptr->state;
+                 if (pad_state.buttons != last_buttons || pad_state.joy_x != last_joy_x ||
+-                    pad_state.joy_y != last_joy_y) {
++                    pad_state.joy_y != last_joy_y || pad_state.ltrigger != last_lt ||
++                    pad_state.rtrigger != last_rt) {
+                     std::printf("input: buttons 0x%04x joy %d,%d triggers %d,%d\n", pad_state.buttons,
+                                 static_cast<int>(pad_state.joy_x), static_cast<int>(pad_state.joy_y),
+                                 static_cast<int>(pad_state.ltrigger),
+@@ -3120,6 +3147,8 @@ int main(int argc, char** argv) {
+                     last_buttons = pad_state.buttons;
+                     last_joy_x = pad_state.joy_x;
+                     last_joy_y = pad_state.joy_y;
++                    last_lt = pad_state.ltrigger;
++                    last_rt = pad_state.rtrigger;
+                 }
+             }
+             if (unthrottled) {

@@ -179,6 +179,32 @@ a game-side one. `DREAM_VIRTUAL_PAD=1` attaches a synthetic pad (buttons, stick,
 the path can be exercised on a machine with no hardware; that is how the buttons and the stick were
 verified end to end here while no pad was attached.
 
+### Modern controls (2026-11-15)
+
+`--controls modern`, the launcher's **Controls** setting and `play-draconus.ps1 -ModernControls`
+layer a twin-stick preset over the player's gamepad bindings: left stick left/right strafes (up/down
+stays forward/back), right stick left/right turns, the left trigger blocks and the right trigger
+attacks. A remains A and X remains X; LT and RT are **additional** sources for them, so the game's
+own block/action and attack buttons still work. The two triggers are the only controls whose old
+strafing role is replaced; the rest of the pad and the whole keyboard set are untouched.
+
+The game already combines strafe and turn: with a scripted controller recording, forward,
+strafe-left, turn-left and forward+turn+strafe were captured at the same point in gameplay. The
+combined frame shows the strafe pose and the rotated camera, so both actions apply at once. The game
+also combines the trigger strafe with the stick turn on its own; the preset only changes which axis
+reaches which guest input.
+
+The preset is applied inside `Window`: `effective_bindings` in `render/input.cpp` returns the
+player's sets plus the overrides and two extra sources, and `Window::poll` evaluates the extras with
+the same dead zone as the primary binding. The XInput fallback gets the same remap directly. The
+generic DirectInput mapping also gains `rightx`/`righty`, which it had omitted; without them an
+unmapped pad's right stick was not visible to SDL. Trigger extras use a half-travel threshold
+rather than the stick dead zone: this pad's triggers rest at 96/255, so the first build held block
+and attack permanently. F1 still edits the player's layout, and Classic
+removes the layer. Because the game reads the analog stick for menus, the right stick (or the d-pad)
+moves menu cursors under Modern; and because LT is block, the game's both-triggers User Mode chord
+is no longer available as it was.
+
 **The menu crash, found while testing the pad (2026-11-12).** Navigating the main menu with a burst of
 d-pad presses (`--press "down@150,down@170,...,down@270"`) faults the translated build at frame 192,
 pc 0; the interpreter runs the same input cleanly. A single down press does not fault. The fault is

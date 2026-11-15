@@ -4,6 +4,7 @@
 #   .\play-draconus.ps1 -Scale 2           # 1280x960 window
 #   .\play-draconus.ps1 -Scale 4 -Widescreen -Fullscreen   # 2560x1440 full screen
 #   .\play-draconus.ps1 -Interpret         # the development interpreter, for comparison
+#   .\play-draconus.ps1 -ModernControls    # left stick strafe, right stick turn, LT block, RT attack
 #   .\play-draconus.ps1 -Vmu .\card.vmu    # attach a particular memory card
 #   .\play-draconus.ps1 --max-frames 600   # extra args pass straight through
 #
@@ -45,6 +46,10 @@ param(
     # instead of repeating one. The guest and the game speed are untouched; 2D screens and frames
     # whose strips changed keep the current picture.
     [switch]$Interpolate,
+    # -ModernControls: left stick strafes and still moves forward/back, right stick turns, the left
+    # trigger blocks and the right trigger attacks. A and X keep their own buttons too; menus use
+    # the right stick or the d-pad. The launcher exposes the same option as Controls > Modern.
+    [switch]$ModernControls,
     # -Vmu FILE: attach this 128 KB card image. Without it the default per-user card is used
     # (%APPDATA%\dream-recomp\saves\draconus\vmu_a1.bin), created on the first run.
     [string]$Vmu = "",
@@ -89,6 +94,7 @@ if ($Fullscreen) { $arguments += "--fullscreen" }
 if ($PresentRate -gt 0) { $arguments += @("--present-rate", "$PresentRate") }
 if ($Interpolate) { $arguments += "--frame-interpolation" }
 if ($DisplayMode -ne "windowed") { $arguments += @("--display", $DisplayMode) }
+if ($ModernControls) { $arguments += @("--controls", "modern") }
 if ($Vmu) { $arguments += @("--vmu", $Vmu) }
 if ($Interpret -and -not $Translated) { $arguments += "--interpret" }
 if ($Extra) { $arguments += $Extra }
@@ -98,6 +104,9 @@ if ($Interpret -and -not $Translated) {
     Write-Host "path: interpreter (the reference; the translated path is faster)"
 } else {
     Write-Host "path: translated (the fast configuration)"
+}
+if ($ModernControls) {
+    Write-Host "controls: modern (left stick strafe, right stick turn, LT block, RT attack)"
 }
 
 & $exe @arguments

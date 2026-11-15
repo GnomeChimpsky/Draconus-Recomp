@@ -125,7 +125,9 @@ renders, same controller traffic, byte-identical screenshots. See `docs/12-HANDO
 remaining work.
 
 Controls: arrows = d-pad, `Z` `X` `A` `S` = A, B, X, Y, Enter = Start, `Q`/`W` = triggers,
-`F1` rebinds, `F10` frame counter, `F12` screenshot, Escape quits.
+`F1` rebinds, `F10` frame counter, `F12` screenshot, Escape quits. `-ModernControls` (or the
+launcher's **Controls > Modern**) gives the pad a twin-stick layout: left stick strafes and still
+moves forward/back, right stick turns, the left trigger blocks and the right trigger attacks.
 
 **Saves.** A windowed run always has a virtual VMU: the per-user card for this title,
 `%APPDATA%\dream-recomp\saves\draconus\vmu_a1.bin`, created blank and formatted on the first run.
@@ -172,6 +174,17 @@ changes, which is the quickest way to tell a host problem from a game one. If SD
 because another driver has claimed it, the launcher falls back to XInput directly and lists the
 device as `XINPUT`.
 
+**Modern controls.** The Gameplay tab's **Controls** setting (or `play-draconus.ps1
+-ModernControls`) switches the pad to the optional twin-stick layout. The left stick's left/right
+movement strafes and its up/down still moves forward and back, the right stick turns, the left
+trigger blocks and the right trigger attacks. A still blocks/acts and X still attacks: the
+triggers are second sources for those buttons, not replacements. The left stick covers both strafe directions, so the
+old trigger strafes are gone from LT/RT; B, Y, Start, C, Z, the d-pad and the shoulders keep their
+Dreamcast meanings. The game reads its own analog stick for menus, so with Modern controls the right
+stick (or the d-pad) moves menu cursors; and because the left trigger is now block, the game's
+both-triggers **User Mode** chord is not available as it was. Modern is a layer over the player's
+bindings, not a separate file: `F1` still edits the base layout, and **Classic** restores it exactly.
+
 ## Launcher
 
 `tools\launcher.bat` (or `python tools\launcher.py`) opens the graphical launcher: the project's
@@ -188,7 +201,8 @@ tabs on the right.
 * **Audio** -- sound on/off, master volume, output device (the SDL playback devices, refreshed when
   the dropdown opens) and an audio buffer/latency choice. `--wav` still records the mixer's
   full-scale output regardless of the playback volume.
-* **Gameplay** -- translated or interpreter engine path, and the game disc.
+* **Gameplay** -- **Controls** (Classic Dreamcast pad, or Modern: left stick strafe, right stick
+  turn, LT block, RT attack), translated or interpreter engine path, and the game disc.
 * **Bottom bar** -- **Open saves folder** and **Open settings folder** open the per-user card's
   folder (`%APPDATA%\dream-recomp\saves\draconus`) and the launcher's own
   (`%APPDATA%\DraconusRecomp`). Saving and loading are the game's own, so there is no card setting

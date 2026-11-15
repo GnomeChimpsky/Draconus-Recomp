@@ -2556,6 +2556,61 @@ shafts and the HUD; after the fix every changed pixel is in the HUD, and the 3D 
 a 200 px particle at 0.2 and the wheel panel at 7.0: the particle stays put, the panel and its
 model move. The render suite passes 102/102 cases (1,925 assertions).
 
+## Patch 036: an optional modern control layer (2026-11-15)
+
+Draconus' own scheme is tank-like on one stick: analog Y moves forward/back, analog X turns, and
+the L/R triggers strafe. The manual also confirms A is Shield/Action, so a modern layout wants the
+left stick to strafe, the right stick to turn, LT to block and RT to attack. The game already
+supports the hard part. A scripted controller recording reached gameplay and captured forward,
+strafe-left, turn-left and forward+turn+strafe at the same frame; the combined frame shows the
+strafe animation and the rotated camera, so the game applies strafe and turn simultaneously. No
+guest-code change is needed for movement.
+
+What the input layer could not express was the button duplication: `DeviceBindings` held exactly one
+`Binding` per `PadControl`, so A could answer the A button or the left trigger but not both. The
+patch adds:
+
+* `InputPreset` and `effective_bindings()` in `render/input.{h,cpp}`. Classic returns the player's
+  sets unchanged. Modern overrides only the gamepad left/right trigger and stick controls
+  (`ltrigger = leftx-`, `rtrigger = leftx+`, `stick_left/right = rightx-/+`, `stick_up/down =
+  lefty-/+`) and adds `ExtraBinding`s for A from `lefttrigger+` and X from `righttrigger+`. The
+  base `Bindings`, the keyboard set and every other control are untouched, so F1 keeps editing the
+  player's layout and Classic restores it exactly.
+* `Window::set_input_preset()` and `extra_gpad_` resolution in `render/src/vk/window.cpp`. Extras
+  are evaluated exactly like the primary source, with the same dead zone and only while not
+  capturing, then combined with it. The XInput fallback gets the same remap directly
+  (`thumb_lx` → strafe triggers, `thumb_rx` → turn, `thumb_ly` → forward/back, LT/RT join A/X).
+  The generic DirectInput mapping now names `rightx`/`righty`; it previously left them out, so a
+  pad that arrived as a raw joystick had no right stick for SDL to read at all. `DREAM_INPUT_TRACE`
+  now treats a trigger change as a change too, which is how the LT/RT path is visible. Trigger
+  extras use a half-travel press threshold (`max(deadzone, 0.5)`), not the stick dead zone: this
+  pad's triggers rest at 96/255 (0.38), above the default 20%, which held block and attack from
+  startup in the first build. Sticks keep the configured dead zone.
+* `--controls classic|modern` in `runtime/boot/boot_main.cpp`, passed through `Live` to the window.
+  Modern is a layer over the loaded bindings and is re-applied whenever F1 saves; it is not written
+  into the user's binding file.
+
+The launcher's Gameplay tab gets **Controls** (Classic/Modern), `build_command` passes
+`--controls modern`, `play-draconus.ps1` gets `-ModernControls`, and `--selftest` / `--smoke` check
+that the option reaches the command line and that Classic does not. The engine test suite gains
+`modern controls change only the gamepad sticks, triggers and the A/X extras`.
+
+Consequences, documented rather than hidden: the game reads its analog stick for menu navigation,
+so Modern moves menu cursors to the right stick (the d-pad still works); and because LT is now
+block, the game's both-triggers User Mode chord is no longer available as it was. RT keeps no
+guest trigger role in Modern: it is the attack source. The launcher help says all of this.
+
+**Verified:** `--controls modern` prints the modern-controls line at startup and its window resolves
+the overrides; `--controls classic` is the old path byte for byte. At rest this pad reports triggers
+96/96 on the classic path; with the half-travel trigger threshold the modern run starts with every
+button released (no `input:` change line), so block and attack are no longer held. With the synthetic pad,
+left stick left/right reached the guest as L/R triggers 255/0 and 0/255 while `joy_x` stayed at
+centre, and right stick left/right reached the guest as `joy_x` 0/255 while the triggers stayed
+centred. The render suite (including the new input case) passes; a physical-pad test remains the
+right check for feel and for the LT/RT extra sources. The patch adds `render/` and `runtime/` files
+to the local delta and is carried by `patches/0002-modern-controls.patch`, regenerated from the
+pristine pinned tree plus `0001-engine-local-changes.patch`.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

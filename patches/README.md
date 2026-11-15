@@ -6,6 +6,7 @@ against that commit, so a fresh clone builds the same engine this project was de
 | Patch | What it carries |
 |---|---|
 | `0001-engine-local-changes.patch` | The sum of ledger entries 001–035 in `docs/ENGINE-CHANGES.md`: the diagnostics and instruction tracer, the hook-dispatch fix, the replay host-state skip, the SR-write rule, the exception-handler stop address (the translated-path fault), the flash side-effect marking, the inlined RAM fast path, cached host memory for the offscreen readback, hor+ widescreen, presentation decoupled from the 60 Hz logic, 4:3 pillarboxing for flat 2D screens (`frame_uses_depth`, plus the presenter's bar discard), the window following `--scale` with `--fullscreen` and a content aspect (`window_size`, `content_aspect`), `--present-rate` capped to the display's refresh (`present_rate`), geometry interpolation for the extra presents (`interpolate`), the per-user memory card a windowed run attaches when `--vmu` names none (`default_vmu_path`), windowed/borderless/exclusive display modes (`DisplayMode`), the screen-space HUD compression that keeps the HUD's 4:3 shape at 16:9 (`compress_screen_overlays`), the direct-present path that keeps a finished frame on the GPU for the presenter to sample (`Presenter::use_image`, `Offscreen::read_back`), the overlay's blend destination supplied separately as `under` so the frame counter and the binding screen stop reading the write-combined staging buffer (`fill_rect`, `draw_text`, `Presenter::upload`'s `decorate`, `InputMenu::draw`), exclusive fullscreen choosing a refresh that is a whole multiple of the picture rate so every picture is held for the same number of vertical blanks (`Window::set_content_hz`), a runtime SH-4 clock so a scene that misses its real budget can be given more cycles per blank (`--sh4-clock`, `sched::sh4_clock`), and the jump pack in the controller's second expansion slot whose effects drive ordinary gamepad rumble (`maple::JumpPack`, `Window::rumble`), with the frame-time, presentation-cadence, per-frame and host-profile diagnostics (`DREAM_TRACE_FRAME_HIST`, `DREAM_TRACE_PACING`, `DREAM_TRACE_FRAMES`, `DREAM_PROFILE`, `tools/profile-map.py`, `DREAM_MAPLE_TRACE`, `DREAM_RUMBLE_TRACE`), the HUD-panel pass that carries the item wheel's 3D models with the wheel and refuses a world-space particle billboard (`compress_screen_overlays` panel rule), `dream_render_view --aspect` for checking a capture at a widescreen aspect, and the launcher's audio device/volume/buffer controls (`--audio-device`, `--audio-volume`, `--audio-buffer`, `--list-audio-devices`). Touches `runtime/`, `translator/`, `render/`, `audio/` and `cmake/`. |
+| `0002-modern-controls.patch` | Ledger entry 036: the optional `--controls modern` layer — `InputPreset`/`effective_bindings`, extra physical sources for A and X, `Window::set_input_preset`, and the XInput remap. The launcher **Controls** option, `-ModernControls` and the input tests accompany it in the repository. |
 
 `setup.ps1` applies each patch after fetching the engine, and is safe to re-run: a tree that
 already has the patch is detected with `git apply --reverse --check` and left alone.
@@ -21,7 +22,10 @@ directories (`audio/`, `cmake/`, `render/`, `runtime/`, `translator/`).
 git diff --no-index --no-renames --no-color --src-prefix= --dst-prefix= a b > 0001-engine-local-changes.patch
 ```
 
-Apply it with `git apply -p1` from inside `engine/`. Verify before committing:
+`0002-modern-controls.patch` is generated the same way, with `a/` the pinned tree **plus 0001** and
+`b/` the working engine; it therefore applies after 0001 in `setup.ps1`'s sorted order.
+
+Apply a patch with `git apply -p1` from inside `engine/`. Verify before committing:
 
 ```powershell
 cd engine; git apply --check <repo>\patches\0001-engine-local-changes.patch

@@ -71,6 +71,7 @@ DEFAULTS = {
     "audio_device": "",
     "audio_buffer": 0,
     "path": "translated",
+    "controls": "classic",
 }
 
 
@@ -209,6 +210,8 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
         cmd += ["--sh4-clock", str(int(s["sh4_clock"]))]
     if s.get("path", "translated") == "interpreter":
         cmd += ["--interpret"]
+    if s.get("controls", "classic") == "modern":
+        cmd += ["--controls", "modern"]
     if not s.get("audio", True):
         cmd += ["--no-audio"]
     else:
@@ -227,7 +230,7 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
 # ----------------------------------------------------------------------------- the tabs
 #
 # Each control: kind, key, label, optional help text, and kind-specific fields.
-#   combo   values: [(label, value)]         entry  depends: (key, value)
+#   combo   values: [(label, value)], width (characters, default 26)
 #   check   (a checkbox)                      radio  values: [(label, value)]
 #   slider  min, max, suffix                  note   (a grey line of text)
 #   disc    (the disc row, handled specially)
@@ -292,6 +295,12 @@ TABS = [
                  "machine. Changes take effect on the next launch."},
     ]),
     ("Gameplay", [
+        {"kind": "combo", "key": "controls", "label": "Controls", "width": 46,
+         "values": [("Classic - Dreamcast pad", "classic"),
+                    ("Modern - twin-stick, LT block, RT attack", "modern")],
+         "help": "Modern enables twin stick controls: left stick moves and strafes, right stick "
+                 "turns. Left trigger blocks, right trigger attacks. In this mode you use d-pad "
+                 "instead of left stick to navigate menus."},
         {"kind": "radio", "key": "path", "label": "Engine path",
          "values": [("Translated - fast", "translated"),
                     ("Interpreter - reference, slow", "interpreter")],
@@ -448,8 +457,8 @@ class Launcher(tk.Tk):
             var = tk.StringVar(value=self._label_for(key))
             self.vars[key] = var
             labels = [label for label, _ in c["values"]]
-            box = ttk.Combobox(tab, values=labels, state="readonly", width=26,
-                               textvariable=var)
+            box = ttk.Combobox(tab, values=labels, state="readonly",
+                               width=int(c.get("width", 26)), textvariable=var)
             self.combos[key] = box
             box.bind("<<ComboboxSelected>>", lambda _e: self._combo_changed(key))
             if key == "audio_device":
@@ -677,7 +686,7 @@ def selftest() -> int:
             "frame_interpolation": False, "display_mode": "windowed",
             "vsync": True, "fps": False, "sh4_clock": 200, "audio": True,
             "audio_volume": 100, "audio_device": "", "audio_buffer": 0,
-            "path": "translated"}
+            "path": "translated", "controls": "classic"}
     image = "G:/dumps/draconus.gdi"
 
     cmd = build_command(image, base)
@@ -734,6 +743,12 @@ def selftest() -> int:
 
     cmd = build_command(image, dict(base, path="interpreter"))
     expect("path", cmd, ["--interpret"])
+
+    cmd = build_command(image, dict(base, controls="modern"))
+    expect("controls", cmd, ["--controls", "modern"])
+    cmd = build_command(image, dict(base, controls="classic"))
+    if "--controls" in cmd:
+        failures.append("classic controls still passed --controls")
 
     # The tab spec must cover every default, or a control would be silently unset.
     keys = set()
@@ -804,6 +819,15 @@ def check_ui(app: Launcher) -> list[str]:
     cmd = build_command(app.image_path or "disc.gdi", app.collect())
     if "--sh4-clock" in cmd:
         failures.append("200 MHz kept --sh4-clock: %s" % " ".join(cmd))
+
+    pick("controls", "Modern - twin-stick, LT block, RT attack")
+    cmd = build_command(app.image_path or "disc.gdi", app.collect())
+    if "--controls" not in cmd or "modern" not in cmd:
+        failures.append("modern controls lost --controls modern: %s" % " ".join(cmd))
+    pick("controls", "Classic - Dreamcast pad")
+    cmd = build_command(app.image_path or "disc.gdi", app.collect())
+    if "--controls" in cmd:
+        failures.append("classic controls kept --controls: %s" % " ".join(cmd))
 
     # The volume slider must reach the command line; a Scale that only moves its own handle is
     # the same defect as a combo that only changes its text.
