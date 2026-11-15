@@ -72,6 +72,34 @@ the tool for any new divergence; it is described in `docs/UPSTREAM-REPORT.md`.
 Use the engine's Flycast oracle to compare the first cycles and identify which
 register or entry assumption differs, before translating more of the binary.
 
+### M5 — done (2026-11-15)
+
+A single scripted schedule — START at 1,000, START at 1,800, A at 2,300/2,800/3,100, START at
+4,500 to skip the story, then movement pulses — reaches the title, character select, the Celanarin
+loading card, the story, and gameplay at about frame 4,600. The run is 8,200 frames (136.6 s guest),
+so its last **60 s are in-game**.
+
+**Zero untranslated calls.** `DREAM_TRACE_UNTRANSLATED=1` reported 101 calls. Ninety-seven were
+one call each into the 125-entry static-constructor table at `0x8C1FAD98`: pointer discovery only
+accepted a target whose forward scan found a branch within 200 instructions, and these functions
+run for up to 498 instructions before theirs (engine patch 037). The last four were case labels of
+a `mov.w` switch whose root function's resume switch knew them but whose nearest containing
+fragment did not; `resume_miss` now retries the other containing functions before the interpreter
+(patch 038). The 8,200-frame run reports **`untranslated call targets: 0`**, with the same PVR,
+Maple and interrupt counters as before.
+
+**Per-checkpoint frame diff.** `tools\m5-check.ps1` renders ten checkpoints (title, character
+select, loading card, story, and six in-game frames), drives Flycast's Lua API with the same
+controller schedule, freezes Flycast at each guest frame until its client area is copied, and
+compares mean absolute RGB difference. The ten checkpoints measure **1.46-13.58** against a
+threshold of **16**; a pair from two different screens measures 27-38. The largest values are
+in-game frames whose additive glow and idle pose are the title's own animation, and the two
+renderers' texture filtering differs at the pixel level; the scene composition, camera and HUD
+match. Windowed parity (`tools\parity-check.ps1`) remains byte-identical.
+
+The gate is reproducible with `tools\m5-check.ps1` (`-SkipFlycast` for the zero-call half alone),
+and engine patches 037–038 are carried by `patches/0003-m5-coverage.patch`.
+
 ### M6 — done (2026-11-14)
 
 Flycast's SDL2 audio backend can write to SDL's disk driver, so the project now has a digital audio
@@ -86,8 +114,9 @@ the measurements are in `docs/13-M6-AUDIO-BASELINE.md`; `tools/m6-check.ps1` rer
 
 Order is deliberate: boot, then frontend, then one level, then audio, then everything.
 Audio is late because the ARM7 program is the most self-contained subsystem and its
-failure mode (silence) does not block visual parity. M6 is now done; M3's remaining clause
-is a like-for-like Flycast frame comparison, and M4/M5/M7 continue on input and coverage.
+failure mode (silence) does not block visual parity. M4's scripted-input path is now exercised by
+M5, M5 and M6 are done; M3's remaining clause is a like-for-like Flycast frame comparison, and M7
+continues on coverage and the full play-through.
 
 ### M8–M10 — product
 

@@ -2611,6 +2611,61 @@ right check for feel and for the LT/RT extra sources. The patch adds `render/` a
 to the local delta and is carried by `patches/0002-modern-controls.patch`, regenerated from the
 pristine pinned tree plus `0001-engine-local-changes.patch`.
 
+## Patch 037: discovery reaches long constructor functions (2026-11-15)
+
+`DREAM_TRACE_UNTRANSLATED=1` over 60 s of scripted play reported **101 untranslated calls**,
+not the four or five the earlier seeded scenes suggested. Ninety-seven of them were one call each,
+all from `0x0C17D556`: the static-constructor loop at `0x0C17D544`, which walks a 125-entry function
+pointer table at `0x8C1FAD98` in RAM.
+
+The functions were real (`mov.l r14,@-r15 ; ...`, ordinary prologues) and the table is in the
+image, but pointer discovery rejected them. Its `plausible_entry` test accepts a pointer only if a
+forward scan reaches `RTS`/`BRA`/`JMP`/`RTE` within **200 instructions**. These constructor
+functions begin with hundreds of straight-line calls before their first branch; the first function
+in the table, `0x0C012A68`, reaches its first `BRA` after **498 instructions**. The 200-instruction
+cap was not a safety feature for this title, it was a blind spot.
+
+The cap is now 1,024. Discovery goes from 8,936 to **9,126 functions** (1,071,709 instructions),
+the constructor table is translated, and the run's untranslated count falls **101 → 4**. The four
+that remain are switch-case labels, handled by patch 038. Guest counters are identical (at 3,600
+frames: 7,338,501 TA chunks, 3,155 frame swaps, 195,177 interrupts) and `tools\parity-check.ps1`
+is still byte-identical.
+
+Reproduce: `DREAM_TRACE_UNTRANSLATED=1` on a run past frame 3,600; the 97 one-call targets from
+`0x0C17D556` disappear after a rebuild.
+
+## Patch 038: a resume miss tries the other functions that contain the block (2026-11-15)
+
+The last four calls were `0x0C234F62`, `0x0C234F6A`, `0x0C234F6E` and `0x0C234F78`, one call each,
+each recorded with **its own address as the call site**. They are case labels of a `mov.w` jump
+table at `0x0C234F38`, used by the dispatcher at `0x0C234EF0`:
+
+```
+mov #21,r1 ; cmp/hs r1,r0 ; ... ; mova 0x0C234F38,r0 ; mov.w @(r0,r1),r0 ; braf r0
+```
+
+The table and its cases are translated; the resume switch of the function at `0x0C234E7E` lists
+all four labels. The problem was ownership. Discovery also keeps smaller fragments that start
+inside the same code (`0x0C234F1C` is one, the `shll/mova/mov.w/braf` tail itself), and
+`find_containing` returns the **nearest** fragment. `call_indirect` therefore entered the fragment,
+whose resume switch knows only its own first block; the case label missed, `resume_miss` handed it
+to the interpreter, and the interpreter called the address again — which is why the recorded call
+site equaled the target.
+
+`resume_miss` now retries the other registered functions whose range contains the address,
+nearest-first and never the same one twice, before falling back to the interpreter. This keeps the
+normal nearest-fragment choice (the first attempt is unchanged) and only widens it on a miss. The
+four labels resolve to the root's switch cases and the count is **0 over 8,200 frames** (136.6 s
+guest, of which the last 60 s are in gameplay).
+
+**Validation.** `tools\m5-check.ps1` runs the 8,200-frame scripted play, asserts zero untranslated
+calls, renders ten checkpoints, drives Flycast's Lua at the same guest frames, freezes each frame
+with a busy-wait, captures it with `PrintWindow`, and compares at or below MAE 16. The ten
+checkpoints measure 1.46-13.58 (a wrong-screen pair measures 27-38). Windowed parity is
+byte-identical; the headless parity counters match. The engine's own suite is unchanged.
+
+Carried by `patches/0003-m5-coverage.patch`, which applies after 0001 and 0002.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

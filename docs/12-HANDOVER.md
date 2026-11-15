@@ -1,6 +1,6 @@
 # Handover — state of the project
 
-Updated 2026-11-14, after M6 audio was verified against Flycast. The project's records are
+Updated 2026-11-15, after M5 (in-game) and the owner's save/load verification. The project's records are
 elsewhere: `docs/ENGINE-CHANGES.md` is the running ledger with every trace and dead end,
 `docs/UPSTREAM-REPORT.md` is the engine-side report, and `docs/07-ROADMAP.md` is the milestone plan
 this is measured against. This file is the pick-up point.
@@ -21,6 +21,8 @@ this is measured against. This file is the pick-up point.
 | Fresh clone | `setup.ps1 -SkipBuild`, `import-disc`, `setup.ps1` | engine patched, dump extracted, built, **600 frames clean** |
 | Engine test suite | `ctest` in `engine/build-test` | 6/6 (76 runtime cases incl. the new regression) |
 | Audio (M6) | `tools\m6-check.ps1` | 10 s spectra at 1.0000 sample correlation; 600 s with no gap that Flycast does not also have |
+| In-game (M5) | `tools\m5-check.ps1` | **0 untranslated calls over 8,200 frames (60 s in gameplay); 10 Flycast checkpoints at MAE 1.46-13.58, threshold 16** |
+| Save / load | the title's own Save and Load Game screens | **owner saved in-game and reloaded it, 2026-11-15** |
 
 **The translated path is now the fast one (2026-11-11).** It had been 0.15x — slower than the
 interpreter — because most of the title's code was running in the development interpreter. Three
@@ -31,9 +33,9 @@ things fixed it, in this order:
 2. **The RAM fast path** inlined in `DcMemory` (1.5x → 1.9x), and **cached host memory** for the
    presenter's readback (windowed 0.8x → 1.0x).
 3. **`pointers = true`** — the real fix: pointer-table discovery had been off, so the title's
-   table-driven code was never translated. It finds 8,940 functions instead of 3,285, untranslated
-   calls drop from 3.3 million to 1,412 in a 5,000-frame scene, and the seeds become unnecessary
-   (removed).
+   table-driven code was never translated. It finds 8,940 functions instead of 3,285 (9,126 after
+   patch 037, below), untranslated calls drop from 3.3 million to 1,412 in a 5,000-frame scene,
+   and the seeds become unnecessary (removed).
 
 | configuration | 600 frames | 1,800 frames |
 |---|---|---|
@@ -119,11 +121,12 @@ the next trace shows only the 97 one-off calls. Parity is unchanged.
 This is not the slowdown: 2,736 interpreted calls over 8,000 frames is noise. The slowdown did not
 reproduce for the owner either; it stays on the list as an unexplained, intermittent one.
 
-**Lanterns: captured, and the depth theory is out (2026-11-14).** Reported from the tree-village
-level. Two `F11` bundles were taken at the moment -- guest frames 13,305 and 13,520, at 4x
-(2560x1920) -- and both replay through `dream_render_view` to the pictures the run presented (mean
-2.7/255 after the 4x downscale, the differences at resampling edges and thin HUD lines), so each
-bundle is complete and the renderer is faithful to it.
+**Lanterns: closed as native game behaviour (2026-11-15).** Reported from the tree-village
+level as flicker; the captures below show it is the title's own pulse, and the owner confirmed it
+is how the game behaves. Two `F11` bundles were taken at the moment -- guest frames 13,305 and
+13,520, at 4x (2560x1920) -- and both replay through `dream_render_view` to the pictures the run
+presented (mean 2.7/255 after the 4x downscale, the differences at resampling edges and thin HUD
+lines), so each bundle is complete and the renderer is faithful to it.
 
 At the near lantern:
 
@@ -151,13 +154,10 @@ cross into depth rejection. Nor is it the texture cache or a pipeline: the same 
 same picture, and the texture bytes do not change.
 
 So the flicker is in the guest's own list: a global pulse moves light between the outer halo and the
-inner core and scales all three quads. What is still open is whether that pulse is the game's
-intended lantern animation or whether this build drives it wrongly (frame rate, or the timer or
-random source it reads). Two frames 215 apart cannot answer that. The next measurement is a burst of
-five or six `F11` presses inside a second at the same lantern: a smooth step through the burst is a
-designed pulse, and its period can then be compared with Flycast at the same spot. The quads are easy
-to read out of any capture: `dream_render_view capture-NNN.ta --polygons`, then the `tcw c80c5ff0`
-lines with four vertices.
+inner core and scales all three quads. **Closed (2026-11-15): the owner confirms this is native game
+behaviour — the title's intended lantern animation, not a recompilation defect. No renderer change.**
+The capture method stays recorded because it is how the quads are read out:
+`dream_render_view capture-NNN.ta --polygons`, then the `tcw c80c5ff0` lines with four vertices.
 
 ## Controllers (2026-11-12)
 
@@ -434,6 +434,10 @@ card and `launcher.json`. The `--press` walk through those screens was measured 
 still works from the command line (the table is in `docs/17-VMU-SAVES.md`); it is no longer part of
 the launcher.
 
+**Owner-verified (2026-11-15): a save written through the title's Save screen loads back through its
+Load Game screen.** That closes the save/load round-trip for M7; the remaining M7 work is the full
+play-through (credits, every level, zero coverage gaps).
+
 The card reader's numbers, kept for reference: the load list is the card's directory order, so entry
 *n* on screen is entry *n* in `tools/vmu.py`'s listing; verified with eight synthetic entries (two
 Downs → `.003`, five → `.006`, A on the first → the game's own `LOAD ERROR!` for the fake data).
@@ -495,19 +499,52 @@ Verified: this machine lists six playback devices; a named device opens, a missi
 unchanged. `launcher.py --selftest` and `--smoke` pass, including the slider-to-command-line check.
 `docs/ENGINE-CHANGES.md` patch 034 has the details; the engine patch now also carries `audio/`.
 
+## M5 — in-game (2026-11-15)
+
+`tools\m5-check.ps1` is the gate. Its schedule reaches gameplay at about frame 4,600 and runs to
+8,200 frames, so the last 60 s are in-game. It reported **101 untranslated calls**, not the four
+or five the earlier scenes suggested. Two engine fixes close it, and the same run now reports
+**`untranslated call targets: 0`** with unchanged PVR/Maple/interrupt counters:
+
+1. **The constructor table was invisible to discovery (patch 037).** Ninety-seven of the calls
+   were one each from `0x0C17D556`, the static-constructor loop over a 125-entry pointer table at
+   `0x8C1FAD98`. The pointers are real functions, but pointer discovery accepted only targets whose
+   forward scan found `RTS`/`BRA`/`JMP` within 200 instructions. These constructors begin with
+   hundreds of straight-line calls; the first, `0x0C012A68`, reaches its first `BRA` at instruction
+   498. The cap is 1,024, discovery goes from 8,936 to 9,126 functions, and the count falls to 4.
+2. **A resume miss now tries the other owners (patch 038).** The last four are switch-case labels of
+   a `mov.w` table at `0x0C234F38`. The root function at `0x0C234E7E` lists all four in its resume
+   switch, but discovery also keeps the smaller fragment at `0x0C234F1C`, and `find_containing`
+   returned that nearest fragment first; its miss went to the interpreter, which called the label
+   again (hence "called from itself"). `resume_miss` now retries the other containing functions,
+   nearest-first and never the same one twice, before the interpreter. The count is 0 over 8,200
+   frames.
+
+**Frame diff.** Ten checkpoints — title 900, character select 2400, Celanarin card 3000, story
+3600, and gameplay 5400/5600/6000/6200/6600/6800 — are rendered from our side and captured from
+Flycast at the same guest frames. Flycast's Lua presses the same buttons, then freezes each
+checkpoint in a busy-wait while the host copies the client area with `PrintWindow` (window-minimize
+and focus problems made a screen grab unreliable). Mean absolute RGB difference: **1.46-13.58**
+against a threshold of **16**; a wrong-screen pair measures 27-38. The largest in-game values are
+the title's own additive glow and idle pose at a different animation phase, plus the two renderers'
+different texture filtering; composition, camera and HUD match. `tools\m5-check.ps1 -SkipFlycast`
+runs only the zero-call half. Engine patch `patches/0003-m5-coverage.patch` carries 037-038.
+
 ## Next phase
 
 Order is by value per unit of risk, not by size:
 
 1. **Human play-through.** The build is at real time in a window; judge feel — movie sync, menu
    responsiveness, input latency — and note anything that only shows up in play.
-2. **Translation coverage.** Still the long-term lever for heavier scenes: the full-set
-   discovery/emission blocker in `docs/11-M2-RESULTS.md` (the seeds cover what the first 300 frames
-   reached, not what later gameplay will). `DREAM_TRACE_UNTRANSLATED` names what a new scene is
-   missing.
+2. **Translation coverage beyond the first level.** M5 closes the first 60 s; the full-set
+   discovery/emission blocker in `docs/11-M2-RESULTS.md` still limits heavier, later scenes.
+   `DREAM_TRACE_UNTRANSLATED` names what a new scene is missing, and `--suggest-config` turns the
+   report into seeds.
 3. **M3 visual parity.** Flycast is installed and boots the disc; driving it and capturing is in
-   `docs/14-M3-M6-FLYCAST-REFERENCE.md`. The remaining like-for-like state is a VMU on both sides
-   and a 4:3 Flycast window; M6 audio is now closed.
+   `docs/14-M3-M6-FLYCAST-REFERENCE.md`. `tools/m5-check.ps1` now provides the frame-exact Flycast
+   capture path, so M3's like-for-like comparison is mostly a matter of choosing its checkpoints.
+4. **M7 full play-through.** Credits, every level, and zero coverage gaps remain; the save/load
+   round-trip is owner-verified.
 
 ## Owner items
 

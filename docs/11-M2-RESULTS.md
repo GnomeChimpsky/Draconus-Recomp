@@ -9,6 +9,8 @@
 > translator emits 8,940 functions (995,051 instructions, ~100 MB of C++) in about five minutes and
 > the build runs at 3.7-3.9x real time. What never completed was the aggressive `sweep` pass, which
 > is still off; the full-set emission warning below was measured with a different configuration.
+> **Updated for M5 (2026-11-15):** patch 037 raises the pointer-pass scan and discovery emits **9,126
+> functions**; a 60 s in-game run now reports **0 untranslated calls** (`tools\m5-check.ps1`).
 
 Date: 2026-11-04/05. Engine: `phobos665/dream-recomp` 0.1.0, `main` as fetched (tree dated
 2026-10-29), MSVC 19.44, Ninja, `-DDREAM_DEV_INTERPRETER=ON -DDREAM_RENDERER=OFF`.

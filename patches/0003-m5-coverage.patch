@@ -1,0 +1,119 @@
+diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
+index 0c79f7d..71e34f8 100644
+--- a/runtime/src/sh4/abi_bare.cpp
++++ b/runtime/src/sh4/abi_bare.cpp
+@@ -198,7 +198,9 @@ Hooks* hooks() noexcept {
+ namespace {
+ // The registered function whose range contains `address` and whose signature (if any) matches
+ // memory. Ranges can overlap (discovery keeps shared tails as their own functions), so the scan
+-// walks back from the first entry above the address.
++// walks back from the first entry above the address: the nearest fragment is the right owner for
++// an indirect branch inside it, and resume_miss can fall back to a wider one when that fragment
++// does not know the address (see below).
+ const FunctionEntry* find_containing(std::uint32_t address, ::dream::Memory* m) noexcept {
+     const auto& t = table();
+     const std::uint32_t phys = address & 0x1FFFFFFFu;
+@@ -250,7 +252,58 @@ void nonlocal_return(Ctx& c, ::dream::Memory&, std::uint32_t pc) {
+     throw NonLocalReturn{pc};
+ }
+ 
++namespace {
++// Resume entries in flight. A fragment and the root function it belongs to can both contain an
++// address, and the nearest one may not know it: Draconus branches to the case labels of a `mov.w`
++// switch from a fragment at 0x0C234F1C, while only the wider function at 0x0C234E7E has those
++// labels in its resume switch. The runtime tries the next containing entry before giving up, but
++// never the same one twice, so a genuine miss still reaches the interpreter.
++thread_local const FunctionEntry* t_resume_tried[16];
++thread_local int t_resume_depth = 0;
++
++void call_resume(Ctx& c, ::dream::Memory& m, std::uint32_t pc, const FunctionEntry* e) {
++    if (t_resume_depth < 16)
++        t_resume_tried[t_resume_depth] = e;
++    ++t_resume_depth;
++    e->resume(c, m, pc);
++    --t_resume_depth;
++}
++
++bool resume_tried(const FunctionEntry* e) {
++    for (int i = 0; i < t_resume_depth && i < 16; ++i)
++        if (t_resume_tried[i] == e)
++            return true;
++    return false;
++}
++}  // namespace
++
+ void resume_miss(Ctx& c, ::dream::Memory& m, std::uint32_t pc) {
++    // The function whose resume switch sent us here does not own `pc`. Another function whose
++    // range covers the same address may: try each containing entry nearest-first, skipping the
++    // ones already in flight, before handing the address to the interpreter.
++    if (t_resume_depth > 0) {
++        const auto& t = table();
++        const std::uint32_t phys = pc & 0x1FFFFFFFu;
++        auto it = std::upper_bound(
++            t.begin(), t.end(), phys,
++            [](std::uint32_t a, const FunctionEntry& e) { return a < e.address; });
++        for (int n = 0; it != t.begin() && n < 1024; ++n) {
++            --it;
++            if (!it->end || phys < it->address || phys >= it->end || !it->resume)
++                continue;
++            if (resume_tried(&*it))
++                continue;
++            if (it->signature) {
++                bool same = true;
++                for (std::uint32_t i = 0; same && i < it->signature_words; ++i)
++                    same = m.read16(it->address + 2 * i) == it->signature[i];
++                if (!same)
++                    continue;
++            }
++            call_resume(c, m, pc, &*it);
++            return;
++        }
++    }
+     if (g_hooks) {
+         g_hooks->on_resume(c, m, pc);
+         return;
+@@ -274,7 +327,7 @@ void resume_at(Ctx& c, ::dream::Memory& m, std::uint32_t pc) {
+                 return;
+             }
+             if (e->resume) {
+-                e->resume(c, m, pc);
++                call_resume(c, m, pc, e);
+                 return;
+             }
+         }
+@@ -354,7 +407,7 @@ void call_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target) {
+             // so a target that is inside the range but not a block start still faults honestly
+             // rather than running from the wrong place. resume_miss tries the other containing
+             // entries first, then the interpreter.
+-            e->resume(c, m, target);
++            call_resume(c, m, target, e);
+             return;
+         }
+     }
+diff --git a/translator/src/analysis/discover.cpp b/translator/src/analysis/discover.cpp
+index 36e90ee..14aa7d7 100644
+--- a/translator/src/analysis/discover.cpp
++++ b/translator/src/analysis/discover.cpp
+@@ -386,12 +386,20 @@ private:
+     }
+ 
+     // A pointer target is plausible code if its first instruction decodes, it is not inside a
+-    // known function, and a short forward scan reaches RTS/BRA/JMP without hitting undefined words.
++    // known function, and a forward scan reaches RTS/BRA/JMP without hitting undefined words.
++    // The scan must be long enough to cross a function that starts with a long run of straight-line
++    // code: Draconus's static-constructor functions do nothing but call constructors for hundreds
++    // of instructions before their first branch (0x0C012A68's first BRA is 498 instructions in), so
++    // the old 200-instruction cap rejected 96 real entries of its constructor table at 0x8C1FAD98
++    // and runtime dispatch crossed into the interpreter once for each. 1,024 clears the longest
++    // such function seen here without letting an arbitrary word deep in the image masquerade as an
++    // entry.
++    static constexpr int kPlausibleEntryScan = 1024;
+     bool plausible_entry(std::uint32_t a) const {
+         if (!in_image(a) || code_.count(a) || slots_.count(a))
+             return false;
+         std::uint32_t pc = a;
+-        for (int i = 0; i < 200 && in_image(pc); ++i, pc += 2) {
++        for (int i = 0; i < kPlausibleEntryScan && in_image(pc); ++i, pc += 2) {
+             const Instr ins = at(pc);
+             if (ins.op == Op::Invalid)
+                 return false;

@@ -244,15 +244,17 @@ python -m unittest discover -s tests
 
 Status: **playable at real time**. The retail game boots, plays its movies, shows its menus, loads
 into gameplay and responds to input — menu navigation and character movement both work — from the
-owner's own disc, deterministically. Translation now covers 8,940 functions (995,051 instructions),
-up from 3,285: pointer-table discovery is on, and it is what makes the recompiled path fast.
+owner's own disc, deterministically. Translation now covers 9,126 functions (1,071,709
+instructions), up from 3,285: pointer-table discovery is on, and it is what makes the recompiled
+path fast. A 60 s in-game scripted run now reports **0 untranslated calls**, and ten frame
+checkpoints compared with Flycast are within the M5 threshold (`tools\m5-check.ps1`).
 
 **Speed** went from 0.15x to **1.0x in a window and 3-4.5x headless depending on the scene (3.0x over 20,000 frames of gameplay)**: the title config now turns
-on pointer-table discovery, which finds 8,940 functions instead of 3,285 — this game reaches most of
+on pointer-table discovery, which finds 9,126 functions instead of 3,285 — this game reaches most of
 its code through tables, so without it the translated build spent its time in the development
 interpreter. Inlining the RAM fast path and moving the presenter's readback out of write-combined
 memory finished the job (`docs/ENGINE-CHANGES.md`). Building now takes about five minutes because
-the generated C++ is ~100 MB; if a later scene is still slow, `tools\diagnose-speed.bat` names the
+the generated C++ is ~110 MB; if a later scene is still slow, `tools\diagnose-speed.bat` names the
 hotspots.
 
 **Audio (M6) is done.** Flycast's SDL disk driver gives a digital oracle, so the comparison is a WAV

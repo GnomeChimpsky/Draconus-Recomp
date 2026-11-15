@@ -123,6 +123,27 @@ loopback device and no system sound is involved. The generated Lua file presses 
 Flycast's slower boot and longer title screen time to settle before the same menus/gameplay ours
 reaches at frames 1150 and 1400.
 
+## M5 gate (tools\m5-check.ps1)
+
+```powershell
+tools\m5-check.ps1                 # zero-untranslated run + 10 Flycast checkpoints
+tools\m5-check.ps1 -SkipFlycast    # the zero-untranslated half alone
+tools\m5-check.ps1 -Threshold 12   # tighter frame diff
+```
+
+The schedule reaches gameplay at about frame 4,600 and runs to 8,200, so the last 60 s are in-game.
+The first half runs it with `DREAM_TRACE_UNTRANSLATED=1` and fails unless the report says
+`untranslated call targets: 0`. The second half renders checkpoints from our display lists, then
+runs `tools/m5_flycast_capture.py`: a generated Lua script presses the same buttons on the same
+guest frames, freezes at each checkpoint in a busy-wait, and the host copies Flycast's client area
+with `PrintWindow` so the frame is held still and window focus cannot change it. `tools/m5_frame_diff.py`
+prints the mean absolute RGB difference and fails above the threshold (16 by default; correct pairs
+here measure 1.5-13.6, wrong-screen pairs 27-38). Artifacts and side-by-side review images are under
+`work\m5-check`.
+
+Flycast is found at `$env:FLYCAST_EXE`, the local install, or `tools\flycast\flycast.exe`; override
+with `-Flycast PATH`. The engine must be built with patches 0001-0003 applied.
+
 ## Engine build (already staged under `engine/`)
 
 The engine archive has **no submodules**, and CMake hard-fails without
@@ -198,8 +219,9 @@ files under `%LOCALAPPDATA%\Temp`, which this environment denies); one of them c
 **The translated path is the fast path now.** The decisive change on 2026-11-11 was turning on
 pointer-table discovery (`pointers = true`): this title reaches most of its code through tables, and
 without it 3,285 functions were translated and the rest ran in the development interpreter. It now
-translates 8,940 functions (~100 MB of generated C++, about five minutes to build), and untranslated
-calls in a 5,000-frame scene fell from 3.3 million to 1,412. Inlining `DcMemory`'s RAM fast path and
+translates 9,126 functions (~110 MB of generated C++, about five minutes to build), and untranslated
+calls in a 5,000-frame scene fell from 3.3 million to 1,412; patch 037 later took a 60 s in-game run
+to **zero**. Inlining `DcMemory`'s RAM fast path and
 moving the presenter's readback to cached host memory did the rest. Details in
 `docs/ENGINE-CHANGES.md`; `DREAM_TRACE_FRAME_TIME` and `DREAM_TRACE_UNTRANSLATED` are the diagnostics
 that found the last two.

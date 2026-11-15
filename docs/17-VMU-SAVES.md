@@ -101,6 +101,9 @@ and the guest decides when to write. This is unchanged from a real console.
 
 What was verified end to end here:
 
+* **Owner save → reload (2026-11-15):** a save written through the title's own Save screen was
+  loaded back through its Load Game screen, so the round-trip works through the game, with no
+  launcher or command-line help.
 * A blank card made by `tools/vmu.py` is byte-identical to the engine's.
 * Draconus reads a formatted card (16 block reads at the title: root + FAT + 13 directory blocks +
   one), and draws no "No VMU Found" notice.
