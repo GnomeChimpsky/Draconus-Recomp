@@ -4,11 +4,12 @@
   "wikidata": "Q3038681",
   "system": "Dreamcast",
   "type": "recomp",
-  "original": { "region": "USA", "revision": "1.0" },
+  "original": { "region": "USA", "revision": "1.0", "serial": "T-40203N" },
   "project": "Draconus-Recomp",
   "status": "in-progress",
-  "targets": ["Windows", "Linux", "Steam Deck"],
+  "targets": ["Windows"],
   "toolchain": "Dream-recomp",
   "approach": "Static recompilation",
-  "maintainers": [{ "GnomeChimpsky": "GnomeChimpsky", "link": "https://github.com/GnomeChimpsky/" }]
+  "maintainers": [{ "name": "GnomeChimpsky", "link": "https://github.com/GnomeChimpsky/" }],
+  "notes": "Windows x64 release. The release launcher is frozen and needs no Python; Linux/Steam Deck native builds are not currently provided."
 }

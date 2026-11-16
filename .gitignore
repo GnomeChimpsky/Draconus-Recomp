@@ -6,15 +6,15 @@ scratch/
 # The engine is fetched by setup.ps1 at a pinned commit and is not part of this repository.
 engine/
 
-# Game data and anything derived from it
+# Game data and anything derived from it. Dumps live in dumps/ by convention (docs/LEGAL.md);
+# the extension list catches a dump kept anywhere else.
+dumps/
 *.gdi
 *.chd
 *.bin
 *.raw
 *.iso
 *.cdi
-Draconus - Cult of the Wyrm*/
-Die by the Sword + Limb From Limb GOG/
 game/*/extracted/
 
 # Screenshots and captures (guest pixels)
@@ -22,6 +22,7 @@ capture-*
 *.ppm
 *.png
 !tools/launcher-*.png
+!Draconus Recomped Emblem light.png
 *.vmu
 *.sav
 screenshot-*.ppm

@@ -1,0 +1,660 @@
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index d0620ec..7659964 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -85,6 +85,41 @@ extern "C" __declspec(dllimport) unsigned int __stdcall timeEndPeriod(unsigned i
+ 
+ namespace {
+ 
++// The launcher receives UTF-8 from SDL and from the Python launcher, but Windows' narrow argv and
++// std::ifstream/std::fopen treat bytes as the active ANSI code page. Keep every path in UTF-8 at
++// the boundary and convert only where the CRT needs a native wide path.
++std::filesystem::path utf8_path(const std::string& text) {
++    return std::filesystem::u8path(text);
++}
++
++#if defined(_WIN32)
++std::string path_to_utf8(const std::filesystem::path& path) {
++    const std::wstring wide = path.wstring();
++    if (wide.empty())
++        return {};
++    const int size = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
++    if (size <= 0)
++        return {};
++    std::vector<char> buf(static_cast<std::size_t>(size));
++    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, buf.data(), size, nullptr, nullptr);
++    return std::string(buf.data(), static_cast<std::size_t>(size - 1));
++}
++
++std::FILE* fopen_utf8(const char* path, const char* mode) {
++    return _wfopen(std::filesystem::u8path(path).c_str(),
++                   std::filesystem::u8path(mode).c_str());
++}
++#else
++std::string path_to_utf8(const std::filesystem::path& path) {
++    const std::u8string u8 = path.u8string();
++    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
++}
++
++std::FILE* fopen_utf8(const char* path, const char* mode) {
++    return fopen_utf8(path, mode);
++}
++#endif
++
+ struct StopRun {
+     const char* why;
+ };
+@@ -295,7 +330,7 @@ struct FrameTimes {
+     std::FILE* dump = nullptr;
+     FrameTimes() {
+         const char* path = std::getenv("DREAM_TRACE_FRAMES");
+-        if (path && path[0] && (dump = std::fopen(path, "wb")))
++        if (path && path[0] && (dump = fopen_utf8(path, "wb")))
+             std::fprintf(dump, "# frame interval_ms vblank_ms\n");
+     }
+     ~FrameTimes() {
+@@ -1078,7 +1113,7 @@ struct Live {
+                         dump_frame(std::string(stem) + "_a.txt", prev_frame);
+                         dump_frame(std::string(stem) + "_b.txt", current_frame);
+                         dump_frame(std::string(stem) + "_out.txt", interp_frame);
+-                        if (FILE* info = std::fopen((std::string(stem) + "_info.txt").c_str(), "w")) {
++                        if (FILE* info = fopen_utf8((std::string(stem) + "_info.txt").c_str(), "w")) {
+                             std::fprintf(info,
+                                          "guest %llu matched %zu total %zu ok %d motion %.1f\n"
+                                          "renders %llu presented %llu\n"
+@@ -1490,7 +1525,7 @@ struct Live {
+     // launcher always had, so nothing needs to exist for the keyboard to work.
+     void load_bindings() {
+         dream::render::Bindings b = dream::render::Bindings::defaults();
+-        std::ifstream in(bindings_path, std::ios::binary);
++        std::ifstream in(utf8_path(bindings_path), std::ios::binary);
+         if (!bindings_path.empty() && in) {
+             const std::string text((std::istreambuf_iterator<char>(in)),
+                                    std::istreambuf_iterator<char>());
+@@ -1508,7 +1543,7 @@ struct Live {
+     }
+ 
+     bool save_bindings() const {
+-        std::ofstream out(bindings_path, std::ios::binary);
++        std::ofstream out(utf8_path(bindings_path), std::ios::binary);
+         if (!out)
+             return false;
+         const std::string text = menu.bindings().to_text();
+@@ -1625,7 +1660,7 @@ struct Live {
+                      std::uint32_t h) {
+         if (!src || w == 0 || h == 0)
+             return;
+-        FILE* f = std::fopen(name.c_str(), "wb");
++        FILE* f = fopen_utf8(name.c_str(), "wb");
+         if (!f)
+             return;
+         std::fprintf(f, "P6\n%u %u\n255\n", w, h);
+@@ -1644,7 +1679,7 @@ struct Live {
+     // re-derived and replayed offline from these files, which is how a pairing fault is found
+     // without a rebuild per experiment.
+     void dump_frame(const std::string& name, const dream::render::Frame& f) {
+-        FILE* out = std::fopen(name.c_str(), "w");
++        FILE* out = fopen_utf8(name.c_str(), "w");
+         if (!out)
+             return;
+         std::fprintf(out, "z %.9g %.9g\nstrips %u sprites %u\n", f.min_z, f.max_z, f.strips,
+@@ -1680,7 +1715,7 @@ struct Live {
+             std::vector<std::uint8_t> px;
+             std::uint32_t w = 0, h = 0;
+             if (window.read_pixels(px, w, h)) {
+-                if (FILE* pf = std::fopen(name.c_str(), "wb")) {
++                if (FILE* pf = fopen_utf8(name.c_str(), "wb")) {
+                     std::fprintf(pf, "P6\n%u %u\n255\n", w, h);
+                     std::fwrite(px.data(), 1, px.size(), pf);
+                     std::fclose(pf);
+@@ -1690,7 +1725,7 @@ struct Live {
+             std::fprintf(stderr, "could not read the presented image back\n");
+             return;
+         }
+-        FILE* f = std::fopen(name.c_str(), "wb");
++        FILE* f = fopen_utf8(name.c_str(), "wb");
+         if (!f)
+             return;
+         std::fprintf(f, "P6\n%u %u\n255\n", shown.width, shown.height);
+@@ -1734,20 +1769,20 @@ struct Live {
+         if (was_interpolated)
+             dump_frame(std::string(stem) + ".interp", interp_frame);
+         if (!last_stream.empty()) {
+-            if (FILE* f = std::fopen((std::string(stem) + ".ta").c_str(), "wb")) {
++            if (FILE* f = fopen_utf8((std::string(stem) + ".ta").c_str(), "wb")) {
+                 std::fwrite(last_stream.data(), 4, last_stream.size(), f);
+                 std::fclose(f);
+             }
+         }
+-        if (FILE* f = std::fopen((std::string(stem) + ".vram").c_str(), "wb")) {
++        if (FILE* f = fopen_utf8((std::string(stem) + ".vram").c_str(), "wb")) {
+             std::fwrite(memory_.vram(), 1, dream::mem::DcMemory::kVramSize, f);
+             std::fclose(f);
+         }
+-        if (FILE* f = std::fopen((std::string(stem) + ".vram.regs").c_str(), "wb")) {
++        if (FILE* f = fopen_utf8((std::string(stem) + ".vram.regs").c_str(), "wb")) {
+             std::fwrite(pvr_.reg_block(), 4, 0x2000 / 4, f);
+             std::fclose(f);
+         }
+-        if (FILE* f = std::fopen((std::string(stem) + ".txt").c_str(), "w")) {
++        if (FILE* f = fopen_utf8((std::string(stem) + ".txt").c_str(), "w")) {
+             std::fprintf(f, "guest frame %llu, presented frame %llu\n",
+                          static_cast<unsigned long long>(guest_frame),
+                          static_cast<unsigned long long>(presented));
+@@ -2309,22 +2344,22 @@ std::string suggest_relocations(dream::System& sys, const std::vector<char>& ima
+ // Where this project writes files on the player's behalf: the platform's per-user data directory,
+ // never the checkout. The input bindings follow the same rule (docs/future-enhancements.md): the
+ // game's TOML is tracked, and a card changes every time the player saves.
+-std::string host_data_dir() {
++std::filesystem::path host_data_dir() {
+ #if defined(_WIN32)
+-    const char* base = std::getenv("APPDATA");
++    const wchar_t* base = _wgetenv(L"APPDATA");
+     if (base && *base)
+-        return std::string(base) + "\\dream-recomp";
++        return std::filesystem::path(base) / "dream-recomp";
+ #elif defined(__APPLE__)
+     const char* home = std::getenv("HOME");
+     if (home && *home)
+-        return std::string(home) + "/Library/Application Support/dream-recomp";
++        return std::filesystem::u8path(home) / "Library" / "Application Support" / "dream-recomp";
+ #else
+     const char* xdg = std::getenv("XDG_DATA_HOME");
+     if (xdg && *xdg)
+-        return std::string(xdg) + "/dream-recomp";
++        return std::filesystem::u8path(xdg) / "dream-recomp";
+     const char* home = std::getenv("HOME");
+     if (home && *home)
+-        return std::string(home) + "/.local/share/dream-recomp";
++        return std::filesystem::u8path(home) / ".local" / "share" / "dream-recomp";
+ #endif
+     return {};
+ }
+@@ -2333,18 +2368,18 @@ std::string host_data_dir() {
+ // card answers on: port A, expansion slot 1. Empty when the platform's variables are unset or the
+ // directories cannot be made, and the run then continues without a card rather than failing to
+ // start over a convenience.
+-std::string default_vmu_path(const std::string& game_id) {
++std::filesystem::path default_vmu_path(const std::string& game_id) {
+     if (game_id.empty())
+         return {};
+-    const std::string root = host_data_dir();
++    const std::filesystem::path root = host_data_dir();
+     if (root.empty())
+         return {};
+-    const std::filesystem::path dir = std::filesystem::path(root) / "saves" / game_id;
++    const std::filesystem::path dir = root / "saves" / std::filesystem::u8path(game_id);
+     std::error_code ec;
+     std::filesystem::create_directories(dir, ec);
+     if (ec)
+         return {};
+-    return (dir / "vmu_a1.bin").string();
++    return dir / "vmu_a1.bin";
+ }
+ 
+ }  // namespace
+@@ -2360,7 +2395,7 @@ bool load_boot_image(const dream::translator::GameConfig& cfg, dream::gdrom::Dis
+     if (std::filesystem::exists(cfg.binary_path, ec)) {
+         std::ifstream in(cfg.binary_path, std::ios::binary);
+         if (!in) {
+-            error = "cannot read " + cfg.binary_path.string();
++            error = "cannot read " + path_to_utf8(cfg.binary_path);
+             return false;
+         }
+         bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+@@ -2382,11 +2417,11 @@ bool load_boot_image(const dream::translator::GameConfig& cfg, dream::gdrom::Dis
+         }
+         from_disc = true;
+     } else if (!cfg.disc_image) {
+-        error = "no boot program: " + cfg.binary_path.string() +
++        error = "no boot program: " + path_to_utf8(cfg.binary_path) +
+                 " is missing and the config names no disc image";
+         return false;
+     } else {
+-        error = "no boot program: " + cfg.binary_path.string() +
++        error = "no boot program: " + path_to_utf8(cfg.binary_path) +
+                 " is missing and [disc] has no boot_lba/boot_size";
+         return false;
+     }
+@@ -2522,7 +2557,7 @@ void usage(const char* argv0, std::FILE* out) {
+         argv0);
+ }
+ 
+-int main(int argc, char** argv) {
++int run(int argc, char** argv) {
+     install_host_fault_filter();
+     // Diagnostics: a crash loses a block-buffered stdout when it is redirected, which hides the
+     // line that says where the run was. DREAM_UNBUFFERED=1 makes every line reach the file first.
+@@ -2900,18 +2935,20 @@ int main(int argc, char** argv) {
+ #endif
+     dream::translator::GameConfig cfg;
+     std::string err;
+-    if (!dream::translator::load_game_config(config, cfg, err)) {
++    if (!dream::translator::load_game_config(utf8_path(config), cfg, err)) {
+         std::fprintf(stderr, "%s\n", err.c_str());
+         return 2;
+     }
+     if (!disc_override.empty())
+-        cfg.disc_image = std::filesystem::path(disc_override);
++        cfg.disc_image = utf8_path(disc_override);
+     // A windowed run gets the per-user card for this title unless --vmu names one. Without a card
+     // most titles cannot save at all, and a first-time player has no reason to know the flag
+     // exists; with it, saving works on the first run. Headless runs stay card-less: a card answers
+     // Maple frames and changes the write stream, which would invalidate every golden trace.
+     if (vmu.empty() && window_mode) {
+-        vmu = default_vmu_path(cfg.id);
++        const std::filesystem::path default_card = default_vmu_path(cfg.id);
++        if (!default_card.empty())
++            vmu = path_to_utf8(default_card);
+         if (!vmu.empty())
+             std::printf("memory card: default card for %s is %s\n", cfg.id.c_str(),
+                         vmu.c_str());
+@@ -2967,7 +3004,7 @@ int main(int argc, char** argv) {
+     dream::hle::Bios bios(sys);
+     bios.attach_disc(disc.get());
+     if (!bios_image.empty()) {
+-        std::ifstream f(bios_image, std::ios::binary);
++        std::ifstream f(utf8_path(bios_image), std::ios::binary);
+         std::vector<char> raw((std::istreambuf_iterator<char>(f)),
+                               std::istreambuf_iterator<char>());
+         if (raw.size() != dream::mem::DcMemory::kBiosSize) {
+@@ -2982,7 +3019,7 @@ int main(int argc, char** argv) {
+     // Load the flash before setup_boot: Bios::install() formats a synthetic one only when the
+     // factory string is not already present, so an image loaded here is used as it stands.
+     if (!flash_image.empty()) {
+-        std::ifstream f(flash_image, std::ios::binary);
++        std::ifstream f(utf8_path(flash_image), std::ios::binary);
+         std::vector<char> raw((std::istreambuf_iterator<char>(f)),
+                               std::istreambuf_iterator<char>());
+         if (raw.size() != dream::hle::Flash::kSize) {
+@@ -3073,7 +3110,7 @@ int main(int argc, char** argv) {
+                     return;
+                 std::snprintf(name, sizeof name, "%s.%03u", dump_ta.c_str(), written++);
+             }
+-            if (FILE* f = std::fopen(name, "wb")) {
++            if (FILE* f = fopen_utf8(name, "wb")) {
+                 std::fwrite(stream.data(), 4, stream.size(), f);
+                 std::fclose(f);
+                 // The frame number as well as the render index: a visual fault is noticed at a
+@@ -3091,11 +3128,11 @@ int main(int argc, char** argv) {
+             if (!dump_vram.empty() && !vram_written) {
+                 vram_written = true;
+                 const std::string vpath = std::string(name) + ".vram";
+-                if (FILE* f = std::fopen(vpath.c_str(), "wb")) {
++                if (FILE* f = fopen_utf8(vpath.c_str(), "wb")) {
+                     std::fwrite(sys.memory.vram(), 1, dream::mem::DcMemory::kVramSize, f);
+                     std::fclose(f);
+                 }
+-                if (FILE* f = std::fopen((vpath + ".regs").c_str(), "wb")) {
++                if (FILE* f = fopen_utf8((vpath + ".regs").c_str(), "wb")) {
+                     for (std::uint32_t off = 0; off < 0x2000; off += 4) {
+                         const std::uint32_t word = pvr.reg(off);
+                         std::fwrite(&word, 4, 1, f);
+@@ -3152,7 +3189,7 @@ int main(int argc, char** argv) {
+     dream::maple::MemoryCard* card_ptr = nullptr;
+     if (!vmu.empty()) {
+         auto card = std::make_unique<dream::maple::MemoryCard>();
+-        switch (card->load(vmu)) {
++        switch (card->load(utf8_path(vmu))) {
+             case dream::maple::CardStatus::Ok:
+                 std::printf("memory card %s: %s\n", vmu.c_str(),
+                             card->formatted() ? "formatted" : "present but not formatted");
+@@ -3168,7 +3205,7 @@ int main(int argc, char** argv) {
+                     return 2;
+                 }
+                 card->format();
+-                if (!card->save_as(vmu)) {
++                if (!card->save_as(utf8_path(vmu))) {
+                     std::fprintf(stderr, "cannot create a memory card at %s\n", vmu.c_str());
+                     return 2;
+                 }
+@@ -3225,7 +3262,7 @@ int main(int argc, char** argv) {
+     std::vector<std::pair<std::uint64_t, Pad>> replayed;
+     std::size_t replay_next = 0;
+     if (!replay_input.empty()) {
+-        std::ifstream rec(replay_input);
++        std::ifstream rec(utf8_path(replay_input));
+         if (!rec) {
+             std::fprintf(stderr, "--replay-input %s: cannot read it\n", replay_input.c_str());
+             return 2;
+@@ -3255,7 +3292,7 @@ int main(int argc, char** argv) {
+     std::uint64_t recorded = 0;
+     Pad last_recorded;
+     if (!record_input.empty()) {
+-        record_file = std::fopen(record_input.c_str(), "w");
++        record_file = fopen_utf8(record_input.c_str(), "w");
+         if (!record_file) {
+             std::fprintf(stderr, "--record-input %s: cannot write it\n", record_input.c_str());
+             return 2;
+@@ -3579,7 +3616,7 @@ int main(int argc, char** argv) {
+     FILE* hash_file = nullptr;
+     std::uint64_t hashed_frame = ~0ull;
+     if (!write_hash.empty()) {
+-        hash_file = std::fopen(write_hash.c_str(), "w");
++        hash_file = fopen_utf8(write_hash.c_str(), "w");
+         if (!hash_file) {
+             std::fprintf(stderr, "cannot write %s\n", write_hash.c_str());
+             return 2;
+@@ -3590,7 +3627,7 @@ int main(int argc, char** argv) {
+     }
+     FILE* log_file = nullptr;
+     if (!write_log.empty()) {
+-        log_file = std::fopen(write_log.c_str(), "w");
++        log_file = fopen_utf8(write_log.c_str(), "w");
+         if (!log_file) {
+             std::fprintf(stderr, "cannot write %s\n", write_log.c_str());
+             return 2;
+@@ -3946,7 +3983,7 @@ int main(int argc, char** argv) {
+     }
+ #endif
+     if (!dump_vram.empty()) {
+-        if (FILE* f = std::fopen(dump_vram.c_str(), "wb")) {
++        if (FILE* f = fopen_utf8(dump_vram.c_str(), "wb")) {
+             std::fwrite(sys.memory.vram(), 1, dream::mem::DcMemory::kVramSize, f);
+             std::fclose(f);
+             std::printf("wrote %s: %u bytes of video memory\n", dump_vram.c_str(),
+@@ -3954,7 +3991,7 @@ int main(int argc, char** argv) {
+         }
+         // The PVR register block carries palette memory (at +0x1000) and its format.
+         const std::string regs_path = dump_vram + ".regs";
+-        if (FILE* f = std::fopen(regs_path.c_str(), "wb")) {
++        if (FILE* f = fopen_utf8(regs_path.c_str(), "wb")) {
+             for (std::uint32_t off = 0; off < 0x2000; off += 4) {
+                 const std::uint32_t w = pvr.reg(off);
+                 std::fwrite(&w, 4, 1, f);
+@@ -3963,7 +4000,7 @@ int main(int argc, char** argv) {
+         }
+     }
+     if (!dump_aram.empty()) {
+-        if (FILE* f = std::fopen(dump_aram.c_str(), "wb")) {
++        if (FILE* f = fopen_utf8(dump_aram.c_str(), "wb")) {
+             std::fwrite(sys.memory.aram(), 1, dream::mem::DcMemory::kAramSize, f);
+             std::fclose(f);
+         }
+@@ -3978,7 +4015,7 @@ int main(int argc, char** argv) {
+         std::printf("\n");
+     }
+     if (!wav.empty()) {
+-        if (FILE* f = std::fopen(wav.c_str(), "wb")) {
++        if (FILE* f = fopen_utf8(wav.c_str(), "wb")) {
+             const std::uint32_t data_bytes = static_cast<std::uint32_t>(pcm.size() * 2);
+             auto put32 = [&](std::uint32_t v) {
+                 const unsigned char b[4] = {
+@@ -4026,7 +4063,7 @@ int main(int argc, char** argv) {
+             // One file, both halves, in the order they go into the TOML. Written even when empty
+             // apart from a note, because "the run found nothing to add" is an answer and an
+             // absent file is not.
+-            if (FILE* f = std::fopen(suggest_config.c_str(), "wb")) {
++            if (FILE* f = fopen_utf8(suggest_config.c_str(), "wb")) {
+                 std::fprintf(f, "# Suggested by %s from a run that stopped: %s.\n", argv[0], stop);
+                 if (entries.empty() && rel.empty())
+                     std::fprintf(f,
+@@ -4056,7 +4093,7 @@ int main(int argc, char** argv) {
+         }
+     }
+     if (!flash_dump.empty()) {
+-        std::ofstream o(flash_dump, std::ios::binary);
++        std::ofstream o(utf8_path(flash_dump), std::ios::binary);
+         o.write(reinterpret_cast<const char*>(sys.memory.flash()), dream::hle::Flash::kSize);
+     }
+     if (!dump.empty()) {  // --dump ADDR:LEN: hex dump of guest memory at stop
+@@ -4076,7 +4113,7 @@ int main(int argc, char** argv) {
+         std::printf("serial output (%zu bytes):\n%s\n", scif.transmitted.size(),
+                     scif.transmitted.c_str());
+     if (!sample_file.empty()) {
+-        std::ofstream o(sample_file);
++        std::ofstream o(utf8_path(sample_file));
+         for (const auto& smp : samples) {
+             char line[128];
+             std::snprintf(line, sizeof line, "%llu %08x %08x %08x %08x %08x\n",
+@@ -4098,10 +4135,35 @@ int main(int argc, char** argv) {
+                         samples[i].r15, samples[i].r10, samples[i].sr, samples[i].pr);
+     }
+     if (!report.empty()) {
+-        std::ofstream o(report);
++        std::ofstream o(utf8_path(report));
+         o << text;
+     }
+     if (stop_on_ta && !reached_ta && rc == 0)
+         rc = 1;
+     return rc;
+ }
++
++// Windows hands the process UTF-16 arguments. Convert them once to UTF-8, which is what SDL and
++// the launcher use, so --config/--disc/--vmu and every debug output path survive non-ASCII names.
++#if defined(_WIN32)
++int wmain(int argc, wchar_t** wargv) {
++    std::vector<std::string> args;
++    args.reserve(static_cast<std::size_t>(argc));
++    for (int i = 0; i < argc; ++i) {
++        const int size =
++            WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, nullptr, 0, nullptr, nullptr);
++        if (size <= 0)
++            return 2;
++        std::vector<char> buf(static_cast<std::size_t>(size));
++        WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, buf.data(), size, nullptr, nullptr);
++        args.emplace_back(buf.data(), static_cast<std::size_t>(size - 1));
++    }
++    std::vector<char*> argv;
++    argv.reserve(args.size());
++    for (auto& arg : args)
++        argv.push_back(arg.data());
++    return run(static_cast<int>(argv.size()), argv.data());
++}
++#else
++int main(int argc, char** argv) { return run(argc, argv); }
++#endif
+diff --git a/runtime/include/dream/runtime/maple/maple.h b/runtime/include/dream/runtime/maple/maple.h
+index 80d5f62..20d2871 100644
+--- a/runtime/include/dream/runtime/maple/maple.h
++++ b/runtime/include/dream/runtime/maple/maple.h
+@@ -6,6 +6,7 @@
+ 
+ #include <array>
+ #include <cstdint>
++#include <filesystem>
+ #include <functional>
+ #include <memory>
+ #include <string>
+@@ -139,12 +140,12 @@ public:
+     // path that is not a card used to be truncated to 131,072 bytes the moment the title saved: a
+     // mistyped argument destroyed whatever it named. Anything that is not exactly kImageSize bytes
+     // is refused, and no path is remembered, so nothing can be written back over it.
+-    CardStatus load(const std::string& path);
++    CardStatus load(const std::filesystem::path& path);
+     // Writes the image back; called automatically after each block write when a path is set.
+     // False when there is no path, which is what a refused load leaves behind.
+     bool save() const;
+     // Writes to `path` and adopts it. For creating a card that did not exist yet.
+-    bool save_as(const std::string& path);
++    bool save_as(const std::filesystem::path& path);
+ 
+     // Makes this a blank, formatted card: the system block's geometry, a FAT with the whole user
+     // area free and the directory chain allocated, and an empty directory. The layout is in
+@@ -161,7 +162,7 @@ public:
+ 
+ private:
+     std::vector<std::uint8_t> flash_ = std::vector<std::uint8_t>(kImageSize, 0);
+-    std::string path_;
++    std::filesystem::path path_;
+ };
+ 
+ // A Puru Puru (jump) pack: the vibration motor that sits in a controller's second expansion slot.
+diff --git a/runtime/src/gdrom/disc.cpp b/runtime/src/gdrom/disc.cpp
+index 6c5d529..ad222b5 100644
+--- a/runtime/src/gdrom/disc.cpp
++++ b/runtime/src/gdrom/disc.cpp
+@@ -11,6 +11,23 @@
+ 
+ namespace dream::gdrom {
+ 
++namespace {
++// Windows' fopen() takes an ANSI path, so it truncates a non-ASCII directory or file name. The
++// translator's launcher passes UTF-8; keep the path and open it wide on Windows.
++FILE* open_read_binary(const std::filesystem::path& path) {
++#if defined(_WIN32)
++    return _wfopen(path.c_str(), L"rb");
++#else
++    return std::fopen(path.string().c_str(), "rb");
++#endif
++}
++
++std::string path_to_utf8(const std::filesystem::path& path) {
++    const std::u8string u8 = path.u8string();
++    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
++}
++}  // namespace
++
+ // ---- Disc --------------------------------------------------------------------------------------
+ 
+ const Track* Disc::track_for(std::uint32_t lba) const noexcept {
+@@ -105,7 +122,7 @@ namespace {
+ class GdiDisc final : public Disc {
+ public:
+     bool open(const std::filesystem::path& path, std::string& error) {
+-        path_ = path.string();
++        path_ = path_to_utf8(path);
+         std::ifstream in(path);
+         if (!in) {
+             error = "cannot open " + path_;
+@@ -133,11 +150,11 @@ public:
+                 ls >> file;
+             }
+             ls >> offset;
+-            const auto fpath = dir / file;
++            const auto fpath = dir / std::filesystem::u8path(file);
+             std::error_code ec;
+             const auto fsize = std::filesystem::file_size(fpath, ec);
+             if (ec) {
+-                error = "GDI track file missing: " + fpath.string();
++                error = "GDI track file missing: " + path_to_utf8(fpath);
+                 return false;
+             }
+             Track t;
+@@ -147,7 +164,7 @@ public:
+             t.sectors = static_cast<std::uint32_t>((fsize - offset) / ssize);
+             t.data = type == 4;
+             tracks_.push_back(t);
+-            files_[number] = {fpath.string(), offset};
++            files_[number] = {fpath, offset};
+         }
+         if (tracks_.empty()) {
+             error = "GDI lists no tracks";
+@@ -163,7 +180,7 @@ public:
+             return false;
+         auto& f = files_[t->number];
+         if (!f.handle) {
+-            f.handle = std::fopen(f.path.c_str(), "rb");
++            f.handle = open_read_binary(f.path);
+             if (!f.handle)
+                 return false;
+         }
+@@ -182,7 +199,7 @@ public:
+ 
+ private:
+     struct File {
+-        std::string path;
++        std::filesystem::path path;
+         std::uint64_t offset = 0;
+         FILE* handle = nullptr;
+     };
+@@ -202,9 +219,16 @@ public:
+     };
+ 
+     bool open(const std::filesystem::path& path, std::string& error) {
+-        path_ = path.string();
+-        const chd_error err = chd_open(path_.c_str(), CHD_OPEN_READ, nullptr, &chd_);
++        path_ = path_to_utf8(path);
++        file_ = open_read_binary(path);
++        if (!file_) {
++            error = "cannot open " + path_;
++            return false;
++        }
++        const chd_error err = chd_open_file(file_, CHD_OPEN_READ, nullptr, &chd_);
+         if (err != CHDERR_NONE) {
++            std::fclose(file_);
++            file_ = nullptr;
+             error = std::string("chd_open: ") + chd_error_string(err);
+             return false;
+         }
+@@ -240,6 +264,8 @@ public:
+     ~ChdDisc() override {
+         if (chd_)
+             chd_close(chd_);
++        if (file_)
++            std::fclose(file_);
+     }
+ 
+ private:
+@@ -337,6 +363,7 @@ private:
+     }
+ 
+     chd_file* chd_ = nullptr;
++    FILE* file_ = nullptr;
+     std::uint32_t hunk_bytes_ = 0, frames_per_hunk_ = 0;
+     std::uint32_t cached_hunk_ = 0xFFFFFFFFu;
+     std::vector<std::uint8_t> hunk_buf_;
+@@ -352,8 +379,8 @@ private:
+ class CdiDisc final : public Disc {
+ public:
+     bool open(const std::filesystem::path& path, std::string& error) {
+-        path_ = path.string();
+-        f_ = std::fopen(path_.c_str(), "rb");
++        path_ = path_to_utf8(path);
++        f_ = open_read_binary(path);
+         if (!f_) {
+             error = "cannot open " + path_;
+             return false;
+diff --git a/runtime/src/maple/maple.cpp b/runtime/src/maple/maple.cpp
+index 4f17e82..0683046 100644
+--- a/runtime/src/maple/maple.cpp
++++ b/runtime/src/maple/maple.cpp
+@@ -33,7 +33,7 @@ std::uint8_t trigger_byte(float v) noexcept {
+     return static_cast<std::uint8_t>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
+ }
+ 
+-CardStatus MemoryCard::load(const std::string& path) {
++CardStatus MemoryCard::load(const std::filesystem::path& path) {
+     path_.clear();  // adopted only once the file is known to be a card
+     std::error_code ec;
+     if (!std::filesystem::exists(path, ec))
+@@ -67,7 +67,7 @@ bool MemoryCard::save() const {
+     return static_cast<bool>(out);
+ }
+ 
+-bool MemoryCard::save_as(const std::string& path) {
++bool MemoryCard::save_as(const std::filesystem::path& path) {
+     path_ = path;
+     return save();
+ }
+diff --git a/translator/src/config/game_config.cpp b/translator/src/config/game_config.cpp
+index 3a1db1d..d91c727 100644
+--- a/translator/src/config/game_config.cpp
++++ b/translator/src/config/game_config.cpp
+@@ -100,7 +100,7 @@ bool finish(const toml::table& t, const std::filesystem::path& dir, GameConfig&
+     if (!get_str(t["disc"]["image"], "disc.image", disc_image, error, false))
+         return false;
+     if (!disc_image.empty())
+-        c.disc_image = dir / disc_image;
++        c.disc_image = dir / std::filesystem::u8path(disc_image);
+     if (!get_u32(t["disc"]["boot_lba"], "disc.boot_lba", c.boot_lba, error, false) ||
+         !get_u32(t["disc"]["boot_size"], "disc.boot_size", c.boot_size, error, false))
+         return false;
+@@ -120,7 +120,7 @@ bool finish(const toml::table& t, const std::filesystem::path& dir, GameConfig&
+                  false) ||
+         !get_u32(t["binary"]["entry"], "binary.entry", c.entry, error, true))
+         return false;
+-    c.binary_path = dir / bin;
++    c.binary_path = dir / std::filesystem::u8path(bin);
+     if (!t["binary"]["link_address"])
+         c.link_address = c.load_address;
+     if ((c.load_address & 0x1FFFFFFFu) != (c.link_address & 0x1FFFFFFFu)) {
+@@ -176,7 +176,7 @@ bool finish(const toml::table& t, const std::filesystem::path& dir, GameConfig&
+     if (!get_str(t["functions"]["symbols"], "functions.symbols", sym, error, false))
+         return false;
+     if (!sym.empty())
+-        c.symbols = dir / sym;
++        c.symbols = dir / std::filesystem::u8path(sym);
+     c.pointers = t["functions"]["pointers"].value_or(true);
+     c.sweep = t["functions"]["sweep"].value_or(true);
+     if (!get_addr_map(t["hle"], "hle", c.hle, error) ||

@@ -36,8 +36,8 @@ New-Item -ItemType Directory -Force (Split-Path -Parent $Out) | Out-Null
 if (-not $Flycast) {
     $candidates = @(
         $env:FLYCAST_EXE,
-        "C:\Users\Lawe\Desktop\New folder (4)\flycast.exe",
-        (Join-Path $root "tools\flycast\flycast.exe")
+        (Join-Path $root "tools\flycast\flycast.exe"),
+        (Get-Command flycast.exe -ErrorAction SilentlyContinue).Source
     ) | Where-Object { $_ }
     $Flycast = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 }

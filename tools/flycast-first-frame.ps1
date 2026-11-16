@@ -6,7 +6,7 @@
 # that dialog to go (its Cancel button has a distinctive blue), then reports the time from process
 # start to the first non-black frame of the emulated picture, and saves that frame.
 param(
-    [string]$Flycast = "C:\Users\Lawe\Desktop\New folder (4)\flycast.exe",
+    [string]$Flycast = "",
     [int]$TimeoutSeconds = 45,
     [string]$Out = "work\flycast-first.png",
     # After the first frame, keep saving shots here every half second so the later screens (the
@@ -16,6 +16,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+if (-not $Flycast) {
+    $candidates = @($env:FLYCAST_EXE,
+                    (Join-Path $root "tools\flycast\flycast.exe"),
+                    (Get-Command flycast.exe -ErrorAction SilentlyContinue).Source) |
+                  Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+    $Flycast = @($candidates) | Select-Object -First 1
+}
+if (-not $Flycast -or -not (Test-Path -LiteralPath $Flycast)) {
+    throw "Flycast not found; pass -Flycast PATH or set FLYCAST_EXE"
+}
+$Flycast = (Resolve-Path -LiteralPath $Flycast).Path
 $cfg = Join-Path $root "engine\games\draconus\draconus.toml"
 $gdi = (Select-String -LiteralPath $cfg -Pattern '^\s*image\s*=\s*"(.*)"').Matches[0].Groups[1].Value
 if (-not (Test-Path -LiteralPath $gdi)) { throw "disc image missing: $gdi" }

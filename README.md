@@ -1,3 +1,5 @@
+<p align="center"><img src="Draconus%20Recomped%20Emblem%20light.png" alt="Draconus Recomped" width="720"></p>
+
 # Draconus-Recomp
 
 A native Windows x64 static recompilation of **Draconus: Cult of the Wyrm**
@@ -9,11 +11,14 @@ The game is playable at real time, and the recompiled path is the fast one: 1.0x
 
 The game's SH-4 code is translated ahead of time into C++, and the Dreamcast hardware
 (file system, controllers, video, sound, memory card) is replaced by native code. The
-result runs from the user's own disc — no game data is included or distributed.
+result runs from the user's own disc — no disc data or extracted game files are included or
+distributed. A prebuilt release contains translated code but no disc assets; see
+`docs/LEGAL.md`.
 
 This repository holds the research, the disc tooling, the title configuration and the
 engine fixes. The engine itself is fetched by `setup.ps1` at a pinned commit, so it is
-not vendored here.
+not vendored here. The project lives at
+<https://github.com/GnomeChimpsky/Draconus-Recomp>.
 
 ## Where the work stands
 
@@ -43,9 +48,30 @@ tools\import-disc.bat "D:\dumps\draconus.gdi"       # verify + point the config 
 ```
 
 The first run says there is nothing to translate yet; the second extracts the boot executable from
-the dump you imported and builds. You need the Vulkan SDK and SDL3 — see `docs/09-TOOLING.md`; if
-SDL3 is not in `work\sdl3`, pass `-Sdl3Dir <path>\cmake`. `docs/LEGAL.md` covers what you must
-supply.
+the dump you imported and builds. You need Visual Studio 2022 C++ build tools, CMake, Ninja,
+Python 3.9+, and the Vulkan SDK — see `docs/09-TOOLING.md`; if SDL3 is not in `work\sdl3`, pass
+`-Sdl3Dir <path>\cmake`. If PowerShell script execution is blocked, `setup.bat` runs the same
+script with `-ExecutionPolicy Bypass`. `docs/LEGAL.md` covers what you must supply.
+
+## Release build
+
+For players, the release is a prebuilt Windows x64 folder: `DraconusLauncher\DraconusLauncher.exe`,
+`DraconusRecomp.exe`, `draconus.toml`, `SDL3.dll`, and the Visual C++ runtime DLLs. It needs no
+Python or compiler, but does need a Vulkan-capable GPU driver. The launcher verifies your own
+GDI/CHD and runs the game with `--disc` pointing at it; the boot program is read from your disc, so
+no extracted `1ST_READ.BIN` ships. Non-ASCII account names, disc folders and file names are
+supported.
+
+Build the release from a configured tree:
+
+```powershell
+tools\build-release.ps1                 # work\release
+tools\build-release.ps1 -Out D:\out     # elsewhere
+```
+
+The script sanitizes `draconus.toml` to the `CHANGE-ME` placeholder, copies the VC++ runtime,
+rebuilds the frozen launcher unless `-SkipLauncher`, and fails if the output contains a disc
+image, an extracted file, or other game data. `tools\build-launcher.ps1` builds only the launcher.
 
 ## Checking the translated path
 
@@ -84,9 +110,12 @@ individual `info`, `align`, `compare`, `gaps` and `raw2wav` commands.
 tools\launcher.bat
 ```
 
-Pick a `.gdi`, press **Verify** (it refuses anything that is not the USA V1.000 release and
-writes the config on success), choose a resolution and a path, press **Play**. The logic
-under the window is the same code the scripts use, and it has a headless self-test:
+This is the source-tree launcher; release players run `DraconusLauncher\DraconusLauncher.exe`
+instead and need no Python. Pick your `.gdi` or `.chd`, press **Check disc** (it refuses anything
+that is not the USA V1.000 release and saves the path when the config is writable), choose a
+resolution and a path, press **Play**. A read-only config no longer blocks Play: the selected
+image is passed with `--disc` for that session. The logic under the window is the same code the
+scripts use, and it has a headless self-test:
 
 ```powershell
 python tools\launcher.py --selftest
@@ -119,10 +148,10 @@ the disc path before starting and says so plainly if the dump is missing or was 
 .\play-draconus.bat --max-frames 600 --rtc-seed 1000000 --screenshot-at 500
 ```
 
-Both paths run the game; the translated one is about five times faster (1.0x windowed, 1.2x
-headless at 1,800 frames, against the interpreter's 0.25x) and their guest state matches — same
-renders, same controller traffic, byte-identical screenshots. See `docs/12-HANDOVER.md` for the
-remaining work.
+Both paths run the game; the translated one is the fast path (about 1.0x windowed and 3-4.5x
+headless on the development machine, against the interpreter's 0.25x) and their guest state
+matches — same renders, same controller traffic, byte-identical screenshots. See
+`docs/12-HANDOVER.md` for the remaining work.
 
 Controls: arrows = d-pad, `Z` `X` `A` `S` = A, B, X, Y, Enter = Start, `Q`/`W` = triggers,
 `F1` rebinds, `F10` frame counter, `F12` screenshot, Escape quits. `-ModernControls` (or the
@@ -139,8 +168,9 @@ rather than overwritten. `python tools\vmu.py <card>` lists what a card holds, a
 is passed, because a card answers Maple frames and would change their traces.
 
 Saving and loading happen in the game itself, on its own VMU screens; the launcher has no card
-settings of its own. Its bottom bar has **Open saves folder** and **Open settings folder** buttons,
-which open the per-user card's folder and the one holding `launcher.json`.
+settings of its own. Its bottom bar has **Open saves folder** and **Open settings folder** buttons:
+the first opens the card's folder, the second opens `%APPDATA%\dream-recomp`, which holds
+`launcher.json`, `bindings.txt` and the `saves` folder.
 
 **Display.** `-Widescreen` gives hor+ at 16:9: the game's projection is widened and 3D frames are
 presented stretched, so more of the world is visible horizontally and nothing is distorted. The HUD
@@ -153,9 +183,11 @@ pillarboxed inside the wide window. `-Aspect 21:9` takes any ratio, `-Scale 2` d
 opens the window at that size (4x at 16:9 is 2560x1440, shrunk to fit a smaller screen), and
 `-DisplayMode` chooses **windowed**, **borderless** (desktop fullscreen at the display's own size,
 which changes no display mode) or **exclusive** (one of the display's fullscreen modes, which can
-change the panel's refresh; a system that refuses it falls back to borderless). `-PresentRate 120`
-presents the display at up to that rate while the game logic keeps its 60 Hz (the extra presents
-repeat the current image; a slower display caps the rate instead of slowing the game down).
+change the panel's refresh; a system that refuses it falls back to borderless). `-PresentRate`
+takes a rate that divides the display's own refresh — for example 165 on a 165 Hz panel, or 120
+in a 120 Hz mode — and presents up to that rate while the game logic keeps its 60 Hz (the extra
+presents repeat the current image; a slower display caps the rate instead of slowing the game
+down).
 `-Interpolate` turns the repeats into drawn intermediate frames: the geometry between the two 60 Hz
 submissions is rendered, so motion is smooth without changing game speed. Every corner moves by its
 screen position, so two strips that share one move it together and a seam cannot part; menus, movies
@@ -179,7 +211,7 @@ changes, which is the quickest way to tell a host problem from a game one. If SD
 because another driver has claimed it, the launcher falls back to XInput directly and lists the
 device as `XINPUT`.
 
-**Modern controls.** The Gameplay tab's **Controls** setting (or `play-draconus.ps1
+**Modern controls.** The Game tab's **Controls** setting (or `play-draconus.ps1
 -ModernControls`) switches the pad to the optional twin-stick layout. The left stick's left/right
 movement strafes and its up/down still moves forward and back, the right stick turns, the left
 trigger blocks and the right trigger attacks. A still blocks/acts and X still attacks: the
@@ -193,12 +225,14 @@ bindings, not a separate file: `F1` still edits the base layout, and **Classic**
 ## Launcher
 
 `tools\launcher.bat` (or `python tools\launcher.py`) opens the graphical launcher: the project's
-emblem, the author credit and a link to the repository on the left, and Graphics, Audio and Gameplay
+emblem, the author credit and a link to the repository on the left, and Game, Graphics and Audio
 tabs on the right.
 
 * **Graphics** -- the CPU clock at the top (200 MHz is the console; more is an overclock that gives
   a heavy scene more cycles inside each frame, and can affect game speed and audio on some titles),
-  internal resolution (1x to 4x, which is also the window size: 4x at 16:9 is 2560x1440), widescreen
+  internal resolution (1x to 4x; the list names the window each scale opens at for the selected
+  aspect — 4x is 2560x1440 at 16:9, not 4:3's 2560x1920, and 1x is upscaled to the 720-line
+  minimum), widescreen
   (off, 16:9, 21:9 or a custom ratio, hor+), display mode (windowed, borderless or exclusive
   fullscreen), present rate (the list is built from this display's own rates: each refresh it
   reports, so 60/72/120/144/165/180/240 on a 165 Hz panel, and 60/120/144/165/240 when it cannot be
@@ -210,22 +244,24 @@ tabs on the right.
 * **Audio** -- sound on/off, master volume, output device (the SDL playback devices, refreshed when
   the dropdown opens) and an audio buffer/latency choice. `--wav` still records the mixer's
   full-scale output regardless of the playback volume.
-* **Gameplay** -- **Controls** (Classic Dreamcast pad, or Modern: left stick strafe, right stick
+* **Game** -- **Controls** (Classic Dreamcast pad, or Modern: left stick strafe, right stick
   turn, LT block, RT attack), translated or interpreter engine path, and the game disc.
 * **Bottom bar** -- **Open saves folder** and **Open settings folder** open the per-user card's
-  folder (`%APPDATA%\dream-recomp\saves\draconus`) and the launcher's own
-  (`%APPDATA%\DraconusRecomp`). Saving and loading are the game's own, so there is no card setting
-  here.
+  folder (`%APPDATA%\dream-recomp\saves\draconus`) and the per-user root
+  (`%APPDATA%\dream-recomp`, with `launcher.json`, `bindings.txt` and `saves`). Saving and loading
+  are the game's own, so there is no card setting here.
 
 The tabs are described by one table in the script (`TABS`) plus their keys in `DEFAULTS`, so adding
 an option is a few lines rather than new layout code. Settings persist under
-`%APPDATA%\DraconusRecomp\launcher.json`; `python tools\launcher.py --selftest` checks the command
+`%APPDATA%\dream-recomp\launcher.json` (the pre-release `%APPDATA%\DraconusRecomp` file is read as a
+fallback, so an upgrade keeps its choices); `python tools\launcher.py --selftest` checks the command
 each setting produces, and `--smoke` builds the window, checks that selecting 4x and 16:9 really
 produces `--scale 4 --aspect 16:9`, and closes it.
 
-The resolution list is the scale the 3D is drawn at and the size the window opens at: 4x is
-2560x1920 at 4:3, or 2560x1440 at 16:9 (16:9 keeps the 2560 width and takes the height out of it).
-A window larger than the screen is shrunk to fit, so on a 1080p display 4x opens at the largest
+The resolution list names the window each scale opens at for the selected aspect: 4x is 2560x1920
+at 4:3, or 2560x1440 at 16:9 (16:9 keeps the 2560 width and takes the height out of it). The 3D is
+drawn at 640x480 times the scale, and the engine's 720-line floor upscales 1x on a wide aspect. A
+window larger than the screen is shrunk to fit, so on a 1080p display 4x opens at the largest
 16:9 the screen allows; **Exclusive fullscreen** takes the display's own mode instead, which is how
 4x 16:9 becomes exactly 2560x1440 on a 2560x1440 panel. The game itself always sees its 640x480
 framebuffer, which is why captures and reports say 640x480 at every setting.

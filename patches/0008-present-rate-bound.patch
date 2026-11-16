@@ -1,0 +1,27 @@
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index 7659964..2fb726a 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -2723,8 +2723,20 @@ int run(int argc, char** argv) {
+             sample_file = argv[++i];
+         else if (!std::strcmp(argv[i], "--sample") && i + 1 < argc)
+             sample_every = std::strtoull(argv[++i], nullptr, 0);
+-        else if (!std::strcmp(argv[i], "--present-rate") && i + 1 < argc)
+-            present_rate = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 0));
++        else if (!std::strcmp(argv[i], "--present-rate") && i + 1 < argc) {
++            const char* text = argv[++i];
++            char* end = nullptr;
++            const long rate = std::strtol(text, &end, 10);
++            // strtoul used to take a negative rate and wrap it into a huge unsigned one, and there
++            // was no ceiling at all. A rate is a whole number a display can actually run; refusing
++            // is clearer than silently capping, and 0 keeps the old one-present-per-frame default.
++            if (end == text || *end != '\0' || rate < 0 || rate > 1000) {
++                std::fprintf(stderr, "--present-rate takes a rate in Hz, 0 to 1000 (0 presents "
++                                     "once per guest frame)\n");
++                return 2;
++            }
++            present_rate = static_cast<unsigned>(rate);
++        }
+         else if (!std::strcmp(argv[i], "--frame-interpolation"))
+             frame_interpolation = true;
+         else if (!std::strcmp(argv[i], "--sh4-clock") && i + 1 < argc) {

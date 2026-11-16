@@ -1,6 +1,6 @@
 # 09 — Tooling and environment
 
-## Environment as surveyed (2026-11-04, this machine)
+## Environment surveyed on the development machine (2026-11-04)
 
 | Tool | State | Version / path |
 |---|---|---|
@@ -13,7 +13,7 @@
 | Node.js | present | — |
 | **git** | **missing** | install first — blocks cloning anything |
 | **Vulkan SDK + `glslc`** | **missing** | required for the renderer |
-| SDL3 | missing | obtainable via CMake FetchContent |
+| SDL3 | missing | install a 3.x build and pass `-Sdl3Dir <path>\cmake`; the engine uses `find_package`, not FetchContent |
 | `chdman` | missing | only needed for the `.chd` convenience path |
 | Ghidra | missing | needed for asset/loader reverse engineering (M4+) |
 
@@ -68,11 +68,11 @@ the command line:
 | | controls | `--controls classic/modern` |
 | | engine path | `--interpret` |
 | Graphics | CPU clock | `--sh4-clock 200..800` (MHz; 200 is the console, more cycles per frame) |
-| | resolution | `--scale 1..4` (also the window size) |
+| | resolution | `--scale 1..4` (the window size follows the aspect; the launcher shows both) |
 | | widescreen | `--aspect 16:9`, `21:9`, `W:H` |
 | | display mode | `--display windowed/borderless/exclusive` (`--fullscreen` = borderless) |
-| | present rate | `--present-rate 60/120/144` (capped to the display's refresh) |
-| | frame interpolation | `--frame-interpolation` (at 120/144 Hz, experimental) |
+| | present rate | `--present-rate N` (this display's own rates; 0 = match the game) |
+| | frame interpolation | `--frame-interpolation` (with a present rate above 60 Hz) |
 | | VSync off | `--present-mode immediate` |
 | | frame counter | `--fps` |
 | Audio | sound off | `--no-audio` |
@@ -81,11 +81,13 @@ the command line:
 | | buffer / latency | `--audio-buffer 93/186/372` ms |
 
 Saving and loading are the game's own: the launcher has no card settings and attaches no card, so a
-windowed launch gets the engine's per-user card. Its bottom bar's **Open saves folder** and **Open
-settings folder** buttons open that card's folder (`%APPDATA%\dream-recomp\saves\draconus`) and the
-launcher's own (`%APPDATA%\DraconusRecomp`).
+windowed launch gets the engine's per-user card. Everything this project writes lives in one
+per-user folder: `%APPDATA%\dream-recomp` holds `launcher.json`, `bindings.txt` and `saves\<game>\`.
+The bottom bar's **Open saves folder** button opens that `saves` folder, and **Open settings folder**
+opens the root.
 
-Settings persist in `%APPDATA%\DraconusRecomp\launcher.json`. `--selftest` checks the command each
+Settings persist in `%APPDATA%\dream-recomp\launcher.json` (the pre-release
+`%APPDATA%\DraconusRecomp\launcher.json` is read as a fallback and rewritten here on the next save). `--selftest` checks the command each
 setting produces without opening a window; `--smoke` (optionally `--shot FILE`) builds the window and
 exits, which is also how the layout is reviewed. The tabs are one table (`TABS`) plus their keys in
 `DEFAULTS`, so a new option is a few lines rather than new layout code.
@@ -103,8 +105,25 @@ It pins Python 3.11 and PyInstaller 6.22.3, keeps its environment and intermedia
 `work\launcher-build\`, and writes an onedir build (onefile re-extracts ~50 MB to `%TEMP%` on every
 launch and is the variant antivirus dislikes most). The frozen launcher looks for `draconus.toml`
 beside itself or one folder below, runs `DraconusRecomp.exe` from that folder, and verifies the disc
-with the bundled `dracdisc` (GDI or CHD) — no system Python. The chosen image is written into that
-TOML. `--selftest` and `--smoke` still work; screenshots are skipped because Pillow is not bundled.
+with the bundled `dracdisc` (GDI or CHD) — no system Python. The selected image is passed to the
+engine with `--disc`, so a read-only install still plays; it is also written into the TOML when
+that file is writable. `--selftest` and `--smoke` still work; screenshots are skipped because
+Pillow is not bundled.
+
+The complete release layout is assembled by `tools\build-release.ps1`:
+
+```powershell
+tools\build-release.ps1                 # work\release
+tools\build-release.ps1 -Out D:\out     # elsewhere
+```
+
+It copies `DraconusRecomp.exe`, `SDL3.dll` and the Visual C++ runtime DLLs, sanitizes
+`draconus.toml` to `CHANGE-ME`, adds `LICENSE`, `LEGAL.md`, `THIRD-PARTY-NOTICES.md` and the
+README image, and builds the frozen launcher unless `-SkipLauncher`. The player needs a
+Vulkan-capable GPU driver; the loader (`vulkan-1.dll`) comes from it and is not bundled. The
+script refuses a release tree containing a disc image, an extracted `1ST_READ.BIN`, a save, or
+another game-data file. The runtime reads the boot program from the player's own disc, so no
+`extracted/` folder ships.
 
 ## Audio checks (M6)
 
@@ -172,17 +191,21 @@ curl.exe -L -o libchdr.zip https://codeload.github.com/rtissera/libchdr/zip/refs
 # expand the inner folder into engine\third_party\libchdr
 ```
 
-Configure and build with MSVC in a Developer shell (or via `vcvars64.bat`):
+Configure and build with MSVC in a Developer shell (or via `vcvars64.bat`). The supported path is
+`.\setup.ps1`, which finds Visual Studio with `vswhere`, locates CMake and Ninja, and fails if the
+Vulkan renderer or SDL3 is missing instead of producing a headless executable. The equivalent
+manual configuration is:
 
 ```powershell
-cmd /c "`"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat`" >nul && `
-  cmake -S engine -B engine/build -G Ninja -DCMAKE_BUILD_TYPE=Release `
-        -DDREAM_DEV_INTERPRETER=ON -DDREAM_RENDERER=OFF -DDREAM_BUILD_TESTS=OFF -DDREAM_WERROR=OFF"
-cmd /c "...vcvars64.bat... && cmake --build engine/build --target draconus_boot --parallel"
+cmake -S engine -B engine/build-render -G Ninja -DCMAKE_BUILD_TYPE=Release `
+      -DDREAM_DEV_INTERPRETER=ON -DDREAM_RENDERER=ON -DDREAM_BUILD_TESTS=OFF -DDREAM_WERROR=OFF `
+      -DSDL3_DIR=<path-to-SDL3>\cmake
+cmake --build engine/build-render --target draconus_boot --parallel
 ```
 
-`-DDREAM_RENDERER=OFF` is required on this machine (no Vulkan SDK/SDL3) and needs the
-local patch in `docs/ENGINE-CHANGES.md` 001.
+The renderer needs the Vulkan SDK (`glslc` on PATH) and SDL3; without them CMake skips it and the
+game can only run headless. `build-release.ps1` adds the Visual C++ runtime DLLs and sanitizes the
+release TOML.
 
 Measured costs on this machine (12 cores, MSVC 19.44):
 

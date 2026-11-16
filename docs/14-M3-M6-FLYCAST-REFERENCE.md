@@ -1,13 +1,14 @@
 # M3/M6 reference: Flycast side by side
 
-Flycast was at `C:\Users\Lawe\Desktop\New folder (4)\flycast.exe` (standalone, 20 MB). It boots
-the retail disc correctly, so the project now has a visual oracle on this machine.
+Flycast is a standalone emulator used as the visual oracle. Put `flycast.exe` under
+`tools\flycast\` or set `FLYCAST_EXE`; the scripts also accept `-Flycast PATH`. It boots the
+retail disc correctly, so the project has a visual oracle on the development machine.
 
 ## How to drive it here
 
 ```powershell
-$fc  = "C:\Users\Lawe\Desktop\New folder (4)\flycast.exe"
-$gdi = "G:\...\Draconus - Cult of the Wyrm v1.000 (2000)(Crave)(US)[!].gdi"
+$fc  = "$env:FLYCAST_EXE"      # or the path to flycast.exe
+$gdi = "D:\path\to\draconus.gdi"
 Start-Process $fc -ArgumentList "`"$gdi`""
 ```
 

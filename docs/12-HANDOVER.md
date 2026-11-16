@@ -429,10 +429,11 @@ specific image. Headless runs stay card-less so their traces repeat.
 **Saving and loading are the game's own (2026-11-14).** The launcher's Saves tab was removed: no card
 selection, no save list, no launch-into-a-save. A windowed launch attaches nothing, so the engine's
 per-user card above is what the title's own Save and Load Game screens write to and read from. The
-launcher's bottom bar has **Open saves folder** and **Open settings folder** buttons for finding the
-card and `launcher.json`. The `--press` walk through those screens was measured frame by frame and
-still works from the command line (the table is in `docs/17-VMU-SAVES.md`); it is no longer part of
-the launcher.
+launcher's bottom bar has **Open saves folder** and **Open settings folder** buttons: the second opens
+`%APPDATA%\dream-recomp`, which now holds `launcher.json`, `bindings.txt` and the `saves` folder, so
+one per-user folder carries everything the game and launcher write (2026-11-16). The `--press` walk
+through those screens was measured frame by frame and still works from the command line (the table is
+in `docs/17-VMU-SAVES.md`); it is no longer part of the launcher.
 
 **Owner-verified (2026-11-15): a save written through the title's Save screen loads back through its
 Load Game screen.** That closes the save/load round-trip for M7; the remaining M7 work is the full
@@ -451,7 +452,7 @@ risks; `docs/ENGINE-CHANGES.md` patch 025 has the engine side.
 ## Launcher book-keeping (2026-11-14)
 
 **Left empty for now.** The launcher records nothing about a launch beyond its own settings file
-(`%APPDATA%\DraconusRecomp\launcher.json`); this is the place to keep that record if it is ever
+(`%APPDATA%\dream-recomp\launcher.json`); this is the place to keep that record if it is ever
 wanted.
 
 ## M6 audio: done (2026-11-14)

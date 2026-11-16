@@ -60,8 +60,9 @@ title's slot picker offers that card, its Save flow writes to it, and its Load G
 Nothing is faked or driven from outside.
 
 The launcher's bottom bar has **Open saves folder** (the folder holding `vmu_a1.bin`) and **Open
-settings folder** (`%APPDATA%\DraconusRecomp`, with `launcher.json`), which is how to get at the card
-to copy it, inspect it with `tools\vmu.py`, or hand it to an emulator.
+settings folder**: the per-user root `%APPDATA%\dream-recomp`, which holds `launcher.json`,
+`bindings.txt` and the `saves` folder. That is how to get at the card to copy it, inspect it with
+`tools\vmu.py`, or hand it to an emulator.
 
 ## Driving the frontend to a save by frame number (reference)
 

@@ -10,9 +10,13 @@ against that commit, so a fresh clone builds the same engine this project was de
 | `0003-m5-coverage.patch` | Ledger entries 037–038: pointer discovery scans far enough to reach Draconus's long static-constructor functions (200 → 1,024 instructions; 8,936 → 9,126 functions), and `resume_miss` retries the other functions containing an address before the interpreter. Together they take a 60 s scripted play from 101 untranslated calls to 0. |
 | `0004-frame-interpolation-pairing.patch` | Ledger entry 039: the interpolation stops tearing the picture. The resynchronisation window goes from two candidates to sixteen, a strip whose list position changed is paired on its texture coordinates, and every corner is moved by *position* rather than by strip so two strips that share one cannot move it differently (the seams that opened and snapped shut). The presenter repeats the current picture for a still frame or one whose pairing mostly failed, presents the intermediate frame from the GPU instead of round-tripping it through the host, and F11 captures the picture that is actually on screen (with a `.interp` geometry dump when that is the intermediate frame). The on-screen counter is drawn on the GPU as solid rectangles from the same font geometry (`shaders/overlay.*`, `overlay::text_rects`), so it no longer reads the frame back on every present. Touches `render/{include,src,shaders,tests}` and `runtime/boot/boot_main.cpp`; adds `DREAM_INTERP_PAIR` and a frame list for `DREAM_INTERP_DUMP`. The launcher's present-rate list comes from the display's own modes, in the repository rather than in this patch. |
 | `0005-boot-from-disc.patch` | Ledger entry 040: a release ships no extracted `1ST_READ.BIN`, so the runtime reads the boot program from the player's own disc when `[binary] path` is absent. `[disc] boot_lba`/`boot_size` give the location, `Disc::read_user` reads the sectors (GDI and CHD), and the bytes are checked against `sha1_1st_read` before use; `--disc FILE` overrides `[disc] image`. Touches `runtime/boot/boot_main.cpp`, the new `runtime/include/dream/runtime/hash/sha1.h`, `translator/{include,src}/…/game_config.*`, the config tests and `docs/game-config.md`. |
+| `0006-utf8-paths.patch` | Ledger entry 041: Windows hands the process UTF-16 arguments, but the runtime used narrow `argv` and ANSI `ifstream`/`fopen`, so a non-ASCII user name or disc path was silently mangled. `wmain` converts the arguments to UTF-8 once; config-relative paths use `std::filesystem::u8path`; the GDI, CHD and CDI readers open native wide paths (`_wfopen`, `chd_open_file`); the VMU and bindings filesystem paths are `std::filesystem::path`; debug outputs go through a UTF-8 `fopen`. Touches `runtime/boot/boot_main.cpp`, `runtime/src/gdrom/disc.cpp`, `runtime/src/maple/maple.cpp`, `runtime/include/dream/runtime/maple/maple.h` and `translator/src/config/game_config.cpp`. |
+| `0007-user-data-folder.patch` | Ledger entry 042: the player's bindings move from the nested `<data>/dream-recomp/dream-recomp/` to `<data>/dream-recomp/`, beside the launcher's settings and the saves folder. `default_bindings_path()` asks SDL for an app-named folder with no organisation, so one per-user folder holds everything this project writes. Touches `render/src/vk/window.cpp`. The launcher's settings make the same move in the repository (`tools/launcher.py`), with the old file as a read-only fallback. |
+| `0008-present-rate-bound.patch` | Ledger entry 043: `--present-rate` parses with `strtol` and refuses a negative or non-numeric value, and anything above 1000 Hz, instead of casting a wrapped `strtoul` result to `unsigned` and accepting a rate no display can run. Touches `runtime/boot/boot_main.cpp`. |
 
-`setup.ps1` applies each patch after fetching the engine, and is safe to re-run: a tree that
-already has the patch is detected with `git apply --reverse --check` and left alone.
+`setup.ps1` applies each patch after fetching the engine, and is safe to re-run: after a successful
+run it writes `engine/.draconus-patches`, and a tree that predates the marker is recognised by the
+features each patch adds.
 
 ## Refreshing the patch
 
@@ -26,7 +30,9 @@ git diff --no-index --no-renames --no-color --src-prefix= --dst-prefix= a b > 00
 ```
 
 `0002-modern-controls.patch` is generated the same way, with `a/` the pinned tree **plus 0001** and
-`b/` the working engine; it therefore applies after 0001 in `setup.ps1`'s sorted order.
+`b/` the working engine; it therefore applies after 0001 in `setup.ps1`'s sorted order. Patches 0003
+onwards were each generated against the tree with all earlier patches applied, and `setup.ps1` applies
+them in name order, so `0007` and `0008` sit on top of `0006`.
 
 Apply a patch with `git apply -p1` from inside `engine/`. Verify before committing:
 

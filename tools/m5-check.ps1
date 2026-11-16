@@ -38,7 +38,9 @@ $fly = Join-Path $work "flycast"
 $markers = Join-Path $work "markers"
 
 foreach ($p in @($exe, $cfg, $view)) {
-    if (-not (Test-Path $p)) { throw "missing: $p (run .\setup.ps1)" }
+    if (-not (Test-Path $p)) {
+        throw "missing: $p (run .\setup.ps1, which builds draconus_boot and dream_render_view)"
+    }
 }
 
 # 900 title, 2400 character select, 3000 loading card, 3600 story, then gameplay.
@@ -116,8 +118,8 @@ Write-Host ("our frames    ok    {0} checkpoint(s) rendered at 960x720" -f $chec
 if (-not $SkipFlycast) {
     if (-not $Flycast) {
         $candidates = @($env:FLYCAST_EXE,
-                        "C:\Users\Lawe\Desktop\New folder (4)\flycast.exe",
-                        (Join-Path $root "tools\flycast\flycast.exe")) |
+                        (Join-Path $root "tools\flycast\flycast.exe"),
+                        (Get-Command flycast.exe -ErrorAction SilentlyContinue).Source) |
                       Where-Object { $_ -and (Test-Path -LiteralPath $_) }
         if (@($candidates).Count -eq 0) {
             throw "Flycast not found; pass -Flycast PATH or -SkipFlycast"

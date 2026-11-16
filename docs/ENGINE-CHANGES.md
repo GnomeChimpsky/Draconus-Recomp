@@ -2898,6 +2898,70 @@ Carried by `patches/0005-boot-from-disc.patch`, which applies after 0001–0004.
 `translator/{include,src}/.../game_config.*` with the two fields, adds the config test, and documents
 both in `docs/game-config.md`.
 
+## Patch 041: UTF-8 paths on Windows (2026-11-16)
+
+The player picks the disc and the release lives wherever they unpacked it, so paths are not
+guaranteed to be ASCII. Windows' narrow `main(char**)` and `std::ifstream`/`std::fopen` interpret
+bytes as the active ANSI code page, while SDL and the Python launcher pass UTF-8. On a profile such
+as `C:\Users\José` that silently broke the config, the selected disc, the bindings file, the VMU and
+every debug output.
+
+`boot_main` now enters through `wmain` and converts each UTF-16 argument to UTF-8 once. All
+runtime paths stay UTF-8 at the boundary: `[disc] image` and `[binary] path` are resolved with
+`std::filesystem::u8path`, `--disc`/`--config`/`--vmu`/`--bindings` go through the same
+conversion, and the debug outputs (`--report`, `--wav`, `--dump-*`, `--write-hash`, `--write-log`)
+open through a UTF-8 `fopen`. The GDI and CDI readers use `_wfopen`, the CHD reader opens the file
+wide and hands the `FILE*` to `chd_open_file` (libchdr never closes it), and the memory card stores
+a `std::filesystem::path` rather than a lossy ANSI string. The config loader's relative
+`disc.image`, `binary.path` and `symbols` joins use `u8path` too.
+
+Verified with a hard-linked retail CHD under `work\utf8-test\Draconus-测试-é`: the run read the
+config, the CHD, created and then re-opened a `card-é.vmu`, and wrote `out-é.wav` and
+`report-é.txt`, printing `boot program: 2339580 bytes from the disc at LBA 547857` and exiting 0.
+A second run with `[disc] image = "Draconus-测试.chd"` and no `--disc` also booted from the disc.
+
+Carried by `patches/0006-utf8-paths.patch`, which applies after 0001–0005. It touches
+`runtime/boot/boot_main.cpp`, `runtime/src/gdrom/disc.cpp`, `runtime/src/maple/maple.cpp`,
+`runtime/include/dream/runtime/maple/maple.h` and `translator/src/config/game_config.cpp`. The
+translator's own command-line path handling is unchanged; a source build under a non-ASCII checkout
+path is a separate build-tooling task.
+
+## Patch 042: one per-user folder (2026-11-16)
+
+The game and the launcher wrote three separate per-user folders: the launcher's settings in
+`%APPDATA%\DraconusRecomp`, the memory card in `%APPDATA%\dream-recomp\saves\draconus`, and the
+controller bindings in `%APPDATA%\dream-recomp\dream-recomp`. The nested last one came from
+`SDL_GetPrefPath("dream-recomp", "dream-recomp")` — SDL joins organisation and application, so the
+engine's name appeared twice. A player looking for their bindings, or for what the launcher had
+saved, had three places to search, and the launcher's **Open settings folder** button showed only one
+of them.
+
+Everything now lives under the engine's per-user root, `%APPDATA%\dream-recomp`:
+`launcher.json`, `bindings.txt`, and `saves\<game id>\vmu_a1.bin`. The card already used
+`host_data_dir()`. `default_bindings_path()` now asks SDL for an application-only folder,
+`SDL_GetPrefPath("", "dream-recomp")`; with no organisation SDL builds `<data>/dream-recomp/` on
+Windows, macOS and Linux alike, which is the same root the card uses. The launcher's settings move in
+`tools/launcher.py`, which reads the old `%APPDATA%\DraconusRecomp\launcher.json` when the new file
+does not exist, so an upgrade keeps its choices; the next save writes the new path.
+
+Carried by `patches/0007-user-data-folder.patch`, which applies after 0001–0006 and touches
+`render/src/vk/window.cpp`. Verified by building `draconus_boot` and `dream_render_view`, by the
+launcher's `--selftest`/`--smoke`, and by calling SDL3's `SDL_GetPrefPath("", "dream-recomp")`
+directly on this machine: it returns `C:\Users\<user>\AppData\Roaming\dream-recomp\`, the same root
+`host_data_dir()` uses for the card.
+
+## Patch 043: `--present-rate` is validated (2026-11-16)
+
+`--present-rate` was parsed with `std::strtoul` and cast straight to `unsigned`, with no range check.
+A negative argument (`--present-rate -5`) wrapped to a huge unsigned rate, and any number was accepted
+even though the display cannot show it; the run then capped it silently or behaved unpredictably. The
+parser now uses `std::strtol`, rejects trailing characters, negatives and anything above 1000 Hz, and
+prints a usage line and exits 2 — the same fail-closed pattern as `--sh4-clock`. `0` still means the
+default of one present per guest frame.
+
+Carried by `patches/0008-present-rate-bound.patch`, which applies after 0007 and touches
+`runtime/boot/boot_main.cpp`.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

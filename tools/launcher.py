@@ -64,18 +64,23 @@ else:
     BINARY = os.path.join(ROOT, "engine", "build-render", "games", "draconus", "draconus_boot.exe")
     ART = os.path.join(ROOT, "tools", "launcher-emblem.png")
 REPOSITORY = "https://github.com/GnomeChimpsky/Draconus-Recomp"
-SETTINGS = os.path.join(
+GAME_ID = "draconus"
+
+# One per-user folder for everything this project writes: the launcher's settings, the
+# controller bindings and the memory card all live under the engine's per-user root
+# (%APPDATA%\dream-recomp on Windows). The old settings file lived in a second folder; it is still
+# read when the new one does not exist, so an upgrade keeps the player's choices.
+USER_DIR = os.path.dirname(os.path.dirname(os.path.dirname(vmu.default_path(GAME_ID))))
+SETTINGS = os.path.join(USER_DIR, "launcher.json")
+LEGACY_SETTINGS = os.path.join(
     os.environ.get("APPDATA", os.path.expanduser("~")), "DraconusRecomp", "launcher.json"
 )
 
 IMAGE_RE = re.compile(r'^\s*image\s*=\s*"(.*)"', re.MULTILINE)
 
-GAME_ID = "draconus"
-
-# The bottom bar's two folder buttons. The saves folder is the engine's own per-user card folder
-# (the same rule `vmu.default_path` follows), so it holds the card a windowed run writes to even
-# though the launcher no longer attaches it itself.
-SETTINGS_DIR = os.path.dirname(SETTINGS)
+# The bottom bar's two folder buttons. The saves folder holds the card; the settings folder is the
+# per-user root, so it shows launcher.json and bindings.txt beside the saves folder.
+SETTINGS_DIR = USER_DIR
 SAVES_DIR = os.path.dirname(vmu.default_path(GAME_ID))
 
 # The output-device combo is built from what the engine reports at startup. The list object is
@@ -158,9 +163,14 @@ def describe_disc(report: str) -> str:
 
 def load_settings() -> dict:
     s = dict(DEFAULTS)
-    try:
-        with open(SETTINGS, encoding="utf-8") as f:
-            saved = json.load(f)
+    # The new per-user root first; the old DraconusRecomp file is the fallback for an upgrade, and
+    # the next save writes it to the new place.
+    for path in (SETTINGS, LEGACY_SETTINGS):
+        try:
+            with open(path, encoding="utf-8") as f:
+                saved = json.load(f)
+        except (OSError, ValueError):
+            continue
         for k in DEFAULTS:
             if k in saved and isinstance(saved[k], type(DEFAULTS[k])):
                 s[k] = saved[k]
@@ -170,8 +180,7 @@ def load_settings() -> dict:
             s["display_mode"] = "borderless"
         if s.get("display_mode") not in ("windowed", "borderless", "exclusive"):
             s["display_mode"] = "windowed"
-    except (OSError, ValueError):
-        pass
+        break
     return s
 
 
@@ -335,9 +344,63 @@ PRESENT_RATE_CHOICES = present_rate_choices(DISPLAY_REFRESH_RATES)
 INTERPOLATION_RATES = [rate for _, rate in PRESENT_RATE_CHOICES if rate > 60]
 
 
+def aspect_ratio(aspect: str, custom: str = "16:9") -> float:
+    """The width/height ratio a Widescreen setting names; 4:3 for off or an unreadable value."""
+    text = str(custom if aspect == "custom" else aspect).strip()
+    if text in ("", "off"):
+        return 4.0 / 3.0
+    try:
+        if ":" in text:
+            width, height = text.split(":", 1)
+            ratio = float(width) / float(height)
+        else:
+            ratio = float(text)
+    except (ValueError, ZeroDivisionError):
+        return 4.0 / 3.0
+    return ratio if ratio > 0 else 4.0 / 3.0
+
+
+def resolution_choices(aspect: str = "off", custom: str = "16:9") -> list[tuple[str, int]]:
+    """Rows for the resolution combo: the window each --scale opens at this aspect.
+
+    The engine draws at 640x480 times the scale and opens a window whose width follows the aspect,
+    with a 720-line floor (render/window_size.cpp). So 4x at 16:9 is a 2560x1440 window, not the
+    4:3 render's 2560x1920, and 1x at 16:9 is a 1280x720 window showing the native render upscaled.
+    """
+    ratio = aspect_ratio(aspect, custom)
+    rows: list[tuple[str, int]] = []
+    for scale in (1, 2, 3, 4):
+        # Same rounding as the engine's std::lround, including the 720-line minimum.
+        height = max(int(640 * scale / ratio + 0.5), 720)
+        width = int(height * ratio + 0.5)
+        label = "%dx - %d x %d" % (scale, width, height)
+        if scale == 1:
+            label += " (native render)"
+        rows.append((label, scale))
+    return rows
+
+
+def window_geometry(screen_w: int, screen_h: int) -> tuple[int, int, int, int]:
+    """The main window size and its minimum, clamped so both fit the screen.
+
+    The window wants 1240x780, but a laptop may be 1024x600: the height floor used to be 620 and
+    overrode the screen clamp, and the width ignored the screen entirely, so the launcher opened
+    with its bottom or right edge off-screen. A screen too small for the preferred size wins, and
+    the minimum follows the clamped window rather than the preferred one.
+    """
+    width = min(1240, max(320, screen_w - 80))
+    height = min(780, max(360, screen_h - 140))
+    return width, height, min(900, width), min(580, height)
+
+
 def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[str]:
     """The boot command line a settings dict describes. Pure, so --selftest can check it."""
-    cmd = [BINARY, "--config", CONFIG, "--window"]
+    cmd = [BINARY, "--config", CONFIG]
+    # The image is passed explicitly rather than relying on the config: a release can be
+    # installed read-only, and the engine's --disc override is what makes that playable.
+    if image:
+        cmd += ["--disc", image]
+    cmd += ["--window"]
     if int(s.get("scale", 1)) != 1:
         cmd += ["--scale", str(int(s["scale"]))]
     aspect = s.get("aspect", "off")
@@ -398,9 +461,10 @@ TABS = [
                  "playing at high resolutions. Be advised: overclocks might affect game speed and "
                  "audio on some machines, use with caution."},
         {"kind": "combo", "key": "scale", "label": "Resolution",
-         "values": [("1x - 640 x 480 (native)", 1), ("2x - 1280 x 960", 2),
-                    ("3x - 1920 x 1440", 3), ("4x - 2560 x 1920", 4)],
-         "help": "Internal rendering, a multiple of native resolution."},
+         # Replaced in the window for the aspect the player has saved; 4:3 is the build-time list.
+         "values": resolution_choices(),
+         "help": "Renders at a multiple of 640 x 480; the window opens at the size shown for the "
+                 "selected aspect."},
         {"kind": "combo", "key": "aspect", "label": "Widescreen",
          "values": [("Off - 4:3", "off"), ("16:9 - hor+", "16:9"),
                     ("21:9 - hor+", "21:9"), ("Custom ratio - hor+", "custom")],
@@ -497,11 +561,12 @@ class Launcher(tk.Tk):
             ttk.Style(self).theme_use("clam")
         except tk.TclError:
             pass
-        # Tall enough for the longest tab. The Graphics tab grew past 660 when the CPU clock row
-        # arrived and its description -- three lines -- was clipped at the bottom edge, which is
-        # worse than not having one. Clamped to the screen so it still opens on a small display.
-        self.geometry("1240x%d" % max(620, min(780, self.winfo_screenheight() - 140)))
-        self.minsize(900, 580)
+        # Tall enough for the longest tab, and never larger than the screen: on a small display the
+        # content is clipped rather than the window's controls being unreachable off-screen.
+        width, height, min_width, min_height = window_geometry(self.winfo_screenwidth(),
+                                                               self.winfo_screenheight())
+        self.geometry("%dx%d" % (width, height))
+        self.minsize(min_width, min_height)
         self.settings = load_settings()
         # Enumerate once before the tabs are built; the device combo reads this list object.
         AUDIO_DEVICES[:] = audio_device_choices(self.settings.get("audio_device", ""))
@@ -511,6 +576,8 @@ class Launcher(tk.Tk):
         self.vars: dict[str, tk.Variable] = {}
         self.combos: dict[str, ttk.Combobox] = {}
         self._dependent: list[tuple[str, str, tk.Widget]] = []
+        # The saved aspect decides the pixel counts the resolution rows show.
+        self._refresh_resolution()
         self._build()
         self._sync_depends()
         self._update_disc_state()
@@ -675,6 +742,9 @@ class Launcher(tk.Tk):
             ent = ttk.Entry(tab, textvariable=var, width=c.get("width", 18))
             if c.get("depends"):
                 self._dependent.append((c["depends"][0], c["depends"][1], ent))
+            if key == "aspect_custom":
+                # The resolution labels follow this text, so type "32:9" and see the pixels.
+                var.trace_add("write", lambda *_a: self._custom_aspect_changed())
             return ent
         if kind == "check":
             var = tk.BooleanVar(value=bool(self.settings.get(key, False)))
@@ -738,7 +808,35 @@ class Launcher(tk.Tk):
 
     def _combo_changed(self, key: str) -> None:
         self.settings[key] = self._value_for(key)
+        if key == "aspect":
+            self._refresh_resolution()
         self._sync_depends()
+
+    def _refresh_resolution(self) -> None:
+        """Re-label the resolution rows for the aspect now selected, keeping the scale value.
+
+        The labels were build-time 4:3, so a player at 16:9 read "4x - 2560 x 1920" for a window
+        that opens at 2560x1440. The value is the same --scale either way; only the numbers change.
+        """
+        control = None
+        for _, controls in TABS:
+            for c in controls:
+                if c.get("key") == "scale":
+                    control = c
+                    break
+        if control is None:
+            return
+        control["values"] = resolution_choices(self.settings.get("aspect", "off"),
+                                               self.settings.get("aspect_custom", "16:9"))
+        box = self.combos.get("scale")
+        if box is not None:
+            box.configure(values=[label for label, _ in control["values"]])
+            self.vars["scale"].set(self._label_for("scale"))
+
+    def _custom_aspect_changed(self) -> None:
+        self.settings["aspect_custom"] = self.vars["aspect_custom"].get()
+        if self.settings.get("aspect") == "custom":
+            self._refresh_resolution()
 
     def _refresh_audio_devices(self) -> None:
         """Re-enumerate when the device dropdown opens, so a headset plugged in after the launcher
@@ -763,7 +861,8 @@ class Launcher(tk.Tk):
 
     def reset(self) -> None:
         self.settings = dict(DEFAULTS)
-        # rebuild the window with the defaults
+        # Rebuild the window with the defaults, including the 4:3 resolution labels.
+        self._refresh_resolution()
         for child in list(self.children.values()):
             child.destroy()
         self.vars.clear()
@@ -844,10 +943,14 @@ class Launcher(tk.Tk):
             try:
                 write_image_path(path)
             except (OSError, RuntimeError) as exc:
-                self._set_disc_state(False, "Cannot save the disc path", self.BAD)
-                self.status.set("The disc verified, but %s could not be written:\n%s"
-                                % (CONFIG, exc))
-                return False
+                # A read-only release folder is a supported layout: the engine takes the image
+                # with --disc, so verification is enough to play this session. Only persistence
+                # is lost, and the player is told so.
+                self._set_disc_state(True, "Disc OK (not saved)", self.OK)
+                self.status.set(
+                    "Disc OK - %s; the path could not be saved (%s). "
+                    "Play will use this disc for this session." % (os.path.basename(path), exc))
+                return True
             self._set_disc_state(True, "Disc OK", self.OK)
             self.status.set("Disc OK - " + os.path.basename(path))
         else:
@@ -934,11 +1037,17 @@ def selftest() -> int:
             "vsync": True, "fps": False, "sh4_clock": 200, "audio": True,
             "audio_volume": 100, "audio_device": "", "audio_buffer": 0,
             "path": "translated", "controls": "classic"}
-    image = "G:/dumps/draconus.gdi"
+    image = "C:/fixtures/draconus.gdi"
 
     cmd = build_command(image, base)
     if "--scale" in cmd or "--aspect" in cmd or "--interpret" in cmd:
         failures.append("defaults: unexpected flags")
+    # The image must reach the engine as --disc, not only through the writable TOML: a read-only
+    # release folder has to remain playable.
+    expect("disc", cmd, ["--disc", image])
+    cmd = build_command("", base)
+    if "--disc" in cmd:
+        failures.append("empty image still passed --disc")
     # The Saves tab is gone and the audio recording setting with it: the launcher must not attach a
     # card, schedule a load, or name a WAV file. The game's own VMU screens save and load, and a
     # windowed run gets the engine's per-user card with no flags.
@@ -994,10 +1103,37 @@ def selftest() -> int:
         failures.append("rates: DEVMODEW layout is %d bytes with the rate at %d" %
                         (ctypes.sizeof(DEVMODEW), DEVMODEW.dmDisplayFrequency.offset))
 
-    cmd = build_command(image, dict(base, audio_volume=35, audio_device="Speakers (GSP 370)",
+    # The resolution rows follow the selected aspect: 4x at 16:9 is 2560x1440, not 4:3's 2560x1920.
+    # The engine's 720-line window floor applies too, so 1x wide is a 1280x720 window showing the
+    # native render upscaled rather than a 640x360 window.
+    labels = {scale: label for label, scale in resolution_choices("off", "16:9")}
+    if labels[4] != "4x - 2560 x 1920" or labels[1] != "1x - 960 x 720 (native render)":
+        failures.append("resolution 4:3: %r" % (labels,))
+    labels = {scale: label for label, scale in resolution_choices("16:9", "16:9")}
+    if (labels[4] != "4x - 2560 x 1440" or labels[2] != "2x - 1280 x 720"
+            or labels[1] != "1x - 1280 x 720 (native render)"):
+        failures.append("resolution 16:9: %r" % (labels,))
+    labels = {scale: label for label, scale in resolution_choices("21:9", "16:9")}
+    if labels[4] != "4x - 2560 x 1097":
+        failures.append("resolution 21:9: %r" % (labels[4],))
+    labels = {scale: label for label, scale in resolution_choices("custom", "32:9")}
+    if labels[4] != "4x - 2560 x 720":
+        failures.append("resolution 32:9: %r" % (labels[4],))
+    labels = {scale: label for label, scale in resolution_choices("custom", "nonsense")}
+    if labels[4] != "4x - 2560 x 1920":
+        failures.append("unreadable custom ratio should fall back to 4:3: %r" % (labels[4],))
+
+    # The window and its minimum fit the screen, including a 1024x600 laptop where the old 620 px
+    # floor made the window taller than the display.
+    if window_geometry(1024, 600) != (944, 460, 900, 460):
+        failures.append("geometry 1024x600: %r" % (window_geometry(1024, 600),))
+    if window_geometry(1920, 1080) != (1240, 780, 900, 580):
+        failures.append("geometry 1920x1080: %r" % (window_geometry(1920, 1080),))
+
+    cmd = build_command(image, dict(base, audio_volume=35, audio_device="Speakers (USB Audio)",
                                     audio_buffer=93))
     expect("audio options", cmd,
-           ["--audio-volume", "35", "--audio-device", "Speakers (GSP 370)",
+           ["--audio-volume", "35", "--audio-device", "Speakers (USB Audio)",
             "--audio-buffer", "93"])
 
     cmd = build_command(image, dict(base))
@@ -1048,19 +1184,43 @@ def check_ui(app: Launcher) -> list[str]:
         box.event_generate("<<ComboboxSelected>>")
         app.update()
 
-    pick("scale", "4x - 2560 x 1920")
+    def pick_value(key: str, value) -> None:
+        """Select a combo row by its value: the labels change with the aspect."""
+        for _, controls in TABS:
+            for c in controls:
+                if c.get("key") == key and c["kind"] == "combo":
+                    for label, candidate in c["values"]:
+                        if candidate == value:
+                            pick(key, label)
+                            return
+        failures.append("no %s=%r row" % (key, value))
+
+    pick_value("scale", 4)
     pick("aspect", "16:9 - hor+")
     cmd = build_command(app.image_path or "disc.gdi", app.collect())
     for flag in ("--scale", "4", "--aspect", "16:9"):
         if flag not in cmd:
             failures.append("4x + 16:9 lost %r: %s" % (flag, " ".join(cmd)))
+    if app.vars["scale"].get() != "4x - 2560 x 1440":
+        failures.append("resolution label at 16:9: %r" % (app.vars["scale"].get(),))
 
-    pick("scale", "1x - 640 x 480 (native)")
     pick("aspect", "Off - 4:3")
+    if app.vars["scale"].get() != "4x - 2560 x 1920":
+        failures.append("resolution label at 4:3: %r" % (app.vars["scale"].get(),))
+    pick_value("scale", 1)
     cmd = build_command(app.image_path or "disc.gdi", app.collect())
     for flag in ("--scale", "--aspect"):
         if flag in cmd:
             failures.append("defaults kept %r: %s" % (flag, " ".join(cmd)))
+
+    # A custom ratio names its own height; the labels follow it as it is typed.
+    pick("aspect", "Custom ratio - hor+")
+    app.vars["aspect_custom"].set("32:9")
+    app.update()
+    if app.vars["scale"].get() != "1x - 2560 x 720 (native render)":
+        failures.append("resolution label at 32:9: %r" % (app.vars["scale"].get(),))
+    app.vars["aspect_custom"].set("16:9")
+    pick("aspect", "Off - 4:3")
 
     # Every dropdown must show a label for the value it holds. A combo whose key is missing from
     # DEFAULTS renders as an empty box and silently keeps the engine's default: the CPU clock did
@@ -1111,6 +1271,13 @@ def check_ui(app: Launcher) -> list[str]:
     names = [app.notebook.tab(i, "text") for i in range(len(app.notebook.tabs()))]
     if names != ["Game", "Graphics", "Audio"]:
         failures.append("tabs: %r" % names)
+
+    # Clamping is unit-tested; this is the real window, so a regression in the wiring still shows.
+    if (app.winfo_width() > app.winfo_screenwidth()
+            or app.winfo_height() > app.winfo_screenheight()):
+        failures.append("window %dx%d exceeds screen %dx%d" % (
+            app.winfo_width(), app.winfo_height(),
+            app.winfo_screenwidth(), app.winfo_screenheight()))
 
     # The disc row gates Play. Nothing selected must mean no Play, whatever the saved settings say.
     saved_image, saved_ok = app.image_path, app.disc_ok

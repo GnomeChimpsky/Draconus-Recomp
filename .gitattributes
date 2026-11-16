@@ -11,3 +11,5 @@
 *.txt text eol=lf
 *.gitignore text eol=lf
 *.patch text eol=lf
+# A patch's blank context lines are a single space by design; don't flag the patch file itself.
+*.patch -whitespace

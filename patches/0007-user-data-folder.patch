@@ -1,0 +1,16 @@
+diff --git a/render/src/vk/window.cpp b/render/src/vk/window.cpp
+index f88c2b2..ff446e9 100644
+--- a/render/src/vk/window.cpp
++++ b/render/src/vk/window.cpp
+@@ -1235,7 +1235,10 @@ void Window::destroy() {
+ // SDL layer rather than beside the binding model: the model stays free of SDL so it can be tested
+ // on a runner with no window.
+ std::string default_bindings_path() {
+-    char* dir = SDL_GetPrefPath("dream-recomp", "dream-recomp");
++    // Empty org, app-named folder: SDL builds <data>/dream-recomp/ instead of the nested
++    // <data>/dream-recomp/dream-recomp/. The bindings then sit beside the launcher's settings and
++    // the saves folder, so one per-user folder holds everything this project writes.
++    char* dir = SDL_GetPrefPath("", "dream-recomp");
+     if (!dir)
+         return {};
+     std::string path = std::string(dir) + "bindings.txt";
