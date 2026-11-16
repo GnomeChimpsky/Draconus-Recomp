@@ -1,6 +1,6 @@
 # Draconus: Cult of the Wyrm (USA), F888 / T-402 / T40203N / V1.000 / 2000-05-19.
 # Values measured from the owner's own dump; see docs/01-DISC-FORENSICS.md.
-# The boot program is sha256 86fc4486b066518adf6aada38236177b8bd2ed2566b0c1b6f2e2c7f532574ad8.
+# The boot program is sha256 a59ff87c15b7cff926fc77089ae315cf30905586e34504a18b426d634f4567da.
 
 [game]
 id = "draconus"
@@ -11,6 +11,11 @@ product = "F888"
 [disc]
 image = "CHANGE-ME: path to your own .gdi (or .chd) dump"
 sha1_1st_read = "936ef49f675029a512edddd3baece16a2e85c4e4"
+# Where the boot program sits on the disc. A release ships no extracted copy, so when the path in
+# [binary] is missing the runtime reads these sectors from the player's own image and checks them
+# against sha1_1st_read above.
+boot_lba = 547857
+boot_size = 2339580
 
 [binary]
 path = "extracted/fs/1ST_READ.BIN"       # written by dracdisc extract (or dcdisc extract)

@@ -1,0 +1,351 @@
+diff --git a/docs/game-config.md b/docs/game-config.md
+index 1cb3f2c..ff75fa0 100644
+--- a/docs/game-config.md
++++ b/docs/game-config.md
+@@ -14,6 +14,8 @@ product = "MK-51035"          # optional, IP.BIN product number
+ [disc]
+ sha1_1st_read = "8b5b..."     # optional: SHA-1 of the plain executable the config was measured on
+ chd_sha1 = "..."              # optional
++boot_lba = 547857             # optional: LBA of the boot program on the disc
++boot_size = 2339580           # with boot_lba: read when [binary] path is absent
+ 
+ [binary]
+ path = "extracted/fs/1ST_READ.BIN"   # relative to this file
+@@ -48,6 +50,12 @@ Rules the loader enforces: `game.id`, `game.title`, `binary.path`, `binary.load_
+ (`addr & 0x1FFFFFFF` equal); addresses are even; `hle`/`hooks` keys are addresses written as strings.
+ Errors name the field.
+ 
++`[disc] boot_lba` and `boot_size` are the release path. A distributed build ships no extracted
++executable; when `[binary] path` is absent at run time, the runtime reads those sectors from the
++player's own image and checks `sha1_1st_read` against the bytes it read. The two fields are set
++together or not at all. `--disc FILE` overrides `[disc] image` for one run, so a launcher can point
++the game at a dump without rewriting the config.
++
+ ## What `dream-translate game` does
+ 
+ ```sh
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index 0b006a3..d0620ec 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -8,6 +8,7 @@
+ // Exit code 0 when the run reached the requested stop (the first TA FIFO write with --stop-on-ta,
+ // otherwise the frame or time limit), 1 on a fault, 2 on a setup error.
+ #include <algorithm>
++#include <cctype>
+ #include <chrono>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -46,6 +47,7 @@ extern "C" __declspec(dllimport) unsigned int __stdcall timeEndPeriod(unsigned i
+ #include "dream/runtime/aica/aica.h"
+ #include "dream/runtime/aica/rtc.h"
+ #include "dream/runtime/gdrom/disc.h"
++#include "dream/runtime/hash/sha1.h"
+ #include "dream/runtime/hle/bios.h"
+ #include "dream/runtime/holly/g2dma.h"
+ #include "dream/runtime/holly/sysblock.h"
+@@ -2347,6 +2349,62 @@ std::string default_vmu_path(const std::string& game_id) {
+ 
+ }  // namespace
+ 
++// The boot program is normally read from the extracted file the translator worked on. A release has
++// no such file: the same bytes are on the player's own disc, at the LBA and size the title config
++// records, and reading them there keeps a derived copy out of the package. Either way the bytes are
++// checked against the config's SHA-1, so the wrong disc fails with one line instead of a fault.
++bool load_boot_image(const dream::translator::GameConfig& cfg, dream::gdrom::Disc* disc,
++                     std::vector<char>& bytes, bool& from_disc, std::string& error) {
++    from_disc = false;
++    std::error_code ec;
++    if (std::filesystem::exists(cfg.binary_path, ec)) {
++        std::ifstream in(cfg.binary_path, std::ios::binary);
++        if (!in) {
++            error = "cannot read " + cfg.binary_path.string();
++            return false;
++        }
++        bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
++    } else if (disc && cfg.boot_size > 0) {
++        const std::uint32_t sector_size = dream::gdrom::kUserBytes;
++        const std::uint32_t sectors = (cfg.boot_size + sector_size - 1) / sector_size;
++        bytes.resize(cfg.boot_size);
++        std::vector<std::uint8_t> sector(sector_size);
++        std::uint32_t written = 0;
++        for (std::uint32_t i = 0; i < sectors; ++i) {
++            if (!disc->read_user(cfg.boot_lba + i, sector.data())) {
++                error = "cannot read the boot program from the disc at LBA " +
++                        std::to_string(cfg.boot_lba + i);
++                return false;
++            }
++            const std::uint32_t count = std::min(sector_size, cfg.boot_size - written);
++            std::memcpy(bytes.data() + written, sector.data(), count);
++            written += count;
++        }
++        from_disc = true;
++    } else if (!cfg.disc_image) {
++        error = "no boot program: " + cfg.binary_path.string() +
++                " is missing and the config names no disc image";
++        return false;
++    } else {
++        error = "no boot program: " + cfg.binary_path.string() +
++                " is missing and [disc] has no boot_lba/boot_size";
++        return false;
++    }
++
++    if (cfg.sha1_1st_read.size() == 40) {
++        std::string expected = cfg.sha1_1st_read;
++        for (char& ch : expected)
++            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
++        const std::string actual = dream::hash::sha1_hex(bytes.data(), bytes.size());
++        if (actual != expected) {
++            error = "boot program sha1 " + actual + " != " + expected +
++                    " (wrong disc or a damaged dump)";
++            return false;
++        }
++    }
++    return true;
++}
++
+ // Every flag, grouped by what someone is trying to do. The old usage line named eight of them and
+ // the other twenty were findable only by reading this file, which is how a capture flag that
+ // already existed went unused for a week.
+@@ -2362,6 +2420,7 @@ void usage(const char* argv0, std::FILE* out) {
+         "  --config FILE          the game's TOML (games/<id>/<id>.toml)\n"
+         "\n"
+         "Playing:\n"
++        "  --disc FILE            mount this image instead of [disc] image in the TOML\n"
+         "  --window               open a window and play; implies sound\n"
+         "  --display MODE         windowed (default), borderless (desktop fullscreen at the\n"
+         "                         display's own size) or exclusive (a fullscreen display mode,\n"
+@@ -2472,6 +2531,9 @@ int main(int argc, char** argv) {
+         std::setvbuf(stderr, nullptr, _IONBF, 0);
+     }
+     std::string config, report, sample_file, dump;
++    // --disc FILE: mount this image instead of [disc] image. A release launcher uses it so a
++    // read-only install never has to rewrite the title config to record the player's dump.
++    std::string disc_override;
+     bool stop_on_ta = false;
+     // No limit unless one is asked for. A run that stops on its own after a number of frames
+     // nobody chose is indistinguishable from a crash, and the flag is right there for the runs
+@@ -2612,6 +2674,8 @@ int main(int argc, char** argv) {
+         }
+         else if (!std::strcmp(argv[i], "--config") && i + 1 < argc)
+             config = argv[++i];
++        else if (!std::strcmp(argv[i], "--disc") && i + 1 < argc)
++            disc_override = argv[++i];
+         else if (!std::strcmp(argv[i], "--report") && i + 1 < argc)
+             report = argv[++i];
+         else if (!std::strcmp(argv[i], "--stop-on-ta"))
+@@ -2840,6 +2904,8 @@ int main(int argc, char** argv) {
+         std::fprintf(stderr, "%s\n", err.c_str());
+         return 2;
+     }
++    if (!disc_override.empty())
++        cfg.disc_image = std::filesystem::path(disc_override);
+     // A windowed run gets the per-user card for this title unless --vmu names one. Without a card
+     // most titles cannot save at all, and a first-time player has no reason to know the flag
+     // exists; with it, saving works on the first run. Headless runs stay card-less: a card answers
+@@ -2875,12 +2941,18 @@ int main(int argc, char** argv) {
+             return 2;
+         }
+     }
+-    std::ifstream in(cfg.binary_path, std::ios::binary);
+-    if (!in) {
+-        std::fprintf(stderr, "cannot read %s\n", cfg.binary_path.string().c_str());
+-        return 2;
++    std::vector<char> bytes;
++    {
++        std::string boot_error;
++        bool from_disc = false;
++        if (!load_boot_image(cfg, disc.get(), bytes, from_disc, boot_error)) {
++            std::fprintf(stderr, "%s\n", boot_error.c_str());
++            return 2;
++        }
++        if (from_disc)
++            std::printf("boot program: %zu bytes from the disc at LBA %u\n", bytes.size(),
++                        cfg.boot_lba);
+     }
+-    std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+ 
+     // Before the console is built: the SPG works out its line timing from the clock when it is
+     // constructed, and every other device converts its own real-time rate through it.
+diff --git b/runtime/include/dream/runtime/hash/sha1.h b/runtime/include/dream/runtime/hash/sha1.h
+new file mode 100644
+index 0000000..44dec5d
+--- /dev/null
++++ b/runtime/include/dream/runtime/hash/sha1.h
+@@ -0,0 +1,96 @@
++// SHA-1 for checking a boot image against the hash in the title config.
++//
++// Not a security boundary: the config carries the expected value, and the point is to refuse the
++// wrong disc with one clear line instead of faulting somewhere in translated code. SHA-1 is what
++// the configs already carry (`[disc] sha1_1st_read`), so this is only the implementation.
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <string>
++
++namespace dream::hash {
++namespace detail {
++
++inline std::uint32_t rotate_left(std::uint32_t value, int bits) {
++    return (value << bits) | (value >> (32 - bits));
++}
++
++}  // namespace detail
++
++// Lowercase hex, 40 characters, as the title configs write it.
++inline std::string sha1_hex(const void* data, std::size_t size) {
++    const auto* bytes = static_cast<const std::uint8_t*>(data);
++    std::uint32_t h[5] = {0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u};
++
++    const auto process = [&h](const std::uint8_t* block) {
++        std::uint32_t w[80];
++        for (int i = 0; i < 16; ++i)
++            w[i] = (static_cast<std::uint32_t>(block[i * 4]) << 24) |
++                   (static_cast<std::uint32_t>(block[i * 4 + 1]) << 16) |
++                   (static_cast<std::uint32_t>(block[i * 4 + 2]) << 8) |
++                   static_cast<std::uint32_t>(block[i * 4 + 3]);
++        for (int i = 16; i < 80; ++i)
++            w[i] = detail::rotate_left(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
++
++        std::uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
++        for (int i = 0; i < 80; ++i) {
++            std::uint32_t f = 0, k = 0;
++            if (i < 20) {
++                f = (b & c) | (~b & d);
++                k = 0x5A827999u;
++            } else if (i < 40) {
++                f = b ^ c ^ d;
++                k = 0x6ED9EBA1u;
++            } else if (i < 60) {
++                f = (b & c) | (b & d) | (c & d);
++                k = 0x8F1BBCDCu;
++            } else {
++                f = b ^ c ^ d;
++                k = 0xCA62C1D6u;
++            }
++            const std::uint32_t temp = detail::rotate_left(a, 5) + f + e + k + w[i];
++            e = d;
++            d = c;
++            c = detail::rotate_left(b, 30);
++            b = a;
++            a = temp;
++        }
++        h[0] += a;
++        h[1] += b;
++        h[2] += c;
++        h[3] += d;
++        h[4] += e;
++    };
++
++    std::size_t offset = 0;
++    for (; offset + 64 <= size; offset += 64)
++        process(bytes + offset);
++
++    // The final block(s): the remainder, 0x80, zeros, then the length in bits, big-endian.
++    std::uint8_t tail[128] = {};
++    const std::size_t rest = size - offset;
++    if (rest)
++        std::memcpy(tail, bytes + offset, rest);
++    tail[rest] = 0x80;
++    const std::size_t tail_size = rest + 1 + 8 <= 64 ? 64 : 128;
++    const std::uint64_t bits = static_cast<std::uint64_t>(size) * 8;
++    for (int k = 0; k < 8; ++k)
++        tail[tail_size - 1 - k] = static_cast<std::uint8_t>(bits >> (8 * k));
++    process(tail);
++    if (tail_size == 128)
++        process(tail + 64);
++
++    static const char* digits = "0123456789abcdef";
++    std::string out(40, '0');
++    for (int word = 0; word < 5; ++word)
++        for (int byte = 0; byte < 4; ++byte) {
++            const auto value = static_cast<std::uint8_t>(h[word] >> (24 - 8 * byte));
++            out[(word * 4 + byte) * 2] = digits[value >> 4];
++            out[(word * 4 + byte) * 2 + 1] = digits[value & 0xF];
++        }
++    return out;
++}
++
++}  // namespace dream::hash
+diff --git a/translator/include/dream/translator/config/game_config.h b/translator/include/dream/translator/config/game_config.h
+index 7ad1456..af8b934 100644
+--- a/translator/include/dream/translator/config/game_config.h
++++ b/translator/include/dream/translator/config/game_config.h
+@@ -29,6 +29,10 @@ struct GameConfig {
+     std::string sha1_1st_read, chd_sha1;
+     std::optional<std::filesystem::path>
+         disc_image;  // [disc] image, resolved; the GDI/CHD to mount
++    // Where the boot program lives on the disc. A release ships no extracted executable: when
++    // [binary] path is absent at run time, the runtime reads boot_size bytes from boot_lba and
++    // checks sha1_1st_read against what it read. The two are set together or not at all.
++    std::uint32_t boot_lba = 0, boot_size = 0;
+ 
+     std::filesystem::path binary_path;  // resolved
+     std::uint32_t load_address = 0, link_address = 0, entry = 0;
+diff --git a/translator/src/config/game_config.cpp b/translator/src/config/game_config.cpp
+index 754db3d..3a1db1d 100644
+--- a/translator/src/config/game_config.cpp
++++ b/translator/src/config/game_config.cpp
+@@ -101,6 +101,13 @@ bool finish(const toml::table& t, const std::filesystem::path& dir, GameConfig&
+         return false;
+     if (!disc_image.empty())
+         c.disc_image = dir / disc_image;
++    if (!get_u32(t["disc"]["boot_lba"], "disc.boot_lba", c.boot_lba, error, false) ||
++        !get_u32(t["disc"]["boot_size"], "disc.boot_size", c.boot_size, error, false))
++        return false;
++    if ((c.boot_lba == 0) != (c.boot_size == 0)) {
++        error = "disc.boot_lba and disc.boot_size must be set together";
++        return false;
++    }
+     for (char ch : c.id)
+         if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '-')) {
+             error = "game.id must be [A-Za-z0-9_-]+";
+diff --git a/translator/tests/test_config.cpp b/translator/tests/test_config.cpp
+index 4f95c8a..612fe7c 100644
+--- a/translator/tests/test_config.cpp
++++ b/translator/tests/test_config.cpp
+@@ -16,6 +16,8 @@ region = "USA"
+ 
+ [disc]
+ sha1_1st_read = "abc"
++boot_lba = 547857
++boot_size = 2339580
+ 
+ [binary]
+ path = "extracted/fs/1ST_READ.BIN"
+@@ -51,6 +53,8 @@ TEST_CASE("game config: the documented schema loads with resolved paths") {
+     CHECK(c.title == "Crazy Taxi");
+     CHECK(c.region == "USA");
+     CHECK(c.sha1_1st_read == "abc");
++    CHECK(c.boot_lba == 547857u);
++    CHECK(c.boot_size == 2339580u);
+     CHECK(c.binary_path == std::filesystem::path("/games/crazytaxi/extracted/fs/1ST_READ.BIN"));
+     CHECK(c.load_address == 0x8C010000u);
+     CHECK(c.link_address == 0x0C010000u);
+@@ -88,6 +92,24 @@ entry = 0x8C010000
+     CHECK(!c.symbols.has_value());
+ }
+ 
++TEST_CASE("game config: the disc boot location is both fields or neither") {
++    GameConfig c;
++    std::string err;
++    CHECK(!parse_game_config(R"(
++[game]
++id = "x"
++title = "X"
++[disc]
++boot_lba = 547857
++[binary]
++path = "1ST_READ.BIN"
++load_address = 0x8C010000
++entry = 0x8C010000
++)",
++                             ".", c, err));
++    CHECK(err.find("set together") != std::string::npos);
++}
++
+ TEST_CASE("game config: validation names the offending field") {
+     GameConfig c;
+     std::string err;

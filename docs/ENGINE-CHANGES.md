@@ -2866,6 +2866,38 @@ touches `render/{include,src,tests}` and `runtime/boot/boot_main.cpp`; the diagn
 `DREAM_INTERP_DUMP`, and F11's frame capture now writes the presented intermediate frame plus a
 `.interp` geometry dump when that is what is on screen.
 
+## Patch 040: the boot program comes from the disc (2026-11-16)
+
+A release cannot carry `1ST_READ.BIN`. It is 2,339,580 bytes of the game's own executable, the
+project's rule is that no extracted disc file is published, and the runtime used to stop at
+`cannot read .../extracted/fs/1ST_READ.BIN` without it. The bytes are on the disc the player already
+has, so the runtime now reads them there.
+
+`[disc] boot_lba` and `boot_size` record the location: LBA 547,857 in this dump's track05, 1,143
+sectors of 2,048 user bytes (the last one partial). `load_boot_image()` still prefers the extracted
+file when it exists, so the development build is unchanged, and otherwise reads the sectors through
+`Disc::read_user`, which already unwraps mode-1/mode-2 headers and works the same for a GDI and a
+CHD. The result is checked against `sha1_1st_read` before it is copied into guest RAM: a wrong disc
+now fails with one line naming both hashes instead of faulting inside translated code. The config's
+hash was already there for the translator; this is its first run-time use.
+
+`--disc FILE` overrides `[disc] image` for one run, so a launcher can point the game at the dump the
+player picked without rewriting the title config, and a read-only install stays possible.
+
+Verified on the retail dump: a 600-frame headless run (`--rtc-seed 1000000`) writes the same
+`--write-hash` file — `212f28f1…`, byte for byte, 603 lines — whether the boot program comes from the
+extracted file, from the GDI, or from the CHD (the last two with the extracted file renamed away).
+Both disc sources print `boot program: 2339580 bytes from the disc at LBA 547857`. A wrong `boot_lba`
+and a missing boot location exit 2 with one line (the hash mismatch names both hashes), a non-disc
+`--disc` is refused before the read, and the SHA-1 implementation matches the standard vectors and
+the boot file's known `936ef49f…`. The translator's config suite is green (16 cases, 125 assertions),
+including the new both-fields-or-neither case.
+
+Carried by `patches/0005-boot-from-disc.patch`, which applies after 0001–0004. It touches
+`runtime/boot/boot_main.cpp`, adds `runtime/include/dream/runtime/hash/sha1.h`, extends
+`translator/{include,src}/.../game_config.*` with the two fields, adds the config test, and documents
+both in `docs/game-config.md`.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
