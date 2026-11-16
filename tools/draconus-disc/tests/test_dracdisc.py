@@ -19,6 +19,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from dracdisc import known  # noqa: E402
+from dracdisc.chd import ChdError, read_header, verify as verify_chd  # noqa: E402
 from dracdisc.gdi import GdiError, GdiImage  # noqa: E402
 from dracdisc.iso import Entry, Iso9660, IsoError  # noqa: E402
 
@@ -295,6 +297,53 @@ class IsoTests(unittest.TestCase):
         image = FakeImage({})
         with self.assertRaises(IsoError):
             Iso9660(image, base_lba=0)
+
+
+class ChdHeaderTests(unittest.TestCase):
+    """A .chd is verified from its v5 header, so the parser needs a synthetic file of its own."""
+
+    def _write(self, *, raw_sha1: bytes | None = None, parent: bytes | None = None,
+               version: int = 5, unit: int = 2448,
+               magic: bytes = b"MComprHD") -> Path:
+        path = TEST_TMP / f"synthetic-{uuid.uuid4().hex}.chd"
+        path.write_bytes(struct.pack(
+            ">8sII16sQQQII20s20s20s",
+            magic, 124, version, b"\0" * 16, 1_344_333_888, 0, 124, 19_584, unit,
+            raw_sha1 if raw_sha1 is not None else bytes.fromhex(known.CHD_RAW_SHA1),
+            bytes(20), parent if parent is not None else bytes(20),
+        ))
+        self.addCleanup(path.unlink, missing_ok=True)
+        return path
+
+    def test_supported_header_verifies(self) -> None:
+        ok, failures = verify_chd(self._write())
+        self.assertTrue(ok, failures)
+
+    def test_wrong_raw_hash_fails(self) -> None:
+        ok, failures = verify_chd(self._write(raw_sha1=bytes(20)))
+        self.assertFalse(ok)
+        self.assertIn("raw sha1", failures[0])
+
+    def test_parent_image_fails(self) -> None:
+        ok, failures = verify_chd(self._write(parent=b"\x11" * 20))
+        self.assertFalse(ok)
+        self.assertTrue(any("parent" in f for f in failures))
+
+    def test_cd_frame_size_fails(self) -> None:
+        ok, failures = verify_chd(self._write(unit=2352))
+        self.assertFalse(ok)
+        self.assertTrue(any("frame size" in f for f in failures))
+
+    def test_not_a_chd_fails(self) -> None:
+        ok, failures = verify_chd(self._write(magic=b"NOTACHDF"))
+        self.assertFalse(ok)
+        self.assertIn("not a CHD", failures[0])
+
+    def test_read_header_reports_version(self) -> None:
+        header = read_header(self._write())
+        self.assertEqual(header.version, 5)
+        self.assertEqual(header.raw_sha1, bytes.fromhex(known.CHD_RAW_SHA1))
+        self.assertFalse(header.has_parent)
 
 
 @unittest.skipUnless(os.environ.get("DRACONUS_DISC"), "DRACONUS_DISC not set")

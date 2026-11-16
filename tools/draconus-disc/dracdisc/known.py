@@ -22,6 +22,11 @@ BOOT_SIZE = 2_339_580
 BOOT_SHA256 = "a59ff87c15b7cff926fc77089ae315cf30905586e34504a18b426d634f4567da"
 BOOT_LOAD_ADDRESS = 0x8C010000
 
+# The same release as a .chd. A CHD v5 header carries the SHA-1 of the disc's raw data, written by
+# chdman from the decompressed image, so it identifies the disc without decoding it. Measured from
+# the project's own CHD (five tracks, boot 1ST_READ.BIN 2,339,580 bytes, USA V1.000).
+CHD_RAW_SHA1 = "fd66b0a377fa44672224b37d61c98b969e851578"
+
 # The low-density session carries no executable; the boot file lives at the very
 # end of the high-density area, immediately after the engine's own DIRENT.DIR.
 BOOT_KNOWN_LBA = 547_857

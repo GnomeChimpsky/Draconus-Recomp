@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from . import __version__, known
+from .chd import ChdError, read_header as read_chd_header, verify as verify_chd
 from .dirent import DirentIndex
 from .gdi import GdiImage
 from .iso import Iso9660, IsoError
@@ -102,7 +103,24 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _verify_chd(path: str) -> int:
+    """Verify a .chd from its header, without decompressing it."""
+    ok, failures = verify_chd(path)
+    if not ok:
+        print("VERIFY FAILED")
+        for failure in failures:
+            print(f"  - {failure}")
+        return 1
+    header = read_chd_header(path)
+    print("VERIFY OK")
+    print(f"  {known.DISC_TITLE} {known.VERSION} ({known.PRODUCT}, {known.LICENCE})")
+    print(f"  CHD v5: {header.logical_bytes} bytes, raw sha1 {header.raw_sha1.hex()}")
+    return 0
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
+    if str(args.disc).lower().endswith(".chd"):
+        return _verify_chd(str(args.disc))
     image, iso = load(args.disc)
     failures: list[str] = []
 

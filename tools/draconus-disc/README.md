@@ -87,16 +87,19 @@ Records that fail validation are dropped, duplicates are collapsed by
 python -m unittest discover -s tests
 ```
 
-14 tests, all synthetic (no game data): track maps, audio refusal, gaps, overlapping
+21 tests, all synthetic (no game data): track maps, audio refusal, gaps, overlapping
 tracks, ISO framing, mid-sector padding, sector-crossing records, declared-extent
-truncation, a 1,000-case fuzz run that must never crash, and an optional real-dump
-check enabled by setting `DRACONUS_DISC`.
+truncation, a 1,000-case fuzz run that must never crash, the CHD v5 header (a supported
+image, a wrong raw hash, a parent image, a CD frame size and a file that is not a CHD at
+all), and an optional real-dump check enabled by setting `DRACONUS_DISC`.
 
 ## Limitations
 
 * The `DIRENT.DIR` tag byte semantics are unknown; the scanner does not depend on them.
 * `--force` bypasses both the size and the hash gate, which is how the prototype build
   (2,182,340 bytes) is extracted. The retail dump is still verified by default.
-* `.chd` input is not supported directly (convert with `chdman`, or use the `.gdi`).
+* `.chd` input is only *identified*, not decoded: `verify` reads the CHD v5 header, whose raw
+  SHA-1 identifies the disc without decompressing it. Everything that needs the sectors
+  (`inspect`, `manifest`, `extract`) takes the `.gdi`, or a CHD converted with `chdman`.
 * Only the USA V1.000 build is recognised by `verify`; the prototype parses but is
   reported as unsupported.
