@@ -13,6 +13,7 @@ against that commit, so a fresh clone builds the same engine this project was de
 | `0006-utf8-paths.patch` | Ledger entry 041: Windows hands the process UTF-16 arguments, but the runtime used narrow `argv` and ANSI `ifstream`/`fopen`, so a non-ASCII user name or disc path was silently mangled. `wmain` converts the arguments to UTF-8 once; config-relative paths use `std::filesystem::u8path`; the GDI, CHD and CDI readers open native wide paths (`_wfopen`, `chd_open_file`); the VMU and bindings filesystem paths are `std::filesystem::path`; debug outputs go through a UTF-8 `fopen`. Touches `runtime/boot/boot_main.cpp`, `runtime/src/gdrom/disc.cpp`, `runtime/src/maple/maple.cpp`, `runtime/include/dream/runtime/maple/maple.h` and `translator/src/config/game_config.cpp`. |
 | `0007-user-data-folder.patch` | Ledger entry 042: the player's bindings move from the nested `<data>/dream-recomp/dream-recomp/` to `<data>/dream-recomp/`, beside the launcher's settings and the saves folder. `default_bindings_path()` asks SDL for an app-named folder with no organisation, so one per-user folder holds everything this project writes. Touches `render/src/vk/window.cpp`. The launcher's settings make the same move in the repository (`tools/launcher.py`), with the old file as a read-only fallback. |
 | `0008-present-rate-bound.patch` | Ledger entry 043: `--present-rate` parses with `strtol` and refuses a negative or non-numeric value, and anything above 1000 Hz, instead of casting a wrapped `strtoul` result to `unsigned` and accepting a rate no display can run. Touches `runtime/boot/boot_main.cpp`. |
+| `0009-widescreen-overlay-depth.patch` | Ledger entries 044–045: the widescreen overlay pass keeps its HUD panels inside the near-depth slab, moves a panel's projected 3D model with it instead of squeezing it twice, and lets a small marker be compressed with the map image it sits in (the death screen's fade no longer tears, the HUD item model is no longer a quarter too thin, the map's markers stay on the map). And the translucent pass sorts strips by their mean depth rather than their nearest vertex, so a large floor under a character no longer blends over it. Touches `render/{include,src,tests}`. Applies after 0008. |
 
 `setup.ps1` applies each patch after fetching the engine, and is safe to re-run: after a successful
 run it writes `engine/.draconus-patches`, and a tree that predates the marker is recognised by the
@@ -32,7 +33,7 @@ git diff --no-index --no-renames --no-color --src-prefix= --dst-prefix= a b > 00
 `0002-modern-controls.patch` is generated the same way, with `a/` the pinned tree **plus 0001** and
 `b/` the working engine; it therefore applies after 0001 in `setup.ps1`'s sorted order. Patches 0003
 onwards were each generated against the tree with all earlier patches applied, and `setup.ps1` applies
-them in name order, so `0007` and `0008` sit on top of `0006`.
+them in name order, so `0007` and `0008` sit on top of `0006` and `0009` on top of `0008`.
 
 Apply a patch with `git apply -p1` from inside `engine/`. Verify before committing:
 

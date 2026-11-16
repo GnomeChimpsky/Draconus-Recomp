@@ -176,10 +176,12 @@ the first opens the card's folder, the second opens `%APPDATA%\dream-recomp`, wh
 presented stretched, so more of the world is visible horizontally and nothing is distorted. The HUD
 is screen-space art rather than projected geometry, so it is compressed by the same factor before
 that stretch and keeps its shape and its place (the health bar stays centred, the compass in the
-corner). The item wheel and its rotating item models are a HUD panel and are compressed with it, so
-the wheel keeps its shape and the model stays in it. Menus, the title and loading cards are flat 2D
-art, keep their 4:3 shape and are
-pillarboxed inside the wide window. `-Aspect 21:9` takes any ratio, `-Scale 2` draws at twice the guest's resolution and
+corner). The item wheel is a HUD panel and is compressed with it, so the wheel keeps its shape and
+its place; the rotating item model inside it takes only its scale from the projection and is moved
+with the wheel rather than squeezed a second time, so it keeps the size it has at 4:3 and stays in
+the wheel. Menus, the title and
+loading cards are flat 2D art, keep their 4:3 shape and are pillarboxed inside the wide window.
+`-Aspect 21:9` takes any ratio, `-Scale 2` draws at twice the guest's resolution and
 opens the window at that size (4x at 16:9 is 2560x1440, shrunk to fit a smaller screen), and
 `-DisplayMode` chooses **windowed**, **borderless** (desktop fullscreen at the display's own size,
 which changes no display mode) or **exclusive** (one of the display's fullscreen modes, which can

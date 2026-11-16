@@ -2972,6 +2972,66 @@ default of one present per guest frame.
 Carried by `patches/0008-present-rate-bound.patch`, which applies after 0007 and touches
 `runtime/boot/boot_main.cpp`.
 
+## Patch 044: the widescreen overlay pass stops at the HUD's depth (2026-11-16)
+
+Reported from play at 16:9 in three F11 captures: the item model at the left of the HUD was a quarter
+too thin, the death screen's background was torn into vertical strips, and a map marker sat slightly
+off. All three are one pass.
+
+`compress_screen_overlays` squeezes screen-space overlays by (4/3)/aspect so the presenter's stretch
+does not make them 4/3 too wide. Three faults:
+
+* **The panel test had no upper depth bound.** A large flat quad was a HUD panel if it was at least
+  half the world's near depth. The death screen's black fade is six quads at `z` 32700 and its skull
+  image one 384x384 quad at 32701 — 4,600 times the near depth — so each fade quad became a panel
+  and was compressed about its own anchor (left, centre, right). The six tiles no longer met: the
+  fade covered x 0-96, 176-368 and 448-640, and the world showed through the two gaps. The map art
+  at `z` 23999 was a panel for the same reason. The test now requires the near slab,
+  `world_z * 0.5 <= lo <= world_z * 4`: the item wheel is 0.65-0.89 of the near depth and the pause
+  menu's splash 1.36, while an overlay depth is thousands of times it.
+* **A panel's contents were compressed twice.** The rotating item model inside the wheel takes only
+  its *scale* from the title's projection (the widened projection squeezes it by the same factor),
+  but its *place* is the wheel's centre, which the game sets in screen space; scaling it again about
+  the panel's anchor left the HUD item 25 % too thin. The model is now moved by as much as the
+  panel's centre moves — `(factor - 1) * (centre - anchor)` — and keeps its already compressed
+  width, so it stays centred in the wheel at its 4:3 size. The wheel graphic itself (the panel quad)
+  is compressed as before. The first cut of this moved the model by the *projection's* centre
+  instead, which put the item against the screen edge, outside the wheel it belongs to: a 16:9 F11
+  capture of the open wheel showed the vial at the left border with the wheel's middle empty.
+* **A small element inside a bigger one kept its own anchor.** The map's destination markers are
+  32x32 quads at `z` 25000 inside the 384x384 map image at `z` 23999. The map was a panel and was
+  removed from the element grouping, so each marker fell back to "a small glyph stays centred on
+  itself" and stayed put while the map shrank: up to 30 guest pixels off (the map's right-hand
+  marker). With the map no longer taken as a panel it is grouped with its markers, and the union's
+  centre is the anchor for all of them.
+
+Verified on the three captures with `dream_render_view --aspect 16:9`, which applies the same pass:
+299/27/301 polygons compressed against 299/39/301 before. The death frame's replay is now a clean
+black fade with the skull and text (the twelve fade quads are untouched, the skull shrinks about its
+centre); the map's markers move with the map; the HUD item keeps its 4:3 width (22 pixels of glass,
+against 17 before, where the authored 4:3 frame measures 22) and stays centred in the wheel. The
+render suite gains three cases — a fade that must not tear, a map whose markers must follow it, and a
+panel model that must keep its width — and passes 113/113 (5,124 assertions).
+
+## Patch 045: a translucent strip sorts by its mean depth (2026-11-16)
+
+"The grating beneath the minotaur shows through his model." The arena floor is one large translucent
+strip (`z` 0.147-0.277 across its vertices) and the minotaur's skirt is translucent too (0.25-0.30).
+The translucent pass sorted strips back to front by the *nearest* vertex, which for a floor is its
+near rim: 0.269, a hair in front of one skirt strip's 0.2678. The floor was drawn after that strip
+and its bars were blended over the skirt.
+
+The key is now the mean of the strip's vertices — 0.21 for that floor — which is behind every skirt
+pixel that overlaps it. Nothing else about the pass changes: the same back-to-front order, depth test
+and no-depth-write. Across the death, map and arena captures the change moves 900-1,100 pixels and
+no more, and the grate's bars no longer cross the character. It does not make intersecting
+translucency correct — that remains the documented per-strip limitation — but a large surface under
+a character is the common case and the mean decides it.
+
+Carried by `patches/0009-widescreen-overlay-depth.patch` (entries 044-045), which touches
+`render/src/display_list.cpp`, `render/include/dream/render/display_list.h`,
+`render/src/vk/renderer.cpp` and `render/tests/test_display_list.cpp`, and applies after 0008.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

@@ -1,0 +1,426 @@
+diff --git a/render/src/display_list.cpp b/render/src/display_list.cpp
+index bcdc850..7ca8906 100644
+--- a/render/src/display_list.cpp
++++ b/render/src/display_list.cpp
+@@ -486,6 +486,16 @@ bool polygon_tiles(const Frame& frame, const Polygon& polygon) {
+     return false;
+ }
+ 
++float polygon_sort_depth(const Frame& frame, const Polygon& polygon) {
++    const std::size_t first = polygon.first;
++    const std::size_t last = std::min(frame.vertices.size(), first + polygon.count);
++    if (first >= last)
++        return 0.0f;
++    float sum = 0.0f;
++    for (std::size_t i = first; i < last; ++i) sum += frame.vertices[i].z;
++    return sum / static_cast<float>(last - first);
++}
++
+ bool frame_uses_depth(const Frame& frame) {
+     // A flat screen has exact 1/w, so the span is zero. The tolerance is for a title that derives a
+     // constant from the projection through a multiply and lands a hair either side of it; a real
+@@ -543,9 +553,17 @@ std::size_t compress_screen_overlays(Frame& frame, float factor, float width) {
+     // the forest are ringed by 200-pixel light shafts at z ~ 0.2 while the near world is at ~ 7 --
+     // and it is far behind that plane. Without this test the shafts moved 25 % left on a 16:9
+     // frame, which reads as the rocks coming apart and reassembling as they cross the size test.
+-    // Half the near depth includes the item wheel (0.89 of it in its capture) and excludes the
+-    // shafts (0.03).
++    // Half the near depth includes the item wheel (0.65-0.89 of it in its captures) and excludes
++    // the shafts (0.03).
+     const float panel_min_z = world_z * 0.5f;
++    // A panel is *at* the HUD's depth, not a screen-space overlay painted in front of everything.
++    // The death screen's black fade and the map art are drawn at z 24000-32700, thousands of
++    // times the world's near depth; the panel pass used to take each of their quads as a panel of
++    // its own and compress it about its own anchor, which tore the six-quad fade into three
++    // strips with the world showing through the two gaps between them. The near slab ends a
++    // small multiple above the near depth: the pause menu's black splash, the deepest real panel,
++    // is 1.36 of the near depth, while an overlay depth is 2000 times it.
++    const float panel_max_z = world_z * 4.0f;
+ 
+     std::size_t adjusted = 0;
+     // Scale one polygon about `anchor`.
+@@ -570,6 +588,25 @@ std::size_t compress_screen_overlays(Frame& frame, float factor, float width) {
+     auto is_handled = [&](const Polygon* polygon) {
+         return std::find(handled.begin(), handled.end(), polygon) != handled.end();
+     };
++    // Move one polygon sideways in the guest's screen space. The hardware clip rectangle is in
++    // screen pixels too, so a fill clipped to its current value moves with it.
++    auto shift_polygon = [&](Polygon* polygon, float delta) {
++        if (delta == 0.0f)
++            return;
++        const std::size_t first = polygon->first;
++        const std::size_t last = std::min(frame.vertices.size(), first + polygon->count);
++        for (std::size_t i = first; i < last; ++i)
++            frame.vertices[i].x += delta;
++        if (polygon->tile_clip == 2 || polygon->tile_clip == 3) {
++            auto clip = [&](std::uint16_t v) {
++                const float shifted = static_cast<float>(v) + delta;
++                return static_cast<std::uint16_t>(std::clamp(std::lround(shifted), 0l, 65535l));
++            };
++            polygon->clip_x0 = clip(polygon->clip_x0);
++            polygon->clip_x1 = clip(polygon->clip_x1);
++        }
++        ++adjusted;
++    };
+     auto bounds = [&](const Polygon& polygon, float& lo, float& hi, float& min_x, float& max_x,
+                       float& min_y, float& max_y) {
+         if (polygon.count < 2 || polygon.first >= frame.vertices.size())
+@@ -612,8 +649,8 @@ std::size_t compress_screen_overlays(Frame& frame, float factor, float width) {
+             const float scale = std::max(1.0f, std::max(std::fabs(lo), std::fabs(hi)));
+             if (hi - lo > kRelative * scale)
+                 continue;
+-            if (lo < panel_min_z)
+-                continue;  // a world-space billboard far behind the near plane, not a HUD panel
++            if (lo < panel_min_z || lo > panel_max_z)
++                continue;  // scenery far behind the near plane, or an overlay painted in front
+             const float panel_w = max_x - min_x, panel_h = max_y - min_y;
+             if (panel_w < 128.0f || panel_h < 128.0f || panel_w > width * 0.9f)
+                 continue;
+@@ -645,7 +682,22 @@ std::size_t compress_screen_overlays(Frame& frame, float factor, float width) {
+                 if (&polygon != panel.quad &&
+                     (lo <= panel.z + 0.05f || hi > panel.z + 1.5f))
+                     continue;
+-                scale_polygon(&polygon, anchor);
++                if (&polygon == panel.quad) {
++                    scale_polygon(&polygon, anchor);
++                } else {
++                    // The contents of a panel ride the title's projection: at 16:9 the widened
++                    // projection has already squeezed their x by `factor` about the screen
++                    // centre, so their width is the compressed width already. Scaling them again
++                    // made the rotating item model a quarter too thin, which is what a HUD item
++                    // looked like in play. Only their place is wrong: the model is pinned to the
++                    // wheel's own centre (its transform translates to a screen point and takes
++                    // only its *scale* from the projection), so it moves by as much as the
++                    // panel's centre does -- (factor - 1) * (centre - anchor) -- and keeps its
++                    // (already compressed) width. Shifting it by the projection's centre instead
++                    // put the item against the screen edge, outside the wheel it belongs to.
++                    const float panel_mid = 0.5f * (panel.min_x + panel.max_x);
++                    shift_polygon(&polygon, (factor - 1.0f) * (panel_mid - anchor));
++                }
+                 handled.push_back(&polygon);
+             }
+         }
+diff --git a/render/include/dream/render/display_list.h b/render/include/dream/render/display_list.h
+index 75a30a5..3e7d6d6 100644
+--- a/render/include/dream/render/display_list.h
++++ b/render/include/dream/render/display_list.h
+@@ -93,6 +93,14 @@ struct Frame {
+ // not touch the interior boundary between two quads that share a larger texture.
+ bool polygon_tiles(const Frame& frame, const Polygon& polygon);
+ 
++// The depth a translucent strip is sorted by, back to front: the mean of its vertices' 1/w. A
++// renderer without the hardware's per-pixel sort has to order whole strips, and the mean decides a
++// large flat surface better than its nearest vertex does. The octagonal grate under Draconus's
++// minotaur has its near rim at 1/w 0.277 while the minotaur's skirt sits at 0.28-0.30; sorted by
++// the nearest vertex the grate's strip came after some skirt strips and its bars were blended over
++// the skirt. Its mean (0.21) is behind the skirt at every pixel that overlaps it.
++float polygon_sort_depth(const Frame& frame, const Polygon& polygon);
++
+ // Whether the frame carries perspective geometry: at least one polygon whose vertices do not all
+ // share the same depth. A screen painted with 2D quads -- a title, an options page, a loading card --
+ // has a constant z across each quad, however many quads it is cut into. A 3D scene has depth that
+@@ -105,10 +113,22 @@ bool frame_uses_depth(const Frame& frame);
+ // Widescreen presentation squeezes a 3D frame's x by (4/3)/aspect and stretches it back in the
+ // window. Screen-space overlays -- a HUD, a pause menu or a line of text drawn over the world --
+ // are not part of that projection, so without this they would ride the presenter's stretch and come
+-// out 4/3 too wide. This compresses the frame's overlay quads by `factor` about the element's own
+-// anchor: a centred element keeps its centre, one at an edge keeps that edge. `width` is the
+-// guest's screen width (640), which is the coordinate space the overlays are drawn in. Returns how
+-// many quads were adjusted; a pure 2D frame or an aspect of 4:3 leaves the frame untouched.
++// out 4/3 too wide. This squeezes the frame's overlay geometry by `factor`:
++//
++//  * A large flat quad at the HUD's own depth (within a small multiple of the world's near depth)
++//    is a panel -- the item wheel is one -- and is compressed about the element's anchor, left
++//    edge, right edge or centre. The 3D model submitted inside it takes only its *scale* from the
++//    title's projection and is pinned to the panel's centre, so it is moved by as much as the
++//    panel's centre moves rather than scaled again: its width is already the compressed one.
++//  * Every other screen-space quad in front of the world is compressed about its element's anchor.
++//    Quads close to each other at one depth are one element and share an anchor, so a marker drawn
++//    inside a map's rectangle moves with the map instead of staying at its own centre.
++//  * A screen that spans the picture (a fade, a full-screen backdrop) is left alone: it has no
++//    anchor, and a uniform overlay does not distort.
++//
++// `width` is the guest's screen width (640), which is the coordinate space the overlays are drawn
++// in. Returns how many polygons were adjusted; a pure 2D frame or an aspect of 4:3 leaves the frame
++// untouched.
+ std::size_t compress_screen_overlays(Frame& frame, float factor, float width);
+ 
+ // Feed it the same 32-byte chunks the Tile Accelerator FIFO receives.
+diff --git a/render/src/vk/renderer.cpp b/render/src/vk/renderer.cpp
+index f29bb81..4c6999f 100644
+--- a/render/src/vk/renderer.cpp
++++ b/render/src/vk/renderer.cpp
+@@ -480,18 +480,14 @@ void Renderer::draw(VkCommandBuffer cmd, const Frame& frame, const FrameGeometry
+     // and is right for all but intersecting transparency.
+     items_.clear();
+     const auto add_list = [&](ListType list, bool blended, bool alpha_test) {
+-        for (const Polygon& p : frame.lists[static_cast<unsigned>(list)]) {
+-            float nearest = 0.0f;
+-            for (std::uint32_t i = 0; i < p.count; ++i)
+-                nearest = std::max(nearest, frame.vertices[p.first + i].z);
+-            items_.push_back({&p, nearest, blended, alpha_test});
+-        }
++        for (const Polygon& p : frame.lists[static_cast<unsigned>(list)])
++            items_.push_back({&p, polygon_sort_depth(frame, p), blended, alpha_test});
+     };
+     add_list(ListType::Opaque, false, false);
+     add_list(ListType::PunchThrough, false, true);
+     const std::size_t translucent_start = items_.size();
+     add_list(ListType::Translucent, true, false);
+-    // Back to front: the farthest surface has the smallest 1/w and must be drawn first.
++    // Back to front: the farthest surface has the smallest mean 1/w and must be drawn first.
+     std::stable_sort(items_.begin() + static_cast<std::ptrdiff_t>(translucent_start), items_.end(),
+                      [](const Item& a, const Item& b) { return a.depth < b.depth; });
+ 
+diff --git a/render/tests/test_display_list.cpp b/render/tests/test_display_list.cpp
+index 5fb98dd..8c9d61e 100644
+--- a/render/tests/test_display_list.cpp
++++ b/render/tests/test_display_list.cpp
+@@ -744,7 +744,9 @@ TEST_CASE("widescreen compresses screen overlays about their anchors") {
+ 
+ // The item wheel is a large flat HUD panel with a rotating 3D model submitted inside its bounds.
+ // The panel is drawn below the world's near depth, so it is not one of the small overlay quads;
+-// the panel pass has to move the model with it or the model drifts out of the wheel.
++// the panel pass has to move the model with it or the model drifts out of the wheel. The model
++// itself rides the title's projection and is already squeezed at 16:9, so it is moved, not scaled
++// again: scaling it twice made the item in the HUD a quarter too thin.
+ TEST_CASE("widescreen carries a HUD panel's 3D model with the panel") {
+     Frame frame;
+     auto quad = [&](float x0, float y0, float x1, float y1, float z, int list) {
+@@ -766,13 +768,15 @@ TEST_CASE("widescreen carries a HUD panel's 3D model with the panel") {
+     // The world's near plane is z = 2.0, above the panel's own depth.
+     const u32 world = quad(400, 400, 420, 420, 0.5f, 0);
+     frame.vertices[world + 1].z = 2.0f;
+-    // The wheel panel: 200 x 200 at z = 1.0, left of the health bar.
+-    const u32 panel = quad(100, 100, 300, 300, 1.0f, 2);
+-    // The item model inside it, in front of the panel.
++    // The wheel panel: 256 x 256 at z = 1.0, against the left edge of the screen.
++    const u32 panel = quad(1, 305, 257, 561, 1.0f, 2);
++    // The item model inside it, in front of the panel. It has already been squeezed about the
++    // screen centre by the wide projection (x = 320 + (P - 320) * 0.75 at 16:9).
+     Polygon model;
+     model.first = static_cast<u32>(frame.vertices.size());
+     model.count = 3;
+-    const float mx[3] = {150, 180, 165}, my[3] = {150, 150, 180}, mz[3] = {1.5f, 1.5f, 1.6f};
++    const float mx[3] = {100, 150, 120}, my[3] = {350, 350, 400},
++                mz[3] = {1.5f, 1.5f, 1.6f};
+     for (int i = 0; i < 3; ++i) {
+         Vertex v;
+         v.x = mx[i];
+@@ -786,7 +790,7 @@ TEST_CASE("widescreen carries a HUD panel's 3D model with the panel") {
+     Polygon behind;
+     behind.first = static_cast<u32>(frame.vertices.size());
+     behind.count = 3;
+-    const float bx[3] = {150, 180, 165}, by[3] = {190, 190, 220};
++    const float bx[3] = {150, 180, 165}, by[3] = {390, 390, 420};
+     for (int i = 0; i < 3; ++i) {
+         Vertex v;
+         v.x = bx[i];
+@@ -812,19 +816,23 @@ TEST_CASE("widescreen carries a HUD panel's 3D model with the panel") {
+     const u32 far_first = far.first;
+ 
+     CHECK(compress_screen_overlays(frame, 0.75f, 640.0f) == 2);
+-    // The panel keeps its left edge at 100 and shrinks its width to 150.
+-    CHECK(frame.vertices[panel].x == doctest::Approx(100.0f));
+-    CHECK(frame.vertices[panel + 1].x == doctest::Approx(250.0f));
+-    // The model moves with it: 150 -> 137.5, 180 -> 160, 165 -> 148.75.
+-    CHECK(frame.vertices[model_first].x == doctest::Approx(137.5f));
+-    CHECK(frame.vertices[model_first + 1].x == doctest::Approx(160.0f));
+-    CHECK(frame.vertices[model_first + 2].x == doctest::Approx(148.75f));
++    // The panel keeps its left edge at 1 and shrinks its width to 192.
++    CHECK(frame.vertices[panel].x == doctest::Approx(1.0f));
++    CHECK(frame.vertices[panel + 1].x == doctest::Approx(193.0f));
++    // The model keeps its (already squeezed) size and moves with the panel's centre: the panel is
++    // 1..257, so its centre moves by (0.75 - 1) * (129 - 1) = -32, and the model goes with it.
++    CHECK(frame.vertices[model_first].x == doctest::Approx(68.0f));
++    CHECK(frame.vertices[model_first + 1].x == doctest::Approx(118.0f));
++    CHECK(frame.vertices[model_first + 2].x == doctest::Approx(88.0f));
++    // Its width is unchanged: 100..150 stays 50 pixels wide.
++    CHECK(frame.vertices[model_first + 1].x - frame.vertices[model_first].x ==
++          doctest::Approx(50.0f));
+     // The world behind it is untouched.
+     CHECK(frame.vertices[behind_first].x == doctest::Approx(150.0f));
+     CHECK(frame.vertices[behind_first + 1].x == doctest::Approx(180.0f));
+     // The far pause overlay inside the same rectangle is untouched too.
+-    CHECK(frame.vertices[far_first].x == doctest::Approx(150.0f));
+-    CHECK(frame.vertices[far_first + 1].x == doctest::Approx(180.0f));
++    CHECK(frame.vertices[far_first].x == doctest::Approx(100.0f));
++    CHECK(frame.vertices[far_first + 1].x == doctest::Approx(150.0f));
+ }
+ 
+ // A large flat quad is not a HUD panel just because it is large and flat: a particle effect is one
+@@ -887,11 +895,169 @@ TEST_CASE("widescreen leaves a world-space particle quad alone") {
+     // The particle did not move, although it is large enough to look like a panel.
+     CHECK(frame.vertices[particle].x == doctest::Approx(300.0f));
+     CHECK(frame.vertices[particle + 1].x == doctest::Approx(500.0f));
+-    // The near panel still does, and carries its model: 100 -> 75.25, 150 -> 112.75,
+-    // 120 -> 90.25 about the panel's left edge at x = 1.
++    // The near panel still does, and carries its model without changing its width: the panel's
++    // centre moves by (0.75 - 1) * (129 - 1) = -32 and the model moves with it.
+     CHECK(frame.vertices[panel].x == doctest::Approx(1.0f));
+     CHECK(frame.vertices[panel + 1].x == doctest::Approx(193.0f));
+-    CHECK(frame.vertices[model_first].x == doctest::Approx(75.25f));
+-    CHECK(frame.vertices[model_first + 1].x == doctest::Approx(112.75f));
+-    CHECK(frame.vertices[model_first + 2].x == doctest::Approx(90.25f));
++    CHECK(frame.vertices[model_first].x == doctest::Approx(68.0f));
++    CHECK(frame.vertices[model_first + 1].x == doctest::Approx(118.0f));
++    CHECK(frame.vertices[model_first + 2].x == doctest::Approx(88.0f));
++    CHECK(frame.vertices[model_first + 1].x - frame.vertices[model_first].x ==
++          doctest::Approx(50.0f));
++}
++
++// A screen-space overlay painted in front of everything is not a HUD panel. The death screen is
++// six black quads at z = 32700 under a 384x384 skull image at z = 32701; the panel pass used to
++// take each black quad as a panel of its own and compress it about its own anchor, which left two
++// vertical gaps between the quads and the world showed through them. The quads are one element
++// that spans the picture, so they keep their place; the skull is one centred image and shrinks
++// about its centre.
++TEST_CASE("widescreen does not tear a screen-space fade into panels") {
++    Frame frame;
++    auto quad = [&](float x0, float y0, float x1, float y1, float z, int list) {
++        Polygon p;
++        p.first = static_cast<u32>(frame.vertices.size());
++        p.count = 4;
++        const float xs[4] = {x0, x1, x0, x1};
++        const float ys[4] = {y0, y0, y1, y1};
++        for (int i = 0; i < 4; ++i) {
++            Vertex v;
++            v.x = xs[i];
++            v.y = ys[i];
++            v.z = z;
++            frame.vertices.push_back(v);
++        }
++        frame.lists[list].push_back(p);
++        return p.first;
++    };
++    // The death scene's world: near depth 7.07.
++    Polygon world;
++    world.first = 0;
++    world.count = 3;
++    const float wx[3] = {0, 640, 0}, wy[3] = {0, 0, 480}, wz[3] = {0.5f, 0.5f, 7.07f};
++    for (int i = 0; i < 3; ++i) {
++        Vertex v;
++        v.x = wx[i];
++        v.y = wy[i];
++        v.z = wz[i];
++        frame.vertices.push_back(v);
++    }
++    frame.lists[0].push_back(world);
++
++    // The black fade: the same 640x512 picture cut into three columns and two rows.
++    const float columns[4] = {0, 128, 384, 640};
++    u32 backdrop[6];
++    int n = 0;
++    for (int row = 0; row < 2; ++row)
++        for (int col = 0; col < 3; ++col)
++            backdrop[n++] = quad(columns[col], row * 256.0f, columns[col + 1],
++                                 (row + 1) * 256.0f, 32700.0f, 2);
++    // The skull image, centred on the picture.
++    const u32 skull = quad(128, 48, 512, 432, 32701.0f, 2);
++
++    CHECK(compress_screen_overlays(frame, 0.75f, 640.0f) == 1);
++    // Every backdrop quad is exactly where it was: no gaps, the fade covers the screen.
++    for (int i = 0; i < 6; ++i) {
++        CHECK(frame.vertices[backdrop[i]].x == doctest::Approx(columns[i % 3]));
++        CHECK(frame.vertices[backdrop[i] + 1].x == doctest::Approx(columns[i % 3 + 1]));
++    }
++    // The skull keeps its centre and shrinks by the factor.
++    CHECK(frame.vertices[skull].x == doctest::Approx(176.0f));
++    CHECK(frame.vertices[skull + 1].x == doctest::Approx(464.0f));
++}
++
++// A marker drawn inside a map image's rectangle is part of the map. The map art is a 384x384
++// quad at z = 23999 and the markers are 32-pixel quads at z = 25000; each marker used to be a
++// small element of its own and shrank about its own centre, so the markers drifted off the map
++// (the one near the right edge by 30 pixels). They share the map's anchor now.
++TEST_CASE("widescreen moves a map's markers with the map") {
++    Frame frame;
++    auto quad = [&](float x0, float y0, float x1, float y1, float z) {
++        Polygon p;
++        p.first = static_cast<u32>(frame.vertices.size());
++        p.count = 4;
++        const float xs[4] = {x0, x1, x0, x1};
++        const float ys[4] = {y0, y0, y1, y1};
++        for (int i = 0; i < 4; ++i) {
++            Vertex v;
++            v.x = xs[i];
++            v.y = ys[i];
++            v.z = z;
++            frame.vertices.push_back(v);
++        }
++        frame.lists[2].push_back(p);
++        return p.first;
++    };
++    Polygon world;
++    world.first = 0;
++    world.count = 3;
++    const float wx[3] = {0, 640, 0}, wy[3] = {0, 0, 480}, wz[3] = {0.5f, 0.5f, 10.88f};
++    for (int i = 0; i < 3; ++i) {
++        Vertex v;
++        v.x = wx[i];
++        v.y = wy[i];
++        v.z = wz[i];
++        frame.vertices.push_back(v);
++    }
++    frame.lists[0].push_back(world);
++
++    const u32 map = quad(128, 48, 512, 432, 23999.0f);
++    const u32 left = quad(215, 279, 247, 311, 25000.0f);
++    const u32 right = quad(423, 188, 455, 220, 25002.0f);
++
++    // The map and both markers are one element: 3 quads.
++    CHECK(compress_screen_overlays(frame, 0.75f, 640.0f) == 3);
++    // The map keeps its 4:3 size and its centre at 320: 128 -> 176, 512 -> 464.
++    CHECK(frame.vertices[map].x == doctest::Approx(176.0f));
++    CHECK(frame.vertices[map + 1].x == doctest::Approx(464.0f));
++    // The marker at the right of the map follows it instead of hugging its own centre:
++    // 423 -> 320 + (423 - 320) * 0.75 = 397.25, 455 -> 421.25.
++    CHECK(frame.vertices[right].x == doctest::Approx(397.25f));
++    CHECK(frame.vertices[right + 1].x == doctest::Approx(421.25f));
++    // So does the one on the left: 215 -> 241.25, 247 -> 265.25.
++    CHECK(frame.vertices[left].x == doctest::Approx(241.25f));
++    CHECK(frame.vertices[left + 1].x == doctest::Approx(265.25f));
++    // A marker keeps its size.
++    CHECK(frame.vertices[right + 1].x - frame.vertices[right].x == doctest::Approx(24.0f));
++}
++
++// Translucent strips are sorted back to front by their mean 1/w, not by their nearest corner. The
++// octagonal grate under the minotaur: its near rim reaches 0.277 while the character's skirt is at
++// 0.28-0.30, so a nearest-corner key drew the floor after part of the skirt and the bars appeared
++// over it. The mean of the whole strip puts the floor behind the character.
++TEST_CASE("a translucent strip sorts by its mean depth") {
++    Frame frame;
++    Polygon floor;
++    floor.first = 0;
++    floor.count = 3;
++    const float fz[3] = {0.147f, 0.269f, 0.179f};
++    for (int i = 0; i < 3; ++i) {
++        Vertex v;
++        v.x = 100.0f * i;
++        v.y = 0;
++        v.z = fz[i];
++        frame.vertices.push_back(v);
++    }
++    Polygon skirt;
++    skirt.first = 3;
++    skirt.count = 3;
++    const float sz[3] = {0.25f, 0.2678f, 0.259f};
++    for (int i = 0; i < 3; ++i) {
++        Vertex v;
++        v.z = sz[i];
++        frame.vertices.push_back(v);
++    }
++    const float floor_z = polygon_sort_depth(frame, floor);
++    const float skirt_z = polygon_sort_depth(frame, skirt);
++    CHECK(floor_z == doctest::Approx((0.147f + 0.269f + 0.179f) / 3.0f));
++    // The floor sorts before the skirt: back to front is ascending.
++    CHECK(floor_z < skirt_z);
++    // The old key was the nearest corner, and the floor's (0.269) is nearer than the skirt's
++    // (0.2678), which is exactly what drew the bars over the skirt.
++    CHECK(frame.vertices[1].z > frame.vertices[4].z);
++
++    Polygon empty;  // a polygon pointing past the vertices has no depth
++    empty.first = 99;
++    empty.count = 3;
++    CHECK(polygon_sort_depth(frame, empty) == doctest::Approx(0.0f));
+ }
