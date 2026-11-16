@@ -28,15 +28,41 @@ from tkinter import filedialog, messagebox, ttk
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vmu  # noqa: E402  (the tool beside this script; only its per-user card path is used here)
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DISC_TOOL = os.path.join(ROOT, "tools", "draconus-disc")
-CONFIG = os.path.join(ROOT, "engine", "games", "draconus", "draconus.toml")
-BINARY = os.path.join(ROOT, "engine", "build-render", "games", "draconus", "draconus_boot.exe")
 # The launcher's emblem: "Draconus Recomped Emblem light.png", trimmed of the transparent margin
 # its artwork leaves on the right and scaled to 320 px wide. The original canvas is 1000 px wide but
 # the banner ends at x=801, so using it unmodified drew the logo noticeably left of the panel's
 # centre; this file is the same artwork, centred in its own canvas.
-ART = os.path.join(ROOT, "tools", "launcher-emblem.png")
+FROZEN = bool(getattr(sys, "frozen", False))
+if FROZEN:
+    # A windowed build has no stdout; --selftest/--smoke must not crash on print().
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
+    APP_DIR = os.path.dirname(os.path.abspath(sys.executable))
+
+    def _game_dir() -> str:
+        """The folder holding DraconusRecomp.exe and draconus.toml.
+
+        The release may keep the launcher beside the game or one folder below it; the TOML decides,
+        so the packaging does not have to match a path baked into the build.
+        """
+        for candidate in (APP_DIR, os.path.dirname(APP_DIR)):
+            if os.path.exists(os.path.join(candidate, "draconus.toml")):
+                return candidate
+        return APP_DIR
+
+    ROOT = _game_dir()
+    DISC_TOOL = ""  # unused when frozen: the verifier is a bundled module
+    CONFIG = os.path.join(ROOT, "draconus.toml")
+    BINARY = os.path.join(ROOT, "DraconusRecomp.exe")
+    ART = os.path.join(getattr(sys, "_MEIPASS", APP_DIR), "launcher-emblem.png")
+else:
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    DISC_TOOL = os.path.join(ROOT, "tools", "draconus-disc")
+    CONFIG = os.path.join(ROOT, "engine", "games", "draconus", "draconus.toml")
+    BINARY = os.path.join(ROOT, "engine", "build-render", "games", "draconus", "draconus_boot.exe")
+    ART = os.path.join(ROOT, "tools", "launcher-emblem.png")
 REPOSITORY = "https://github.com/GnomeChimpsky/Draconus-Recomp"
 SETTINGS = os.path.join(
     os.environ.get("APPDATA", os.path.expanduser("~")), "DraconusRecomp", "launcher.json"
@@ -96,13 +122,28 @@ def write_image_path(image: str, config: str = CONFIG) -> None:
 
 
 def verify_disc(image: str) -> tuple[bool, str]:
-    """Run the project's own verifier. Returns (ok, human-readable report)."""
-    result = subprocess.run(
-        [sys.executable, "-m", "dracdisc", "verify", image],
-        cwd=DISC_TOOL, capture_output=True, text=True,
-    )
-    report = (result.stdout or "") + (result.stderr or "")
-    return result.returncode == 0 and "VERIFY OK" in report, report.strip()
+    """Run the project's own verifier. Returns (ok, human-readable report).
+
+    Frozen builds carry dracdisc as a module: there is no interpreter to start, so it runs
+    in-process and its output is captured from stdout.
+    """
+    if FROZEN:
+        import contextlib
+        import io
+        from dracdisc import cli as _cli
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            rc = _cli.main(["verify", image])
+        report = buf.getvalue()
+    else:
+        result = subprocess.run(
+            [sys.executable, "-m", "dracdisc", "verify", image],
+            cwd=DISC_TOOL, capture_output=True, text=True,
+        )
+        rc = result.returncode
+        report = (result.stdout or "") + (result.stderr or "")
+    return rc == 0 and "VERIFY OK" in report, report.strip()
 
 
 def describe_disc(report: str) -> str:
@@ -479,9 +520,13 @@ class Launcher(tk.Tk):
 
     def _initial_image(self) -> str:
         try:
-            return read_image_path()
+            path = read_image_path()
         except Exception:
             return ""
+        # The shipped config carries a CHANGE-ME placeholder; that is "no disc", not a bad path.
+        if not path or path.upper().startswith("CHANGE-ME"):
+            return ""
+        return path
 
     # -- layout ---------------------------------------------------------------------------
     def _build(self) -> None:
@@ -796,7 +841,13 @@ class Launcher(tk.Tk):
         ok, report = verify_disc(path)
         summary = describe_disc(report)
         if ok:
-            write_image_path(path)
+            try:
+                write_image_path(path)
+            except (OSError, RuntimeError) as exc:
+                self._set_disc_state(False, "Cannot save the disc path", self.BAD)
+                self.status.set("The disc verified, but %s could not be written:\n%s"
+                                % (CONFIG, exc))
+                return False
             self._set_disc_state(True, "Disc OK", self.OK)
             self.status.set("Disc OK - " + os.path.basename(path))
         else:

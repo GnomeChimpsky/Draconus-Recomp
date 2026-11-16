@@ -58,12 +58,15 @@ Design constraints honoured by the tool:
 ## Launcher (tools\launcher.py, tools\launcher.bat)
 
 A tabbed settings window: the project's emblem, author credit and repository link on the left,
-Graphics / Audio / Gameplay on the right, and Play. It builds the boot command line from the
+Game / Graphics / Audio on the right, and Play. It builds the boot command line from the
 settings through a pure `build_command`, so every setting the window changes is also reachable from
 the command line:
 
 | tab | option | flag |
 |---|---|---|
+| Game | game disc | the `.gdi`/`.chd` picker; the disc is checked before Play is enabled |
+| | controls | `--controls classic/modern` |
+| | engine path | `--interpret` |
 | Graphics | CPU clock | `--sh4-clock 200..800` (MHz; 200 is the console, more cycles per frame) |
 | | resolution | `--scale 1..4` (also the window size) |
 | | widescreen | `--aspect 16:9`, `21:9`, `W:H` |
@@ -76,7 +79,6 @@ the command line:
 | | volume | `--audio-volume 0..100` |
 | | output device | `--audio-device NAME` (the engine lists them with `--list-audio-devices`) |
 | | buffer / latency | `--audio-buffer 93/186/372` ms |
-| Gameplay | interpreter | `--interpret` |
 
 Saving and loading are the game's own: the launcher has no card settings and attaches no card, so a
 windowed launch gets the engine's per-user card. Its bottom bar's **Open saves folder** and **Open
@@ -87,6 +89,22 @@ Settings persist in `%APPDATA%\DraconusRecomp\launcher.json`. `--selftest` check
 setting produces without opening a window; `--smoke` (optionally `--shot FILE`) builds the window and
 exits, which is also how the layout is reviewed. The tabs are one table (`TABS`) plus their keys in
 `DEFAULTS`, so a new option is a few lines rather than new layout code.
+
+## Frozen launcher (release)
+
+`tools\build-launcher.ps1` builds the launcher a player runs, with no Python on their machine:
+
+```powershell
+tools\build-launcher.ps1                        # work\launcher-dist\DraconusLauncher
+tools\build-launcher.ps1 -Dist D:\out -Clean    # elsewhere, fresh environment
+```
+
+It pins Python 3.11 and PyInstaller 6.22.3, keeps its environment and intermediates under
+`work\launcher-build\`, and writes an onedir build (onefile re-extracts ~50 MB to `%TEMP%` on every
+launch and is the variant antivirus dislikes most). The frozen launcher looks for `draconus.toml`
+beside itself or one folder below, runs `DraconusRecomp.exe` from that folder, and verifies the disc
+with the bundled `dracdisc` (GDI or CHD) — no system Python. The chosen image is written into that
+TOML. `--selftest` and `--smoke` still work; screenshots are skipped because Pillow is not bundled.
 
 ## Audio checks (M6)
 
