@@ -157,8 +157,13 @@ change the panel's refresh; a system that refuses it falls back to borderless). 
 presents the display at up to that rate while the game logic keeps its 60 Hz (the extra presents
 repeat the current image; a slower display caps the rate instead of slowing the game down).
 `-Interpolate` turns the repeats into drawn intermediate frames: the geometry between the two 60 Hz
-submissions is rendered, so motion is smooth without changing game speed. Menus, movies and frames
-whose strips changed keep the current picture.
+submissions is rendered, so motion is smooth without changing game speed. Every corner moves by its
+screen position, so two strips that share one move it together and a seam cannot part; menus, movies
+and frames whose strips changed keep the current picture, and so does a frame that has not moved and
+one whose pairing mostly failed (a cut or a fade). The intermediate is a second renderer target and is
+presented from the GPU like any other frame, so it costs no copy through the host. F11 captures the
+picture on the glass: when that is an intermediate frame, the capture says so and writes a `.interp`
+file with the geometry that drew it.
 
 **Controllers.** A pad works on first plug-in: the left stick is the Dreamcast analogue stick, the
 face buttons are A/B/X/Y, the d-pad is the d-pad, Start is Start, the shoulders are C and Z, and the
@@ -195,9 +200,13 @@ tabs on the right.
   a heavy scene more cycles inside each frame, and can affect game speed and audio on some titles),
   internal resolution (1x to 4x, which is also the window size: 4x at 16:9 is 2560x1440), widescreen
   (off, 16:9, 21:9 or a custom ratio, hor+), display mode (windowed, borderless or exclusive
-  fullscreen), present rate (60/120/144 Hz against the fixed 60 Hz logic, capped to the display's
-  refresh), frame interpolation for the extra presents (experimental, only at 120/144 Hz), VSync and
-  the frame counter.
+  fullscreen), present rate (the list is built from this display's own rates: each refresh it
+  reports, so 60/72/120/144/165/180/240 on a 165 Hz panel, and 60/120/144/165/240 when it cannot be
+  asked), frame interpolation for the extra presents, VSync and the frame counter. What looks smooth
+  is whether the rate divides the display's own refresh, not the number itself: on a 165 Hz panel the
+  display holds a 120 Hz picture for one refresh and then two, which judders, while 165 is held for
+  one every time -- and exclusive fullscreen can put the panel into a mode that matches
+  (`docs/ENGINE-CHANGES.md`, patch 039).
 * **Audio** -- sound on/off, master volume, output device (the SDL playback devices, refreshed when
   the dropdown opens) and an audio buffer/latency choice. `--wav` still records the mixer's
   full-scale output regardless of the playback volume.

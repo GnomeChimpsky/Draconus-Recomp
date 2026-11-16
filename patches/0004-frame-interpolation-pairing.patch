@@ -1,0 +1,1599 @@
+diff --git a/render/CMakeLists.txt b/render/CMakeLists.txt
+--- a/render/CMakeLists.txt
++++ b/render/CMakeLists.txt
+@@ -54,7 +54,8 @@ endif()
+ set(_spv_dir ${CMAKE_CURRENT_BINARY_DIR}/shaders)
+ file(MAKE_DIRECTORY ${_spv_dir})
+ set(_spv_headers)
+-foreach(_shader triangle.vert triangle.frag geometry.vert geometry.frag present.vert present.frag)
++foreach(_shader triangle.vert triangle.frag geometry.vert geometry.frag present.vert present.frag
++                 overlay.vert overlay.frag)
+   string(REPLACE "." "_" _sym ${_shader})
+   set(_out ${_spv_dir}/${_sym}.h)
+   # glslc -mfmt=c emits a bare initialiser list; wrap it in a declaration so the header can just
+
+diff --git a/render/include/dream/render/interpolate.h b/render/include/dream/render/interpolate.h
+--- a/render/include/dream/render/interpolate.h
++++ b/render/include/dream/render/interpolate.h
+@@ -8,11 +8,27 @@
+ // frame is rasterised and depth-tested normally, so a moving edge stays an edge and nothing ghosts.
+ //
+ // Consecutive frames are not identical, though. Frustum culling drops a strip here and adds one
+-// there, a texture address changes as the title streams art, and a HUD element is rewritten. Pairs
+-// are therefore matched polygon by polygon on their render state, in submission order, and a pair
+-// is only used when its corners are close enough that it is plausibly the same piece of geometry.
+-// Polygons with no match are drawn at their current position, so a pop is possible but a smear is
+-// not. When too little of the frame matches, the caller presents the current frame unchanged.
++// there, a strip that is sorted by depth changes its place in the list every frame, and a texture
++// address changes as the title streams art. Pairs are therefore matched strip by strip: first on
++// their render state and submission order, and then -- for a strip whose place in the list moved,
++// which is what a per-frame depth sort does to every translucent strip -- on the corner-by-corner
++// texture coordinates, which do not move when the camera does. A pair is only used when its corners
++// are close enough that it is plausibly the same piece of geometry.
++//
++// Two things follow from that, and both matter for what the intermediate frame looks like:
++//
++//  * The movement is keyed on the corner's *position*, not on the strip it belongs to. Neighbouring
++//    strips share corners -- the guest writes the same screen point once per strip it appears in --
++//    and if the pairing moves those two copies by different amounts the seam between them opens into
++//    a crack that snaps shut on the next present. One movement per position makes that impossible,
++//    and gives a strip the pairing missed the movement of the strips it touches instead of leaving it
++//    standing still. A displacement field across the frame would be cheaper, but only this is exact.
++//  * A strip the guest re-sorts every frame cannot be paired by order at all. The uv signature is
++//    what pairs it, and the resynchronisation window is what keeps one inserted strip from leaving
++//    the rest of its group unpaired.
++//
++// When too little of the frame matches, or when nothing in it is moving, `motion` and the match
++// ratio in the stats say so and the caller presents the current picture instead.
+ #pragma once
+ 
+ #include <cstddef>
+@@ -21,11 +37,15 @@
+ 
+ namespace dream::render {
+ 
+-// How much of the newer frame had a counterpart in the older one. The caller can use the ratio to
+-// decide whether the result is worth presenting, and diagnostics print it.
++// How much of the newer frame had a counterpart in the older one, and how far it moved. The caller
++// uses both to decide whether the result is worth presenting, and diagnostics print them.
+ struct InterpolationStats {
+     std::size_t matched = 0;
+     std::size_t total = 0;  // polygons in the newer frame, plus its modifier triangles
++    // Median distance a paired corner moves, in whole pixels. Near zero means the frame is still:
++    // the intermediate picture would be the current one, and re-rasterising it can only differ from
++    // it. The caller tests it rather than this code, because repeating a picture is its business.
++    float motion = 0.0f;
+ };
+ 
+ // Whether two consecutive frames carry exactly the same geometry structure, so that vertex i of
+
+diff --git a/render/include/dream/render/overlay.h b/render/include/dream/render/overlay.h
+--- a/render/include/dream/render/overlay.h
++++ b/render/include/dream/render/overlay.h
+@@ -12,6 +12,7 @@
+ 
+ #include <cstdint>
+ #include <string_view>
++#include <vector>
+ 
+ namespace dream::render {
+ 
+@@ -29,6 +30,17 @@ struct TextStyle {
+ unsigned text_width(std::string_view text, unsigned scale);
+ unsigned text_height(unsigned scale);
+ 
++// One filled rectangle, in the image's own pixels. `rgba` is the same packing as `fill_rect`.
++struct Rect {
++    int x = 0, y = 0, w = 0, h = 0;
++    std::uint32_t rgba = 0;
++};
++
++// The rectangles `draw_text` would fill, in the order it fills them. `draw_text` is implemented with
++// this, so the two cannot drift apart, and the presenter can draw the same overlay on the GPU -- which
++// is what keeps the on-screen counter from needing the frame back on the host every present.
++void text_rects(int x, int y, std::string_view text, const TextStyle& style, std::vector<Rect>& out);
++
+ // `under` is the picture the overlay is being drawn over: the same geometry as `rgba`, in ordinary
+ // cached memory. When it is given, every write goes to `rgba` and the destination side of the blend
+ // comes from `under`, so `rgba` is never read.
+
+diff --git a/render/include/dream/render/vk/present.h b/render/include/dream/render/vk/present.h
+--- a/render/include/dream/render/vk/present.h
++++ b/render/include/dream/render/vk/present.h
+@@ -14,6 +14,7 @@
+ #include <cstdint>
+ #include <functional>
+ #include <string>
++#include <vector>
+ 
+ #include "dream/render/vk/context.h"
+ #include "dream/render/vk/resources.h"
+@@ -22,6 +23,12 @@
+ 
+ namespace dream::render::vk {
+ 
++// One corner of a solid rectangle drawn over the picture, in the image's own pixels.
++struct OverlayVertex {
++    float x, y;      // image pixels, origin top left
++    float r, g, b, a;  // straight alpha
++};
++
+ class Presenter {
+ public:
+     Presenter() = default;
+@@ -57,8 +64,17 @@ public:
+     // 4x that is 20 MB in each direction every frame. `view` must be in SHADER_READ_ONLY layout,
+     // which is what Offscreen::render leaves behind. The caller keeps ownership.
+     bool use_image(VkImageView view, std::uint32_t width, std::uint32_t height);
+-    // Draws the uploaded or adopted image, fitted to `target`. Call inside the window's render
+-    // pass. False when there is no source yet, which leaves the cleared background showing.
++    // Solid rectangles drawn over the picture by the next draw(), in image pixels, as triangles:
++    // six vertices per rectangle. Recorded into `cmd`, which must be outside a render pass, so the
++    // data reaches the GPU without the frame coming back to the host. Empty draws nothing.
++    //
++    // This is the on-screen counter's path. Stamping text into a host copy of the frame instead
++    // needs `pixels_now()` and `upload()` per present -- 20 MB down and 20 MB up at 4x -- which
++    // cost 18-26 presents a second.
++    bool set_overlay(VkCommandBuffer cmd, const std::vector<OverlayVertex>& triangles);
++    // Draws the uploaded or adopted image, fitted to `target`, and the overlay over it if one was
++    // set. Call inside the window's render pass. False when there is no source yet, which leaves
++    // the cleared background showing.
+     bool draw(VkCommandBuffer cmd, VkExtent2D target);
+ 
+     // The sampler's own filter, which now only decides how a *magnified* image is stretched: the
+@@ -78,10 +94,17 @@ public:
+ private:
+     bool ensure_image(std::uint32_t width, std::uint32_t height);
+     void destroy_image();
++    // The overlay's pipeline: solid rectangles from a vertex buffer, blended over the picture.
++    bool create_overlay_pipeline(VkDevice dev);
+ 
+     Context* ctx_ = nullptr;
+     VkRenderPass render_pass_ = VK_NULL_HANDLE;
+     VkShaderModule vs_ = VK_NULL_HANDLE, fs_ = VK_NULL_HANDLE;
++    // The overlay's own shaders and pipeline: solid rectangles, blended over the picture.
++    VkShaderModule overlay_vs_ = VK_NULL_HANDLE, overlay_fs_ = VK_NULL_HANDLE;
++    VkPipeline overlay_pipeline_ = VK_NULL_HANDLE;
++    HostBuffer overlay_vertices_;
++    std::uint32_t overlay_count_ = 0;
+     VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
+     VkDescriptorPool pool_ = VK_NULL_HANDLE;
+     VkDescriptorSet set_ = VK_NULL_HANDLE;
+
+diff --git a/render/shaders/overlay.frag b/render/shaders/overlay.frag
+new file mode 100644
+--- /dev/null
++++ b/render/shaders/overlay.frag
+@@ -0,0 +1,17 @@
++#version 450
++// The colour the vertex carries, blended over the picture by the pipeline's blend state. Straight
++// alpha, which is what the counter's translucent panel and opaque glyphs are written as.
++layout(push_constant) uniform Push {
++    vec2 scale;
++    vec2 offset;
++    vec2 texel;
++    vec2 taps;
++} push;
++
++layout(location = 0) in vec4 v_colour;
++
++layout(location = 0) out vec4 out_colour;
++
++void main() {
++    out_colour = v_colour;
++}
+
+diff --git a/render/shaders/overlay.vert b/render/shaders/overlay.vert
+new file mode 100644
+--- /dev/null
++++ b/render/shaders/overlay.vert
+@@ -0,0 +1,27 @@
++#version 450
++// Solid rectangles in the image's own pixel space: the on-screen counter. Its font is a grid of
++// filled squares, so text needs no texture and no host copy of the frame -- which is what it used to
++// need, at 20 MB down and 20 MB up per present at 4x.
++//
++// The push block is the one present.vert uses, so a rectangle lands exactly over the picture pixel
++// it covers whatever the window shape, letterbox or content aspect does to the image. `texel` is
++// the image's size, which is what turns image pixels into the unit square.
++layout(push_constant) uniform Push {
++    vec2 scale;
++    vec2 offset;
++    vec2 texel;
++    vec2 taps;
++} push;
++
++layout(location = 0) in vec2 in_pos;
++layout(location = 1) in vec4 in_colour;
++
++layout(location = 0) out vec4 v_colour;
++
++void main() {
++    // The image's top-left corner is the clip-space corner present.vert puts there: v_uv 0 is NDC -1
++    // on both axes, and Vulkan's clip space has +y downwards, so image row 0 is -1.
++    const vec2 uv = in_pos * push.texel;
++    gl_Position = vec4((uv * 2.0 - 1.0) * push.scale + push.offset, 0.0, 1.0);
++    v_colour = in_colour;
++}
+
+diff --git a/render/src/interpolate.cpp b/render/src/interpolate.cpp
+--- a/render/src/interpolate.cpp
++++ b/render/src/interpolate.cpp
+@@ -4,6 +4,7 @@
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdint>
++#include <cstring>
+ #include <unordered_map>
+ #include <vector>
+ 
+@@ -27,17 +28,22 @@ struct PolyKey {
+     }
+ };
+ 
++std::uint64_t mix(std::uint64_t h, std::uint64_t v) noexcept {
++    h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
++    return h * 0x100000001B3ull;
++}
++
+ struct PolyKeyHash {
+     std::size_t operator()(const PolyKey& k) const noexcept {
+-        std::uint64_t h = k.count * 0x9E3779B185EBCA87ull;
++        std::uint64_t h = mix(0xCBF29CE484222325ull, k.count);
+         const std::uint32_t words[7] = {k.pcw, k.isp, k.tsp, k.tcw, k.tsp1, k.tcw1, k.tile_clip};
+         for (std::uint32_t w : words)
+-            h = (h ^ w) * 0x100000001B3ull;
++            h = mix(h, w);
+         const std::uint32_t clip =
+             static_cast<std::uint32_t>(k.clip_x0) | (static_cast<std::uint32_t>(k.clip_y0) << 8) |
+             (static_cast<std::uint32_t>(k.clip_x1) << 16) |
+             (static_cast<std::uint32_t>(k.clip_y1) << 24);
+-        return static_cast<std::size_t>((h ^ clip) * 0x100000001B3ull);
++        return static_cast<std::size_t>(mix(h, clip));
+     }
+ };
+ 
+@@ -69,6 +75,17 @@ constexpr float kMinDepthRatio = 0.7f, kMaxDepthRatio = 1.4f;
+ // A frame whose matched corners moved further than this on average is a cut or a tracking loss, not
+ // motion; interpolating it would show a smear. Fall back to the current frame instead.
+ constexpr float kMaxAverageMotion = 48.0f;
++// How far ahead of the expected candidate a strip looks for its predecessor. A list can be a few
++// hundred strips of one signature long, and the guest need not submit them in the same order twice:
++// anything it sorts per frame -- translucent strips, back to front -- moves, and one strip inserted
++// early in such a group shifts everything after it. Two candidates covered one inserted strip; a
++// stuck cursor beyond that left *every* later strip of the group paired with nothing, which is a
++// whole patch of the picture standing still while the world moves. The scan only runs for the
++// strips that need it, so a dozen candidates costs nothing on the ones that do not.
++constexpr std::size_t kResyncWindow = 16;
++// A pair rescued by its texture coordinates has no order to vouch for it, so it may move further
++// than an ordered pair before it stops being believable.
++constexpr float kRescueDistance = 64.0f;
+ 
+ struct Fit {
+     float cx = 0, cy = 0, w = 0;
+@@ -131,25 +148,289 @@ bool plausible(const Fit& a, const Fit& b, float mean) {
+     return true;
+ }
+ 
+-void lerp_corner(const Vertex& a, Vertex& b, float t) {
+-    b.x = a.x + (b.x - a.x) * t;
+-    b.y = a.y + (b.y - a.y) * t;
+-    // 1/w is linear in screen space, which is why the hardware interpolates depth as 1/w across a
+-    // triangle. Interpolate that and convert back, so the intermediate depth matches the corner.
+-    if (std::fabs(a.z) > 1e-9f && std::fabs(b.z) > 1e-9f) {
+-        const float wa = 1.0f / a.z, wb = 1.0f / b.z;
++// The corner-by-corner texture coordinates of a strip. They do not move when the camera does, so
++// two strips that carry the same sequence are the same strip even when their place in the list has
++// changed and their screen position has moved by more than an ordered pair is allowed to.
++std::uint64_t uv_signature(const Frame& frame, const Polygon& polygon) {
++    std::uint64_t h = mix(0x84222325CBF29CE4ull, polygon.count);
++    for (std::uint32_t i = 0; i < polygon.count; ++i) {
++        const Vertex& v = frame.vertices[polygon.first + i];
++        std::uint32_t u = 0, w = 0;
++        static_assert(sizeof u == sizeof v.u);
++        std::memcpy(&u, &v.u, sizeof u);
++        std::memcpy(&w, &v.v, sizeof w);
++        h = mix(h, u);
++        h = mix(h, w);
++    }
++    return h;
++}
++
++bool same_uv(const Frame& a, const Polygon& pa, const Frame& b, const Polygon& pb) {
++    if (pa.count != pb.count)
++        return false;
++    for (std::uint32_t i = 0; i < pa.count; ++i) {
++        const Vertex& va = a.vertices[pa.first + i];
++        const Vertex& vb = b.vertices[pb.first + i];
++        if (va.u != vb.u || va.v != vb.v)
++            return false;
++    }
++    return true;
++}
++
++// A screen cell for the rescue index: 96 px, so a candidate whose mean corner distance is within
++// kRescueDistance -- and therefore whose centroid is too -- is always in the strip's own cell or one
++// of the eight around it.
++constexpr int kRescueCell = 96;
++constexpr int kRescueCols = 7, kRescueRows = 6;
++
++int rescue_col(float x) noexcept {
++    const int c = static_cast<int>(std::floor(x / kRescueCell));
++    return c < 0 ? 0 : (c >= kRescueCols ? kRescueCols - 1 : c);
++}
++
++int rescue_row(float y) noexcept {
++    const int r = static_cast<int>(std::floor(y / kRescueCell));
++    return r < 0 ? 0 : (r >= kRescueRows ? kRescueRows - 1 : r);
++}
++
++constexpr std::uint32_t kNoMatch = 0xFFFFFFFFu;
++
++// 1/w is linear in screen space, which is why the hardware interpolates depth as 1/w across a
++// triangle. Interpolate that and convert back, so the intermediate depth matches the corner.
++void lerp_position(const Vertex& from, Vertex& to, float t) {
++    to.x = from.x + (to.x - from.x) * t;
++    to.y = from.y + (to.y - from.y) * t;
++    if (std::fabs(from.z) > 1e-9f && std::fabs(to.z) > 1e-9f) {
++        const float wa = 1.0f / from.z, wb = 1.0f / to.z;
+         const float w = wa + (wb - wa) * t;
+-        b.z = std::fabs(w) > 1e-9f ? 1.0f / w : b.z;
++        to.z = std::fabs(w) > 1e-9f ? 1.0f / w : to.z;
+     } else {
+-        b.z = a.z + (b.z - a.z) * t;
++        to.z = from.z + (to.z - from.z) * t;
+     }
+-    b.u = a.u + (b.u - a.u) * t;
+-    b.v = a.v + (b.v - a.v) * t;
+ }
+ 
+-void lerp_polygon(const Frame& a, const Polygon& pa, const Polygon& pb, float t, Frame& out) {
+-    for (std::uint32_t i = 0; i < pa.count; ++i)
+-        lerp_corner(a.vertices[pa.first + i], out.vertices[pb.first + i], t);
++// A corner's place on screen, quantised so that the same corner written by two strips lands in the
++// same bucket: a sixteenth of a pixel and a sixty-five-thousandth of the depth range are far below
++// anything that shows, and far above a rounding difference between two writes of one value. A vertex
++// beyond the clamp is clipped and invisible, so sharing a bucket out there costs nothing.
++constexpr std::int64_t kPositionLimit = 262144;  // +-16384 px at 1/16 px
++std::uint64_t corner_key(const Vertex& v) noexcept {
++    const auto quantise = [](float value, float scale, std::int64_t low, std::int64_t high) {
++        if (!std::isfinite(value))
++            return std::int64_t{0};
++        const double scaled = static_cast<double>(value) * static_cast<double>(scale);
++        if (scaled <= static_cast<double>(low))
++            return low;
++        if (scaled >= static_cast<double>(high))
++            return high;
++        return static_cast<std::int64_t>(std::llround(scaled));
++    };
++    const std::uint64_t x = static_cast<std::uint64_t>(
++        quantise(v.x, 16.0f, -kPositionLimit, kPositionLimit - 1) + kPositionLimit);
++    const std::uint64_t y = static_cast<std::uint64_t>(
++        quantise(v.y, 16.0f, -kPositionLimit, kPositionLimit - 1) + kPositionLimit);
++    const std::uint64_t z = static_cast<std::uint64_t>(quantise(v.z, 65536.0f, 0, 65535));
++    return (x & 0x7FFFFull) | ((y & 0x7FFFFull) << 19) | ((z & 0x7FFFFull) << 38);
++}
++
++// Where a corner of the newer frame was in the older one -- one entry per corner *position*, not per
++// strip. Two strips that share a corner write it once each, and the pairing may well move them by
++// different amounts; that difference is the seam that opens in the intermediate frame and snaps shut
++// on the next present. Keying the movement on the position makes it impossible: a shared corner has
++// one movement, so the seam cannot part. It also gives a strip the pairing missed the movement of
++// the strips it touches, instead of leaving it standing still.
++class CornerMap {
++public:
++    struct Slot {
++        float distance = 0, x = 0, y = 0, z = 0;
++        std::uint64_t key = 0;
++        std::uint32_t generation = 0;
++        bool used = false;
++    };
++
++    void reset(std::size_t corners) {
++        std::size_t size = 64;
++        while (size < corners * 2 + 1)
++            size <<= 1;
++        if (slots_.size() != size) {
++            slots_.assign(size, Slot{});
++            mask_ = size - 1;
++            generation_ = 0;
++        }
++        ++generation_;
++    }
++
++    // The nearest claim wins: a wrong pair generally moves a corner further than the right one does,
++    // and a corner held closer to where it was is the least visible way to be wrong.
++    void insert(std::uint64_t key, const Vertex& from, const Vertex& to) {
++        const float distance = std::fabs(from.x - to.x) + std::fabs(from.y - to.y);
++        std::size_t slot = hash(key) & mask_;
++        for (std::size_t probe = 0; probe <= mask_; ++probe, slot = (slot + 1) & mask_) {
++            Slot& s = slots_[slot];
++            if (!alive(s)) {
++                s = Slot{distance, from.x, from.y, from.z, key, generation_, true};
++                return;
++            }
++            if (s.key != key)
++                continue;
++            if (distance < s.distance)
++                s = Slot{distance, from.x, from.y, from.z, key, generation_, true};
++            return;
++        }
++    }
++
++    const Slot* find(std::uint64_t key) const noexcept {
++        if (slots_.empty())
++            return nullptr;
++        std::size_t slot = hash(key) & mask_;
++        for (std::size_t probe = 0; probe <= mask_; ++probe, slot = (slot + 1) & mask_) {
++            const Slot& s = slots_[slot];
++            if (!alive(s))
++                return nullptr;
++            if (s.key == key)
++                return &s;
++        }
++        return nullptr;
++    }
++
++private:
++    bool alive(const Slot& s) const noexcept { return s.used && s.generation == generation_; }
++
++    static std::uint64_t hash(std::uint64_t key) noexcept {
++        key ^= key >> 33;
++        key *= 0xFF51AFD7ED558CCDull;
++        key ^= key >> 33;
++        return key;
++    }
++
++    std::vector<Slot> slots_;
++    std::size_t mask_ = 0;
++    std::uint32_t generation_ = 0;
++};
++
++// Pairs every strip of one list in `b` with a strip of the same list in `a`, or kNoMatch.
++void pair_list(const Frame& a, const std::vector<Polygon>& la, const Frame& b,
++               const std::vector<Polygon>& lb, std::vector<std::uint32_t>& match) {
++    match.assign(lb.size(), kNoMatch);
++    if (la.empty() || lb.empty())
++        return;
++    // The two lists hold the same geometry in the same order, so strip i of one is strip i of the
++    // other. That is correspondence by construction, and no plausibility test can improve on it --
++    // which matters exactly where the test is worst, on a fast pan that moves everything far. It is
++    // only correspondence if the two lists are also believable as a whole: the same art submitted on
++    // its own somewhere else on the screen is not the same strip.
++    if (la.size() == lb.size()) {
++        bool same = true;
++        for (std::size_t i = 0; i < la.size() && same; ++i)
++            same = poly_key(la[i]) == poly_key(lb[i]);
++        if (same && !la.empty()) {
++            double sum = 0;
++            std::size_t counted = 0;
++            for (std::size_t i = 0; i < la.size(); ++i) {
++                const float d = mean_corner_distance(a, la[i], b, lb[i]);
++                if (d < 1e8f) {
++                    sum += d;
++                    ++counted;
++                }
++            }
++            if (counted != 0 && sum / static_cast<double>(counted) <= kMaxMean) {
++                for (std::size_t j = 0; j < lb.size(); ++j)
++                    match[j] = static_cast<std::uint32_t>(j);
++                return;
++            }
++        }
++    }
++
++    std::vector<Fit> fit_a(la.size()), fit_b(lb.size());
++    for (std::size_t i = 0; i < la.size(); ++i)
++        fit_a[i] = fit_polygon(a, la[i]);
++    for (std::size_t j = 0; j < lb.size(); ++j)
++        fit_b[j] = fit_polygon(b, lb[j]);
++
++    std::unordered_map<PolyKey, std::vector<std::uint32_t>, PolyKeyHash> by_key;
++    by_key.reserve(la.size());
++    for (std::size_t i = 0; i < la.size(); ++i)
++        by_key[poly_key(la[i])].push_back(static_cast<std::uint32_t>(i));
++    std::unordered_map<PolyKey, std::size_t, PolyKeyHash> cursor;
++
++    // Built on the first strip that needs it: (signature, corner uv, screen cell) -> the strips of
++    // the older frame that carry that exact uv sequence there.
++    std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> by_uv;
++    bool uv_built = false;
++    const auto build_uv = [&] {
++        uv_built = true;
++        by_uv.reserve(la.size());
++        for (std::size_t i = 0; i < la.size(); ++i) {
++            const Fit& f = fit_a[i];
++            if (!f.valid)
++                continue;
++            const PolyKey k = poly_key(la[i]);
++            const std::uint64_t cell = static_cast<std::uint64_t>(rescue_row(f.cy) * kRescueCols +
++                                                                  rescue_col(f.cx));
++            const std::uint64_t bucket = mix(mix(PolyKeyHash()(k), uv_signature(a, la[i])), cell);
++            by_uv[bucket].push_back(static_cast<std::uint32_t>(i));
++        }
++    };
++
++    for (std::size_t j = 0; j < lb.size(); ++j) {
++        const PolyKey key = poly_key(lb[j]);
++        const auto found = by_key.find(key);
++        if (found == by_key.end())
++            continue;
++        const std::vector<std::uint32_t>& candidates = found->second;
++        std::size_t& next = cursor[key];
++        std::uint32_t best = kNoMatch;
++        // Take the first plausible candidate, never the closest of a far-away group: jumping to a
++        // closer-looking instance of the same art is exactly how unrelated corners get paired. The
++        // window is what lets the scan resynchronise after the list has shifted.
++        const std::size_t limit = std::min(candidates.size(), next + kResyncWindow);
++        for (std::size_t c = next; c < limit; ++c) {
++            const std::uint32_t ia = candidates[c];
++            if (!plausible(fit_a[ia], fit_b[j], mean_corner_distance(a, la[ia], b, lb[j])))
++                continue;
++            best = ia;
++            break;
++        }
++        // The order did not resynchronise. Fall back on what identifies the strip independently of
++        // its place in the list and its place on the screen: its texture coordinates.
++        if (best == kNoMatch) {
++            if (!uv_built)
++                build_uv();
++            const Fit& fb = fit_b[j];
++            if (fb.valid) {
++                const std::uint64_t sig = uv_signature(b, lb[j]);
++                float best_distance = kRescueDistance;
++                for (int dy = -1; dy <= 1; ++dy) {
++                    for (int dx = -1; dx <= 1; ++dx) {
++                        const int col = rescue_col(fb.cx) + dx, row = rescue_row(fb.cy) + dy;
++                        if (col < 0 || row < 0 || col >= kRescueCols || row >= kRescueRows)
++                            continue;
++                        const std::uint64_t cell =
++                            static_cast<std::uint64_t>(row * kRescueCols + col);
++                        const auto bucket = by_uv.find(mix(mix(PolyKeyHash()(key), sig), cell));
++                        if (bucket == by_uv.end())
++                            continue;
++                        for (const std::uint32_t ia : bucket->second) {
++                            if (!(poly_key(la[ia]) == key) || !same_uv(a, la[ia], b, lb[j]))
++                                continue;
++                            const float distance = mean_corner_distance(a, la[ia], b, lb[j]);
++                            if (distance <= best_distance) {
++                                best_distance = distance;
++                                best = ia;
++                            }
++                        }
++                    }
++                }
++            }
++        }
++        match[j] = best;
++        // Candidates skipped on the way to `best` were not plausible for this strip; the next strip
++        // of the same signature starts after the pair just consumed.
++        if (best != kNoMatch) {
++            while (next < candidates.size() && candidates[next] <= best)
++                ++next;
++        }
++    }
+ }
+ 
+ }  // namespace
+@@ -186,54 +467,99 @@ bool interpolate_frames(const Frame& a, const Frame& b, float t, Frame& out,
+     t = std::min(1.0f, std::max(0.0f, t));
+     InterpolationStats local;
+     local.total = b.polygon_count() + b.modifiers.size();
+-    // Start from the newer frame: unmatched strips keep its corners, so they are drawn where they
+-    // are now. Only pairs that plausibly are the same strip are moved.
++    // Start from the newer frame: a corner nothing has a counterpart for is drawn where it is now.
+     Frame result = b;
+     double motion_sum = 0;
+     std::size_t motion_count = 0;
++    // Motion magnitudes for the median the caller uses to tell a moving frame from a still one: a
++    // still frame is better repeated than re-drawn, because a re-draw of it can only differ from it.
++    std::uint32_t motion_hist[65] = {};  // one bucket per pixel, the last one holding everything over
+ 
++    // The movement of the frame, one entry per corner position, and which strip of the newer frame
++    // each strip of the newer frame had as its predecessor.
++    static CornerMap movement;  // reused between calls; the renderer calls this from one thread
++    movement.reset(b.vertices.size());
++    std::vector<std::uint32_t> match[kListCount];
+     for (unsigned list = 0; list < kListCount; ++list) {
+-        if (b.lists[list].empty() || a.lists[list].empty())
+-            continue;
+-        std::unordered_map<PolyKey, std::vector<std::size_t>, PolyKeyHash> index;
+-        index.reserve(a.lists[list].size());
+-        for (std::size_t i = 0; i < a.lists[list].size(); ++i)
+-            index[poly_key(a.lists[list][i])].push_back(i);
+-        std::unordered_map<PolyKey, std::size_t, PolyKeyHash> cursor;
+-
+-        for (const Polygon& pb : b.lists[list]) {
+-            const PolyKey key = poly_key(pb);
+-            const auto found = index.find(key);
+-            if (found == index.end())
++        pair_list(a, a.lists[list], b, b.lists[list], match[list]);
++        for (std::size_t j = 0; j < b.lists[list].size(); ++j) {
++            const Polygon& pb = b.lists[list][j];
++            const std::uint32_t ia = match[list][j];
++            if (ia == kNoMatch)
+                 continue;
+-            const std::vector<std::size_t>& candidates = found->second;
+-            std::size_t& next = cursor[key];
++            const Polygon& pa = a.lists[list][ia];
++            for (std::uint32_t i = 0; i < pa.count; ++i)
++                movement.insert(corner_key(b.vertices[pb.first + i]), a.vertices[pa.first + i],
++                                b.vertices[pb.first + i]);
++            const Fit fa = fit_polygon(a, pa);
+             const Fit fb = fit_polygon(b, pb);
+-            std::size_t best = static_cast<std::size_t>(-1);
+-            // Take the first plausible candidate, never the closest of a far-away group: jumping
+-            // to a closer-looking instance of the same art is exactly how unrelated corners get
+-            // paired. Two candidates cover one culled or inserted strip of the same signature.
+-            const std::size_t limit = std::min(candidates.size(), next + 2);
+-            for (std::size_t c = next; c < limit; ++c) {
+-                const Polygon& pa = a.lists[list][candidates[c]];
+-                const Fit fa = fit_polygon(a, pa);
+-                const float mean = mean_corner_distance(a, pa, b, pb);
+-                if (plausible(fa, fb, mean)) {
+-                    best = candidates[c];
+-                    break;
+-                }
++            if (fa.valid && fb.valid) {
++                const float d = std::fabs(fa.cx - fb.cx) + std::fabs(fa.cy - fb.cy);
++                motion_sum += d;
++                ++motion_count;
++                const std::uint32_t bucket = d < 64.0f ? static_cast<std::uint32_t>(d) : 64u;
++                ++motion_hist[bucket];
+             }
+-            if (best == static_cast<std::size_t>(-1))
+-                continue;  // no plausible predecessor: leave this strip at its current position
+-            lerp_polygon(a, a.lists[list][best], pb, t, result);
+-            const Fit fa = fit_polygon(a, a.lists[list][best]);
+-            motion_sum += std::fabs(fa.cx - fb.cx) + std::fabs(fa.cy - fb.cy);
+-            ++motion_count;
+             ++local.matched;
+-            // Candidates skipped on the way to `best` were not plausible for this strip; the next
+-            // strip of the same signature starts after the pair just consumed.
+-            while (next < candidates.size() && candidates[next] <= best)
+-                ++next;
++        }
++    }
++
++    if (local.matched == 0) {
++        if (stats)
++            *stats = local;
++        return false;
++    }
++    // A cut (or a tracking loss) moves every matched corner by a lot. Interpolating across it would
++    // show one scene morphing into another, which is worse than repeating the current frame.
++    if (motion_count != 0 && motion_sum / static_cast<double>(motion_count) > kMaxAverageMotion) {
++        if (stats)
++            *stats = local;
++        return false;
++    }
++    // The median of the same magnitudes, which a handful of stray pairs cannot drag: near zero means
++    // the picture is not moving, and the caller repeats it instead of drawing it again.
++    if (motion_count != 0) {
++        std::uint32_t seen = 0;
++        const std::uint32_t half = static_cast<std::uint32_t>(motion_count / 2);
++        for (std::uint32_t bucket = 0; bucket < 65; ++bucket) {
++            seen += motion_hist[bucket];
++            if (seen > half) {
++                local.motion = static_cast<float>(bucket);
++                break;
++            }
++        }
++    }
++
++    // Move the corners by position, so that every strip that meets another at a corner moves that
++    // corner the same way. A strip whose corners are all unshared and unmatched keeps them where the
++    // newer frame has them, which is the one case where standing still is right: there is nothing
++    // beside it to tear against.
++    for (unsigned list = 0; list < kListCount; ++list) {
++        const auto& lb = b.lists[list];
++        const auto& la = a.lists[list];
++        for (std::size_t j = 0; j < lb.size(); ++j) {
++            const Polygon& pb = lb[j];
++            const std::uint32_t ia = match[list][j];
++            const Polygon* pa = ia == kNoMatch ? nullptr : &la[ia];
++            for (std::uint32_t i = 0; i < pb.count; ++i) {
++                const Vertex& vb = b.vertices[pb.first + i];
++                Vertex& out_vertex = result.vertices[pb.first + i];
++                const CornerMap::Slot* slot = movement.find(corner_key(vb));
++                if (slot) {
++                    const Vertex from{slot->x, slot->y, slot->z, 0.0f, 0.0f, 0, 0};
++                    lerp_position(from, out_vertex, t);
++                } else if (pa) {
++                    lerp_position(a.vertices[pa->first + i], out_vertex, t);
++                }
++                // The texture coordinate belongs to the strip, not to the corner position: a strip
++                // whose art scrolls has to move its own `u`, `v` even where a neighbour shares the
++                // corner.
++                if (pa) {
++                    const Vertex& va = a.vertices[pa->first + i];
++                    out_vertex.u = va.u + (out_vertex.u - va.u) * t;
++                    out_vertex.v = va.v + (out_vertex.v - va.v) * t;
++                }
++            }
+         }
+     }
+ 
+@@ -296,19 +622,6 @@ bool interpolate_frames(const Frame& a, const Frame& b, float t, Frame& out,
+         }
+     }
+ 
+-    if (local.matched == 0) {
+-        if (stats)
+-            *stats = local;
+-        return false;
+-    }
+-    // A cut (or a tracking loss) moves every matched corner by a lot. Interpolating across it would
+-    // show one scene morphing into another, which is worse than repeating the current frame.
+-    if (motion_count != 0 && motion_sum / static_cast<double>(motion_count) > kMaxAverageMotion) {
+-        if (stats)
+-            *stats = local;
+-        return false;
+-    }
+-
+     // The renderer derives its projection from the frame's depth range, so it has to describe the
+     // interpolated corners, not either source frame's.
+     float min_z = 0, max_z = 0;
+
+diff --git a/render/src/overlay.cpp b/render/src/overlay.cpp
+--- a/render/src/overlay.cpp
++++ b/render/src/overlay.cpp
+@@ -128,16 +128,15 @@ void fill_rect(u32* rgba, unsigned pitch, unsigned width, unsigned height, int x
+         }
+ }
+ 
+-void draw_text(u32* rgba, unsigned pitch, unsigned width, unsigned height, int x, int y,
+-               std::string_view text, const TextStyle& style, const u32* under) {
+-    if (!rgba || style.scale == 0 || text.empty())
++void text_rects(int x, int y, std::string_view text, const TextStyle& style,
++                std::vector<Rect>& out) {
++    if (style.scale == 0 || text.empty())
+         return;
+     const int s = static_cast<int>(style.scale);
+     if (style.bg) {
+         // A one-pixel margin all round, so the text is never flush against its own panel edge.
+-        fill_rect(rgba, pitch, width, height, x - s, y - s,
+-                  static_cast<int>(text_width(text, style.scale)) + s,
+-                  static_cast<int>(text_height(style.scale)) + s, style.bg, under);
++        out.push_back(Rect{x - s, y - s, static_cast<int>(text_width(text, style.scale)) + s,
++                           static_cast<int>(text_height(style.scale)) + s, style.bg});
+     }
+     int pen = x;
+     for (const char c : text) {
+@@ -147,12 +146,23 @@ void draw_text(u32* rgba, unsigned pitch, unsigned width, unsigned height, int x
+                 for (unsigned col = 0; col < kGlyphWidth; ++col) {
+                     if (g->rows[row][col] != '#')
+                         continue;
+-                    fill_rect(rgba, pitch, width, height, pen + static_cast<int>(col) * s,
+-                              y + static_cast<int>(row) * s, s, s, style.fg, under);
++                    out.push_back(Rect{pen + static_cast<int>(col) * s, y + static_cast<int>(row) * s,
++                                       s, s, style.fg});
+                 }
+         }
+         pen += static_cast<int>(kCellWidth) * s;
+     }
+ }
+ 
++void draw_text(u32* rgba, unsigned pitch, unsigned width, unsigned height, int x, int y,
++               std::string_view text, const TextStyle& style, const u32* under) {
++    if (!rgba)
++        return;
++    static std::vector<Rect> rects;  // reused: this is called per present while the menu is open
++    rects.clear();
++    text_rects(x, y, text, style, rects);
++    for (const Rect& r : rects)
++        fill_rect(rgba, pitch, width, height, r.x, r.y, r.w, r.h, r.rgba, under);
++}
++
+ }  // namespace dream::render
+
+diff --git a/render/src/vk/present.cpp b/render/src/vk/present.cpp
+--- a/render/src/vk/present.cpp
++++ b/render/src/vk/present.cpp
+@@ -1,8 +1,11 @@
+ // See present.h.
+ #include "dream/render/vk/present.h"
+ 
++#include <cstddef>
+ #include <cstring>
+ 
++#include "overlay_frag.h"
++#include "overlay_vert.h"
+ #include "present_frag.h"
+ #include "present_vert.h"
+ 
+@@ -170,6 +173,119 @@ bool Presenter::create(Context& ctx, VkRenderPass render_pass) {
+         error_ = "vkCreateGraphicsPipelines failed for the presenter";
+         return false;
+     }
++    return create_overlay_pipeline(dev);
++}
++
++// The overlay's pipeline: solid rectangles from a vertex buffer, blended over the picture. It shares
++// the presentation pipeline's layout, and therefore its push constants, so a rectangle is positioned
++// by exactly the same transform that places the image.
++bool Presenter::create_overlay_pipeline(VkDevice dev) {
++    overlay_vs_ = make_module(dev, overlay_vert, sizeof overlay_vert);
++    overlay_fs_ = make_module(dev, overlay_frag, sizeof overlay_frag);
++    if (!overlay_vs_ || !overlay_fs_) {
++        error_ = "the overlay shaders would not load";
++        return false;
++    }
++
++    VkPipelineShaderStageCreateInfo stages[2]{};
++    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
++    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
++    stages[0].module = overlay_vs_;
++    stages[0].pName = "main";
++    stages[1] = stages[0];
++    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
++    stages[1].module = overlay_fs_;
++
++    VkVertexInputBindingDescription binding{0, sizeof(OverlayVertex), VK_VERTEX_INPUT_RATE_VERTEX};
++    VkVertexInputAttributeDescription attributes[2]{};
++    attributes[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT,
++                     static_cast<std::uint32_t>(offsetof(OverlayVertex, x))};
++    attributes[1] = {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
++                     static_cast<std::uint32_t>(offsetof(OverlayVertex, r))};
++    VkPipelineVertexInputStateCreateInfo vi{};
++    vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
++    vi.vertexBindingDescriptionCount = 1;
++    vi.pVertexBindingDescriptions = &binding;
++    vi.vertexAttributeDescriptionCount = 2;
++    vi.pVertexAttributeDescriptions = attributes;
++    VkPipelineInputAssemblyStateCreateInfo ia{};
++    ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
++    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
++    VkPipelineViewportStateCreateInfo vp{};
++    vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
++    vp.viewportCount = 1;
++    vp.scissorCount = 1;
++    VkPipelineRasterizationStateCreateInfo rs{};
++    rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
++    rs.polygonMode = VK_POLYGON_MODE_FILL;
++    rs.cullMode = VK_CULL_MODE_NONE;
++    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
++    rs.lineWidth = 1.0f;
++    VkPipelineMultisampleStateCreateInfo ms{};
++    ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
++    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
++    VkPipelineDepthStencilStateCreateInfo ds{};
++    ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
++    // Straight alpha over the picture, exactly as the host-side stamping does it.
++    VkPipelineColorBlendAttachmentState attach{};
++    attach.blendEnable = VK_TRUE;
++    attach.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
++    attach.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
++    attach.colorBlendOp = VK_BLEND_OP_ADD;
++    attach.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
++    attach.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
++    attach.alphaBlendOp = VK_BLEND_OP_ADD;
++    attach.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
++                            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
++    VkPipelineColorBlendStateCreateInfo cb{};
++    cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
++    cb.attachmentCount = 1;
++    cb.pAttachments = &attach;
++    const VkDynamicState dynamic[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
++    VkPipelineDynamicStateCreateInfo dy{};
++    dy.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
++    dy.dynamicStateCount = 2;
++    dy.pDynamicStates = dynamic;
++
++    VkGraphicsPipelineCreateInfo gpci{};
++    gpci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
++    gpci.stageCount = 2;
++    gpci.pStages = stages;
++    gpci.pVertexInputState = &vi;
++    gpci.pInputAssemblyState = &ia;
++    gpci.pViewportState = &vp;
++    gpci.pRasterizationState = &rs;
++    gpci.pMultisampleState = &ms;
++    gpci.pDepthStencilState = &ds;
++    gpci.pColorBlendState = &cb;
++    gpci.pDynamicState = &dy;
++    gpci.layout = layout_;
++    gpci.renderPass = render_pass_;
++    if (vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gpci, nullptr, &overlay_pipeline_) !=
++        VK_SUCCESS) {
++        error_ = "vkCreateGraphicsPipelines failed for the presenter's overlay";
++        return false;
++    }
++    return true;
++}
++
++bool Presenter::set_overlay(VkCommandBuffer /*cmd*/, const std::vector<OverlayVertex>& triangles) {
++    overlay_count_ = static_cast<std::uint32_t>(triangles.size());
++    if (overlay_count_ == 0)
++        return true;
++    if (!ctx_)
++        return false;
++    const VkDeviceSize bytes = overlay_count_ * sizeof(OverlayVertex);
++    // Growing replaces the buffer, and a frame still in flight may be reading the old one, so let
++    // the device finish first. It happens a handful of times, while the counter's text reaches its
++    // widest, and never afterwards.
++    if (bytes > overlay_vertices_.capacity())
++        vkDeviceWaitIdle(ctx_->device());
++    // Written from the host: the window waits for this frame's fence before reusing the command
++    // buffer, so the previous submission has finished reading it.
++    if (!overlay_vertices_.ensure(*ctx_, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
++        return false;
++    overlay_vertices_.write(triangles.data(), bytes);
+     return true;
+ }
+ 
+@@ -193,7 +309,21 @@ void Presenter::destroy_image() {
+ void Presenter::destroy() {
+     if (ctx_ && ctx_->device()) {
+         VkDevice dev = ctx_->device();
++        // The last frame may still be reading the image, the sampler and the overlay's vertex
++        // buffer; destroying them under a recording command buffer is what the validation layers
++        // report as VUID-vkDestroyBuffer-buffer-00922 and its neighbours.
++        vkDeviceWaitIdle(dev);
+         destroy_image();
++        overlay_vertices_.destroy();
++        overlay_count_ = 0;
++        if (overlay_pipeline_)
++            vkDestroyPipeline(dev, overlay_pipeline_, nullptr);
++        if (overlay_vs_)
++            vkDestroyShaderModule(dev, overlay_vs_, nullptr);
++        if (overlay_fs_)
++            vkDestroyShaderModule(dev, overlay_fs_, nullptr);
++        overlay_pipeline_ = VK_NULL_HANDLE;
++        overlay_vs_ = overlay_fs_ = VK_NULL_HANDLE;
+         if (pipeline_)
+             vkDestroyPipeline(dev, pipeline_, nullptr);
+         if (layout_)
+@@ -418,6 +548,15 @@ bool Presenter::draw(VkCommandBuffer cmd, VkExtent2D target) {
+     vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                        sizeof push, &push);
+     vkCmdDraw(cmd, 3, 1, 0, 0);
++    // The overlay's rectangles sit in the image's coordinates and reuse the push constants just set,
++    // so they land over the same pixels the host-stamped version would have covered.
++    if (overlay_count_ != 0 && overlay_pipeline_ && overlay_vertices_.handle()) {
++        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, overlay_pipeline_);
++        const VkBuffer buffer = overlay_vertices_.handle();
++        const VkDeviceSize zero = 0;
++        vkCmdBindVertexBuffers(cmd, 0, 1, &buffer, &zero);
++        vkCmdDraw(cmd, overlay_count_, 1, 0, 0);
++    }
+     return true;
+ }
+ 
+
+diff --git a/render/tests/test_interpolate.cpp b/render/tests/test_interpolate.cpp
+--- a/render/tests/test_interpolate.cpp
++++ b/render/tests/test_interpolate.cpp
+@@ -38,6 +38,27 @@ Frame strip(float x0, float x1, float z0, float z1) {
+     return frame;
+ }
+ 
++// Appends one strip to a frame: x..x+10 across, 10..90 down, at a fixed depth. `tcw` is the texture
++// address, which is what tells two strips of the same art apart; `u0`/`u1` are its texture
++// coordinates, which is what identifies a strip when the list order changes.
++Polygon add_strip(Frame& frame, float x, std::uint32_t tcw = 0x33333333u, float u0 = 0.0f,
++                  float u1 = 1.0f, float y = 10.0f) {
++    Polygon polygon;
++    polygon.first = static_cast<std::uint32_t>(frame.vertices.size());
++    polygon.count = 3;
++    polygon.pcw = 0x12345678u;
++    polygon.isp = 0x00000011u;
++    polygon.tsp = 0x22222222u;
++    polygon.tcw = tcw;
++    frame.vertices.push_back(vertex(x, y, 0.5f, u0, 0.0f));
++    frame.vertices.push_back(vertex(x + 10.0f, y, 0.5f, u1, 0.0f));
++    frame.vertices.push_back(vertex(x, y + 80.0f, 0.5f, u0, 1.0f));
++    frame.lists[0].push_back(polygon);
++    ++frame.strips;
++    frame.min_z = frame.max_z = 0.5f;
++    return polygon;
++}
++
+ }  // namespace
+ 
+ TEST_CASE("interpolate: identical geometry is compatible") {
+@@ -196,3 +217,92 @@ TEST_CASE("interpolate: t is clamped") {
+     REQUIRE(interpolate_frames(a, b, 2.0f, out));
+     CHECK(out.vertices[0].x == doctest::Approx(20.0));
+ }
++
++TEST_CASE("interpolate: a list that shifted by several strips still pairs") {
++    // The older frame has three strips of the same signature in front of the four that match, so
++    // every strip of the newer frame sits three candidates behind where the cursor expects its
++    // predecessor. The texture coordinates are scrolled a little in the newer frame, as a scrolling
++    // texture's are, so only the scan can pair them: a window of two stops at the first extra strip
++    // and leaves all four stranded.
++    Frame a;
++    for (int i = 0; i < 3; ++i)
++        add_strip(a, static_cast<float>(-300 + i * 100), 0x33333333u, 0.9f, 0.95f);
++    for (int i = 0; i < 4; ++i)
++        add_strip(a, static_cast<float>(i * 100), 0x33333333u, 0.1f * static_cast<float>(i),
++                  0.1f * static_cast<float>(i) + 0.05f);
++    Frame b;
++    for (int i = 0; i < 4; ++i)
++        add_strip(b, static_cast<float>(i * 100 + 4), 0x33333333u,
++                  0.1f * static_cast<float>(i) + 0.02f,
++                  0.1f * static_cast<float>(i) + 0.07f);
++    InterpolationStats stats;
++    Frame out;
++    REQUIRE(interpolate_frames(a, b, 0.5f, out, &stats));
++    CHECK(stats.matched == 4);
++    CHECK(stats.total == 4);
++    // Each matched strip moved 4 px, so halfway is 2 px back from where the newer frame has it.
++    CHECK(out.vertices[0].x == doctest::Approx(2.0));
++}
++
++TEST_CASE("interpolate: a re-sorted list pairs on its texture coordinates") {
++    // The guest sorts translucent strips back to front, so their submission order changes from
++    // frame to frame. Here the newer frame submits the same twenty strips in the opposite order, so
++    // the strip that was last is nineteen candidates past where the cursor looks; the order can pair
++    // nothing and only the texture coordinates can put them back together.
++    Frame a;
++    for (int i = 0; i < 20; ++i)
++        add_strip(a, static_cast<float>(i * 100), 0x33333333u, 0.1f * static_cast<float>(i),
++                  0.1f * static_cast<float>(i) + 0.05f);
++    Frame b;
++    for (int i = 19; i >= 0; --i)
++        add_strip(b, static_cast<float>(i * 100 + 6), 0x33333333u,
++                  0.1f * static_cast<float>(i), 0.1f * static_cast<float>(i) + 0.05f);
++    InterpolationStats stats;
++    Frame out;
++    REQUIRE(interpolate_frames(a, b, 0.5f, out, &stats));
++    CHECK(stats.matched == 20);
++    CHECK(stats.total == 20);
++    // The strip the newer frame submits first is the one that was at x=1900, and it moved 6 px.
++    CHECK(out.vertices[0].x == doctest::Approx(1903.0));
++    CHECK(out.vertices[0].u == doctest::Approx(1.9));
++}
++
++TEST_CASE("interpolate: a strip with no pair still follows the seam it shares") {
++    // `moved` pairs and moves 20 px to the right. `still` does not pair -- its signature exists
++    // only far across the screen in the older frame -- but in the newer frame it shares an edge
++    // with `moved` at x=20. If only `moved` moves, that edge tears open, so the shared corner has
++    // to move with it.
++    Frame a;
++    add_strip(a, 0.0f, 0x11111111u);                         // x 0..10, moves
++    add_strip(a, 600.0f, 0x22222222u);                       // the only copy of the other signature
++    Frame b;
++    add_strip(b, 20.0f, 0x11111111u);                        // x 20..30
++    const Polygon still = add_strip(b, 10.0f, 0x33333333u);  // x 10..20, shares x=20 with it
++    InterpolationStats stats;
++    Frame out;
++    REQUIRE(interpolate_frames(a, b, 0.5f, out, &stats));
++    CHECK(stats.matched == 1);
++    CHECK(stats.total == 2);
++    // `moved`'s left corner goes from 20 to 10.
++    CHECK(out.vertices[0].x == doctest::Approx(10.0));
++    // The corner `still` shares with it follows, from 20 to 10, instead of staying behind and
++    // leaving a gap along the edge the two have in common.
++    CHECK(b.vertices[still.first + 1].x == doctest::Approx(20.0f));
++    CHECK(out.vertices[still.first + 1].x == doctest::Approx(10.0));
++    // The corners it does not share stay where the newer frame has them.
++    CHECK(out.vertices[still.first].x == doctest::Approx(10.0));
++    CHECK(out.vertices[still.first + 2].x == doctest::Approx(10.0));
++}
++
++TEST_CASE("interpolate: the reported motion tells a still frame from a moving one") {
++    const Frame a = strip(0.0f, 10.0f, 0.5f, 0.5f);
++    const Frame still = a;
++    Frame out;
++    InterpolationStats stats;
++    REQUIRE(interpolate_frames(a, still, 0.5f, out, &stats));
++    CHECK(stats.motion == doctest::Approx(0.0));
++
++    const Frame moving = strip(20.0f, 30.0f, 0.5f, 0.5f);
++    REQUIRE(interpolate_frames(a, moving, 0.5f, out, &stats));
++    CHECK(stats.motion > 1.0f);
++}
+
+diff --git a/render/tests/test_overlay.cpp b/render/tests/test_overlay.cpp
+--- a/render/tests/test_overlay.cpp
++++ b/render/tests/test_overlay.cpp
+@@ -161,3 +161,35 @@ TEST_CASE("drawing over `under` is pixel-identical to drawing over the frame its
+             CHECK(apart[i] == inplace[i]);
+         }
+ }
++
++TEST_CASE("the rectangles are exactly the pixels draw_text would set") {
++    // The counter has two paths now: stamped into a host copy of the frame, and drawn as rectangles
++    // by the presenter. They must be the same overlay, so the rectangles are checked against the
++    // pixels: painting them in order has to reproduce the stamped canvas byte for byte.
++    constexpr unsigned w = 96, h = 32;
++    const TextStyle style{kWhite, 0xC0000000u, 2};
++    std::vector<u32> stamped(w * h, kBlack);
++    draw_text(stamped.data(), w, w, h, 4, 4, "120.4 FPS 1.00X", style);
++
++    std::vector<Rect> rects;
++    text_rects(4, 4, "120.4 FPS 1.00X", style, rects);
++    REQUIRE(rects.size() > 1);
++    std::vector<u32> painted(w * h, kBlack);
++    for (const Rect& r : rects)
++        fill_rect(painted.data(), w, w, h, r.x, r.y, r.w, r.h, r.rgba);
++
++    for (unsigned y = 0; y < h; ++y)
++        for (unsigned x = 0; x < w; ++x) {
++            const std::size_t i = static_cast<std::size_t>(y) * w + x;
++            INFO("pixel " << x << "," << y);
++            CHECK(painted[i] == stamped[i]);
++        }
++}
++
++TEST_CASE("a rectangle list is empty when there is nothing to draw") {
++    std::vector<Rect> rects;
++    text_rects(0, 0, "", TextStyle{kWhite, 0, 1}, rects);
++    CHECK(rects.empty());
++    text_rects(0, 0, "A", TextStyle{kWhite, 0, 0}, rects);
++    CHECK(rects.empty());
++}
+
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -919,6 +919,7 @@ struct Live {
+     bool present(std::uint64_t frame, std::uint64_t guest_cycles, double alpha = 1.0) {
+         PhaseTimer timer(present_ns);
+         guest_frame = frame;
++        interpolated_image = nullptr;
+         if (!window.poll())
+             return false;
+         update_counter(guest_cycles);
+@@ -1018,12 +1019,12 @@ struct Live {
+         if (!have_frame)
+             return true;  // nothing displayable yet: the window keeps its cleared background
+ 
+-        // DREAM_INTERP_DUMP=<guest frame>: save the pair around the first interpolated frame at or
+-        // after that frame. The older picture is kept from the previous frame's second present, so
+-        // all three images come from the same interpolation and cannot drift apart.
+-        const char* dump_env = std::getenv("DREAM_INTERP_DUMP");
+-        const std::uint64_t dump_target =
+-            dump_env ? std::strtoull(dump_env, nullptr, 0) : 0;
++        // DREAM_INTERP_DUMP=<guest frame>[,<frame>...]: save the pair around the first interpolated
++        // frame at or after each frame. The older picture is kept from the previous frame's second
++        // present, so all three images come from the same interpolation and cannot drift apart.
++        static const char* dump_env = std::getenv("DREAM_INTERP_DUMP");
++        static std::uint64_t dump_target = dump_env ? std::strtoull(dump_env, nullptr, 0) : 0;
++        static int dump_index = 0;
+         if (dump_target && !dump_done && from_renderer && !holding_frame && alpha >= 0.999) {
+             const std::uint32_t* px = pixels_now();
+             if (px)
+@@ -1042,20 +1043,64 @@ struct Live {
+             dream::render::InterpolationStats match;
+             const bool interpolated_frame = dream::render::interpolate_frames(
+                 prev_frame, current_frame, static_cast<float>(alpha), interp_frame, &match);
+-            if (std::getenv("DREAM_TRACE_INTERP")) {
++            // Not every frame that can be interpolated is worth drawing again. A picture that is not
++            // moving is the one it was built from, so re-drawing it can only make it worse -- and a
++            // frame whose pairing mostly failed is a cut or a fade, which would show as one scene
++            // morphing into another. Both present the current picture instead.
++            const bool worth_drawing =
++                interpolated_frame && match.motion >= 0.75f && match.matched * 2 >= match.total;
++            if (const char* trace = std::getenv("DREAM_TRACE_INTERP")) {
++                // The value is how many frames to report: the default is a dozen, and a number
++                // high enough to cover a whole run is how a frame with a bad pairing is found.
++                static const int limit = std::atoi(trace) > 0 ? std::atoi(trace) : 12;
+                 static int reported = 0;
+-                if (reported < 12) {
++                if (reported < limit) {
+                     ++reported;
+-                    std::printf("interp at guest %llu: %zu of %zu strips matched%s\n",
++                    std::printf("interp at guest %llu: %zu of %zu strips matched, %.0f px now%s\n",
+                                 static_cast<unsigned long long>(guest_frame), match.matched,
+-                                match.total, interpolated_frame ? "" : " (fallback)");
++                                match.total, static_cast<double>(match.motion),
++                                worth_drawing ? "" : " (repeated)");
+                 }
+             }
+-            if (!interpolated_frame) {
++            {
++                static const char* pair_env = std::getenv("DREAM_INTERP_PAIR");
++                static int pair_written = 0;
++                if (pair_env && pair_written < 16) {
++                    const std::string want = "," + std::string(pair_env) + ",";
++                    char needle[48];
++                    std::snprintf(needle, sizeof needle, ",%llu,",
++                                  static_cast<unsigned long long>(guest_frame));
++                    if (want.find(needle) != std::string::npos) {
++                        char stem[64];
++                        std::snprintf(stem, sizeof stem, "work/interp_pair%02d", pair_written++);
++                        dump_frame(std::string(stem) + "_a.txt", prev_frame);
++                        dump_frame(std::string(stem) + "_b.txt", current_frame);
++                        dump_frame(std::string(stem) + "_out.txt", interp_frame);
++                        if (FILE* info = std::fopen((std::string(stem) + "_info.txt").c_str(), "w")) {
++                            std::fprintf(info,
++                                         "guest %llu matched %zu total %zu ok %d motion %.1f\n"
++                                         "renders %llu presented %llu\n"
++                                         "a: %zu vertices %zu polygons; b: %zu vertices %zu polygons\n",
++                                         static_cast<unsigned long long>(guest_frame), match.matched,
++                                         match.total, interpolated_frame ? 1 : 0,
++                                         static_cast<double>(match.motion),
++                                         static_cast<unsigned long long>(rendered),
++                                         static_cast<unsigned long long>(presented),
++                                         prev_frame.vertices.size(), prev_frame.polygon_count(),
++                                         current_frame.vertices.size(),
++                                         current_frame.polygon_count());
++                            std::fclose(info);
++                        }
++                        std::printf("interp pair written at guest %llu\n",
++                                    static_cast<unsigned long long>(guest_frame));
++                    }
++                }
++            }
++            if (!worth_drawing) {
+                 ++interp_fallbacks;
+-            } else {
+-                if (match.matched * 2 < match.total)
++                if (interpolated_frame && match.matched * 2 < match.total)
+                     ++interp_partial;
++            } else {
+                 if (!interp_offscreen)
+                     interp_offscreen = std::make_unique<dream::render::vk::Offscreen>();
+                 if (interp_offscreen->width() == 0 && !interp_offscreen_failed) {
+@@ -1072,30 +1117,44 @@ struct Live {
+                                     static_cast<unsigned long long>(guest_frame),
+                                     interp_frame.vertices.size(),
+                                     interp_frame.polygon_count());
+-                    drawn = interp_offscreen->render(renderer, interp_frame, geometry) &&
+-                            interp_offscreen->pixels() != nullptr;
++                    // No readback: the presenter samples this image where it lies, exactly as it
++                    // does the guest's own frame. Bringing 20 MB back to the host and uploading it
++                    // again is what kept 120 presents a second out of reach at --scale 4, and it
++                    // also made the two presents of a guest frame travel different paths.
++                    drawn = interp_offscreen->render(renderer, interp_frame, geometry,
++                                                     /*readback=*/false);
+                     if (std::getenv("DREAM_TRACE_INTERP"))
+                         std::printf("interp render guest %llu: %s\n",
+                                     static_cast<unsigned long long>(guest_frame),
+                                     drawn ? "ok" : "failed");
+                 }
+                 if (drawn) {
+-                    source = interp_offscreen->pixels();
++                    interpolated_image = interp_offscreen.get();
+                     source_width = interp_offscreen->width();
+                     source_height = interp_offscreen->height();
+                     ++interpolated;
+                     if (dump_target && !dump_done && guest_frame >= dump_target &&
+                         dump_prev_pixels.size() ==
+                             static_cast<std::size_t>(shown.width) * shown.height) {
+-                        dump_pixels("work/interp_prev.ppm", dump_prev_pixels.data(), shown.width,
++                        char stem[64];
++                        std::snprintf(stem, sizeof stem, "work/interp_%02d", dump_index++);
++                        const std::string base = stem;
++                        dump_pixels(base + "_prev.ppm", dump_prev_pixels.data(), shown.width,
+                                     shown.height);
+-                        dump_pixels("work/interp_mid.ppm", interp_offscreen->pixels(),
+-                                    interp_offscreen->width(),
+-                                    interp_offscreen->height());
+-                        dump_pixels("work/interp_cur.ppm", pixels_now(), offscreen.width(),
++                        if (interp_offscreen->read_back())
++                            dump_pixels(base + "_mid.ppm", interp_offscreen->pixels(),
++                                        interp_offscreen->width(), interp_offscreen->height());
++                        dump_pixels(base + "_cur.ppm", pixels_now(), offscreen.width(),
+                                     offscreen.height());
+-                        dump_done = true;
+-                        std::printf("interp dump at guest %llu\n",
++                        // The next dump is the next entry in the list, or none.
++                        if (const char* comma = std::strchr(dump_env, ',')) {
++                            dump_env = comma + 1;
++                            dump_target = std::strtoull(dump_env, nullptr, 0);
++                            dump_prev_pixels.clear();
++                        } else {
++                            dump_done = true;
++                        }
++                        std::printf("interp dump %s at guest %llu\n", stem,
+                                     static_cast<unsigned long long>(guest_frame));
+                     }
+                 } else {
+@@ -1108,19 +1167,39 @@ struct Live {
+ 
+         // Show the renderer's own image where it lies when the frame came from it: the presenter
+         // samples the picture the renderer just drew, so the frame is never copied to the host and
+-        // back. A frame decoded out of video memory, a kept frame (a render to texture is being
+-        // drawn) and the on-screen counter need host pixels, and take the upload path.
+-        const bool overlay = show_fps || menu.is_open();
++        // back. That holds for the interpolated frame too -- it is a second renderer target, and it
++        // takes the same path -- which matters at 120 and 165 presents a second, where the round
++        // trip through the host is the difference between holding the rate and not. The frame-rate
++        // counter rides on top as solid rectangles rather than stamped pixels, so it no longer
++        // costs that round trip either. A frame decoded out of video memory, a kept frame (a render
++        // to texture is being drawn) and the binding screen still need host pixels.
++        const bool menu_open = menu.is_open();
+         // DREAM_PRESENT_CPU=1 sends the frame through the host even when it could stay on the GPU,
+         // which is how the direct path is checked against the one it replaced: same screenshot,
+         // byte for byte.
+         static const bool present_cpu = std::getenv("DREAM_PRESENT_CPU") != nullptr;
+         bool from_image = false;
+-        if (from_renderer && !holding_frame && !overlay && !source && !present_cpu) {
++        const dream::render::vk::Offscreen* image_source = &offscreen;
++        if (interpolated_image && !menu_open && !present_cpu) {
++            from_image = true;
++            image_source = interpolated_image;
++        } else if (interpolated_image) {
++            // Something has to be composited over the picture, so it has to come back to the host.
++            if (interpolated_image->read_back()) {
++                source = interpolated_image->pixels();
++                source_width = interpolated_image->width();
++                source_height = interpolated_image->height();
++            }
++        } else if (from_renderer && !holding_frame && !menu_open && !source && !present_cpu) {
+             from_image = true;
+-        } else if (from_renderer && !source) {
+-            source = pixels_now();
+         }
++        // A counter on a picture that is already going through the host (a menu, a movie, a kept
++        // frame) is stamped into the copy; on a frame that stays on the GPU it is drawn there.
++        const bool stamp_counter = show_fps && !from_image;
++        if (!from_image && !source && from_renderer && (menu_open || show_fps))
++            source = pixels_now();
++        else if (!from_image && !source && from_renderer)
++            source = pixels_now();
+         std::uint32_t image = 0;
+         VkCommandBuffer cmd = VK_NULL_HANDLE;
+         {
+@@ -1136,10 +1215,15 @@ struct Live {
+         // another and usable as a reference image.
+         {
+             PhaseTimer t(upload_ns);
+-            if (from_image && presenter.use_image(offscreen.view(), offscreen.width(),
+-                                                  offscreen.height())) {
+-                // No copy at all: the window's pass samples the renderer's target directly.
+-            } else if (overlay) {
++            if (from_image && presenter.use_image(image_source->view(), image_source->width(),
++                                                  image_source->height())) {
++                // No copy at all: the window's pass samples the renderer's target directly, and the
++                // counter is drawn over it as rectangles.
++                presenter.set_overlay(cmd, show_fps ? counter_quads(image_source->width(),
++                                                                    image_source->height())
++                                                    : no_quads());
++            } else if (menu_open || stamp_counter) {
++                presenter.set_overlay(cmd, no_quads());
+                 if (!source)
+                     source = pixels_now();
+                 if (source)
+@@ -1154,6 +1238,7 @@ struct Live {
+                                              menu.draw(px, w, w, h, window.devices(), under);
+                                      });
+             } else if (source) {
++                presenter.set_overlay(cmd, no_quads());
+                 presenter.upload(cmd, source, source_width, source_height);
+             }
+         }
+@@ -1188,6 +1273,17 @@ struct Live {
+         if (trace_pacing) {
+             const auto now = std::chrono::steady_clock::now();
+             const double hz = window.refresh_hz();
++            // How long each picture actually stayed on the panel, in refreshes. An average rate
++            // cannot show this: 120 pictures a second on a 165 Hz panel is 1.375 refreshes each, so
++            // some are held for one and some for two, and *that* is what the eye reads as judder. The
++            // distribution is the only honest measure of whether a rate is even on this display.
++            if (pacing_measured && hz > 0.0) {
++                const double held =
++                    std::chrono::duration<double>(now - pacing_last).count() * hz;
++                const int refreshes =
++                    std::clamp(static_cast<int>(std::llround(held)), 1, 11);
++                ++pacing_hold_hist[refreshes];
++            }
+             if (pacing_measured) {
+                 // A present that follows no new render shows the same picture again: the motion
+                 // stops for a whole frame interval and then jumps, which reads as a stutter and
+@@ -1445,18 +1541,73 @@ struct Live {
+     // stays the same size relative to the picture however the window is resized. `under` is the
+     // same frame in cached memory: the panel is translucent, and taking its blend destination from
+     // the write-combined staging buffer instead measured ~9.5 ms a frame at --scale 4.
+-    void draw_counter(std::uint32_t* px, std::uint32_t w, std::uint32_t h,
+-                      const std::uint32_t* under) {
+-        char line[64];
+-        std::snprintf(line, sizeof line, "%.1f FPS  %.2fX", fps_shown, speed_shown);
++    // What the counter says and where it goes, for one present. The same geometry feeds both paths:
++    // stamped pixels when the frame is on the host anyway, and solid rectangles when it is not.
++    dream::render::TextStyle counter_style(std::uint32_t w) {
+         dream::render::TextStyle style;
+         // One text pixel per two guest pixels at --scale 1, and the same apparent size at every
+         // scale above it, so the counter neither disappears nor swamps the picture.
+         style.scale = std::max(2u, 2u * (w / kGuestWidth));
+-        const int margin = static_cast<int>(4 * style.scale);
++        return style;
++    }
++    static int counter_margin(const dream::render::TextStyle& style) {
++        return static_cast<int>(4 * style.scale);
++    }
++    void counter_text(char* out, std::size_t bytes) {
++        std::snprintf(out, bytes, "%.1f FPS  %.2fX", fps_shown, speed_shown);
++    }
++
++    void draw_counter(std::uint32_t* px, std::uint32_t w, std::uint32_t h,
++                      const std::uint32_t* under) {
++        char line[64];
++        counter_text(line, sizeof line);
++        const dream::render::TextStyle style = counter_style(w);
++        const int margin = counter_margin(style);
+         dream::render::draw_text(px, w, w, h, margin, margin, line, style, under);
+     }
+ 
++    // The counter as triangles for the presenter, in the picture's own pixels. Two triangles per
++    // rectangle, which is one per lit font pixel plus the panel behind the text -- a few hundred for
++    // a counter, drawn by the GPU in the pass that shows the frame anyway, so the frame never has to
++    // come back to the host for it.
++    const std::vector<dream::render::vk::OverlayVertex>& counter_quads(std::uint32_t w,
++                                                                     std::uint32_t h) {
++        counter_rects_.clear();
++        quads_.clear();
++        char line[64];
++        counter_text(line, sizeof line);
++        const dream::render::TextStyle style = counter_style(w);
++        dream::render::text_rects(counter_margin(style), counter_margin(style), line, style,
++                                  counter_rects_);
++        for (const dream::render::Rect& r : counter_rects_) {
++            const float x0 = static_cast<float>(r.x), y0 = static_cast<float>(r.y);
++            const float x1 = x0 + static_cast<float>(r.w), y1 = y0 + static_cast<float>(r.h);
++            // Clipped by hand: a glyph that reaches past the picture would be clipped by the window
++            // anyway, and the rectangle is all that has to be right.
++            if (x1 <= 0.0f || y1 <= 0.0f || x0 >= static_cast<float>(w) ||
++                y0 >= static_cast<float>(h))
++                continue;
++            const auto colour = [&r](dream::render::vk::OverlayVertex& v) {
++                v.r = static_cast<float>(r.rgba & 0xFFu) / 255.0f;
++                v.g = static_cast<float>((r.rgba >> 8) & 0xFFu) / 255.0f;
++                v.b = static_cast<float>((r.rgba >> 16) & 0xFFu) / 255.0f;
++                v.a = static_cast<float>((r.rgba >> 24) & 0xFFu) / 255.0f;
++            };
++            const dream::render::vk::OverlayVertex corners[4] = {{x0, y0}, {x1, y0}, {x1, y1},
++                                                                 {x0, y1}};
++            static const int kOrder[6] = {0, 1, 2, 0, 2, 3};
++            for (const int index : kOrder) {
++                quads_.push_back(corners[index]);
++                colour(quads_.back());
++            }
++        }
++        return quads_;
++    }
++    static const std::vector<dream::render::vk::OverlayVertex>& no_quads() {
++        static const std::vector<dream::render::vk::OverlayVertex> none;
++        return none;
++    }
++
+     void screenshot() {
+         char name[64];
+         std::snprintf(name, sizeof name, "screenshot-%03u.ppm", screenshots++);
+@@ -1486,6 +1637,39 @@ struct Live {
+         std::fclose(f);
+     }
+ 
++    // DREAM_INTERP_PAIR=<guest frame>[,<frame>...]: write the two render frames that fed an
++    // interpolation, plus the frame it produced, as text. Diagnostic only -- the matching can be
++    // re-derived and replayed offline from these files, which is how a pairing fault is found
++    // without a rebuild per experiment.
++    void dump_frame(const std::string& name, const dream::render::Frame& f) {
++        FILE* out = std::fopen(name.c_str(), "w");
++        if (!out)
++            return;
++        std::fprintf(out, "z %.9g %.9g\nstrips %u sprites %u\n", f.min_z, f.max_z, f.strips,
++                     f.sprites);
++        for (const auto& v : f.vertices)
++            std::fprintf(out, "v %.9g %.9g %.9g %.9g %.9g %08x %08x\n", static_cast<double>(v.x),
++                         static_cast<double>(v.y), static_cast<double>(v.z),
++                         static_cast<double>(v.u), static_cast<double>(v.v), v.base, v.offset);
++        for (unsigned l = 0; l < dream::render::kListCount; ++l) {
++            std::fprintf(out, "list %u %zu\n", l, f.lists[l].size());
++            for (const auto& p : f.lists[l])
++                std::fprintf(out, "p %u %u %08x %08x %08x %08x %08x %08x %u %u %u %u %u\n", p.first,
++                             p.count, p.pcw, p.isp, p.tsp, p.tcw, p.tsp1, p.tcw1, p.tile_clip,
++                             static_cast<unsigned>(p.clip_x0), static_cast<unsigned>(p.clip_y0),
++                             static_cast<unsigned>(p.clip_x1), static_cast<unsigned>(p.clip_y1));
++        }
++        std::fprintf(out, "modifiers %zu\n", f.modifiers.size());
++        for (const auto& m : f.modifiers) {
++            std::fprintf(out, "m %08x", m.isp);
++            for (int c = 0; c < 3; ++c)
++                std::fprintf(out, " %.9g %.9g %.9g", static_cast<double>(m.x[c]),
++                             static_cast<double>(m.y[c]), static_cast<double>(m.z[c]));
++            std::fprintf(out, "\n");
++        }
++        std::fclose(out);
++    }
++
+     void screenshot_to(const std::string& name) {
+         // overlays and the resolve. The default below is the game's own pixels instead, which is
+         // what makes one screenshot comparable with another; this is for looking at the display
+@@ -1529,10 +1713,24 @@ struct Live {
+     // numbers that say where the run had got to. A report that comes with one of these can be
+     // rendered again offline with dream_render_view; a report without one is a description of a
+     // picture nobody else can see.
++    //
++    // The picture is the one on the glass. With interpolation on that is the intermediate frame for
++    // every second present or so, and the guest's display list in the `.ta` is *not* what drew it --
++    // so a capture of a torn intermediate frame carries `.interp`, the geometry that did, in the
++    // same text form DREAM_INTERP_PAIR writes. Without it the report is the one picture that never
++    // showed the fault.
+     void capture() {
+         char stem[64];
+         std::snprintf(stem, sizeof stem, "capture-%03u", captures++);
+-        screenshot_to(std::string(stem) + ".ppm");
++        const bool was_interpolated = interpolated_image != nullptr;
++        if (was_interpolated && interpolated_image->read_back()) {
++            dump_pixels(std::string(stem) + ".ppm", interpolated_image->pixels(),
++                        interpolated_image->width(), interpolated_image->height());
++        } else {
++            screenshot_to(std::string(stem) + ".ppm");
++        }
++        if (was_interpolated)
++            dump_frame(std::string(stem) + ".interp", interp_frame);
+         if (!last_stream.empty()) {
+             if (FILE* f = std::fopen((std::string(stem) + ".ta").c_str(), "wb")) {
+                 std::fwrite(last_stream.data(), 4, last_stream.size(), f);
+@@ -1562,10 +1760,15 @@ struct Live {
+                          renderer.textures().overwritten);
+             std::fprintf(f, "display: %s\n", shown.describe().c_str());
+             std::fprintf(f, "source: %s\n", from_renderer ? "the renderer" : "video memory");
++            std::fprintf(f, "picture: %s\n",
++                         was_interpolated
++                             ? "the interpolated frame (the .ta below did not draw it; .interp did)"
++                             : "the guest's own frame for this display list");
+             std::fprintf(f, "parameter words: %zu\n", last_stream.size());
+             std::fclose(f);
+         }
+-        std::printf("captured %s.{ppm,ta,vram,vram.regs,txt} at guest frame %llu\n", stem,
++        std::printf("captured %s.{ppm,ta,vram,vram.regs,txt%s} at guest frame %llu\n", stem,
++                    was_interpolated ? ",interp" : "",
+                     static_cast<unsigned long long>(guest_frame));
+     }
+ 
+@@ -1621,6 +1824,8 @@ struct Live {
+     std::uint64_t pacing_window_presents = 0, pacing_window_repeats = 0;
+     std::uint64_t pacing_window_first_frame = 0;
+     std::uint64_t pacing_window_guest_renders = 0;
++    // Pictures that stayed on the panel for 1, 2, ... 11+ refreshes. See the note where it is filled.
++    std::uint32_t pacing_hold_hist[12] = {};
+     double pacing_last_hz = 0.0;
+     // The on-screen counter. Two numbers, because they answer different questions: how smooth it
+     // looks (frames actually presented per second of wall clock) and whether it is keeping up
+@@ -1670,9 +1875,14 @@ struct Live {
+     bool have_prev_frame = false, have_current_frame = false;
+     bool prev_frame_3d = false, current_frame_3d = false;
+     std::unique_ptr<dream::render::vk::Offscreen> interp_offscreen;
++    // The interpolated image this present is showing, or null when it shows the guest's own frame.
++    dream::render::vk::Offscreen* interpolated_image = nullptr;
+     bool interp_offscreen_failed = false;
+     bool dump_done = false;
+     std::vector<std::uint32_t> dump_prev_pixels;
++    // The frame-rate counter as rectangles for the GPU path, reused between presents.
++    std::vector<dream::render::Rect> counter_rects_;
++    std::vector<dream::render::vk::OverlayVertex> quads_;
+     std::uint64_t interpolated = 0, interp_fallbacks = 0, interp_partial = 0, interp_failures = 0;
+ 
+ private:
+@@ -3591,8 +3801,9 @@ int main(int argc, char** argv) {
+             std::printf("window: last shown %s\n", live->shown.describe().c_str());
+         if (live->interpolation)
+             std::printf(
+-                "interpolation: %llu frames drawn between guest frames, %llu fell back (no "
+-                "strip matched), %llu partial (under half matched), %llu render failures\n",
++                "interpolation: %llu frames drawn between guest frames, %llu repeated instead (no "
++                "pair, a still picture or a cut), %llu of them under half matched, %llu render "
++                "failures\n",
+                 static_cast<unsigned long long>(live->interpolated),
+                 static_cast<unsigned long long>(live->interp_fallbacks),
+                 static_cast<unsigned long long>(live->interp_partial),
+@@ -3637,6 +3848,23 @@ int main(int argc, char** argv) {
+                         static_cast<unsigned long long>(live->pacing_repeats),
+                         100.0 * static_cast<double>(live->pacing_repeats) /
+                             static_cast<double>(live->pacing_intervals));
++            // What was actually on the panel, which is the thing the eye judges. A perfectly even
++            // cadence is one non-zero entry; two entries mean the picture is held for two different
++            // lengths of time, and the size of that difference is the judder.
++            std::printf("pacing: picture hold, in refreshes:");
++            std::uint64_t holds = 0;
++            for (int r = 1; r < 12; ++r)
++                holds += live->pacing_hold_hist[r];
++            for (int r = 1; r < 12; ++r) {
++                if (!live->pacing_hold_hist[r])
++                    continue;
++                std::printf(" %d x %llu (%.1f%%)", r,
++                            static_cast<unsigned long long>(live->pacing_hold_hist[r]),
++                            holds ? 100.0 * static_cast<double>(live->pacing_hold_hist[r]) /
++                                        static_cast<double>(holds)
++                                  : 0.0);
++            }
++            std::printf("\n");
+         }
+         // Vulkan objects are destroyed now rather than at scope exit, while everything they were
+         // created from is still alive.

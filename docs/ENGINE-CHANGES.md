@@ -2666,6 +2666,206 @@ byte-identical; the headless parity counters match. The engine's own suite is un
 
 Carried by `patches/0003-m5-coverage.patch`, which applies after 0001 and 0002.
 
+## Patch 039: interpolation pairs the strips it was leaving behind (2026-11-15)
+
+Reported from play, with `-Interpolate` on: seams in the environment break apart and flash, the same
+on the character, and the red opening flyby shows a pink flash when Escape skips it. All three
+disappear with interpolation off, so the picture the guest draws is right and the intermediate frame
+is what is wrong.
+
+The intermediate frame is `render/interpolate.cpp` matching each strip of the newer frame to the same
+strip of the older one. That matcher had two faults, and both bias the frame towards pieces of the
+world standing still while the rest moves — which on a moving camera is a seam that opens and snaps
+shut again half a present later, i.e. flicker.
+
+**Fault 1: the candidate window could not resynchronise.** Same-signature strips are paired in
+submission order, and the cursor looked at most two candidates ahead (`patch 024`: "Two candidates
+cover one culled or inserted strip"). A same-key group in this game is not two strips long: the
+opaque list holds groups of 22, 244 and 426, and the translucent list groups of 120-569. One run of
+two or more inserted strips stuck the cursor, and because it only advanced on a match, *every* later
+strip of that group stayed unpaired. Measured on eight dumped frame pairs: at guest frame 4780 the
+translucent list had 221 of 2041 strips paired (11 %), and 1483 of the 1690 visible translucent
+strips in the newer frame had no predecessor, while a same-key candidate within 20 px existed for
+1208 of them. That is the sword's glow, the character's own translucent pieces and the leaf quads
+left behind while the world moves.
+
+The window is now 16 and the scan runs only for the strips the first two candidates did not place, so
+the common case costs what it did. On the dumped pairs this takes the translucent list at guest frame
+4780 from 221 strips paired to 2,016, of which 1,962 move (the rest pair with no displacement), and
+the frame as a whole from 4,093 to 6,353 of 6,530.
+
+**Fault 2: a re-sorted list cannot be paired by order at all.** Translucent strips are sorted back to
+front, so the guest necessarily submits them in a different order every frame. No window fixes that.
+A strip's corner-by-corner texture coordinates do not change when the camera moves, so they identify
+the strip independently of both its place in the list and its place on the screen; when the order
+finds nothing, that signature is looked up in the nine 96 px screen cells around the strip (a
+qualifying pair's centroid is within the scan's 64 px distance limit, so it cannot be outside them)
+and the closest exact match is taken. The index is built on the first strip that needs it.
+
+**The seam rule (revised the same day).** Even a partly-matched frame must not tear: neighbouring
+strips in the newer frame share corner positions, and if only one of them moves, the shared edge
+opens. The first cut of this looked up the *unmatched* corners in a cell table of the matched ones,
+which closed the crack wherever one side had no pair — but not where both sides had one and the two
+pairs disagreed. Those are the pairs chosen by a wrong owner, and there are more of them the more
+strips pair: measured on the 6,594-strip frame at guest 4775, 22 shared corners per frame with the
+old two-candidate rule (median 43 px apart), 175 with the widened window and uv rescue above. A crack
+of 20-40 px at half a present interval, at 120 presents a second, is exactly "seams breaking apart as
+fluctuating flashes".
+
+The movement is now keyed on the corner *position*: one displacement per screen point, in a flat
+hash table of quantised (x, y, 1/w) — a sixteenth of a pixel and a sixty-five-thousandth of the depth
+range, far below anything that shows and far above a rounding difference between two writes of one
+value. Every vertex, matched or not, takes the displacement of its own position, so two strips that
+share a corner cannot move it differently and the seam cannot part; a strip the pairing missed moves
+with the strips it touches; and a corner nothing shares keeps the newer frame's position, where
+standing still is right because there is nothing beside it to tear against. A corner claimed twice
+takes the claim that moves it least, which is the least visible way to be wrong. Measured on the same
+dumps, shared corners that still separate: **none above 0.014 px** (the quantisation step), against
+up to 97 px before. The picture then changes where the cracks were: on the 4x intermediate frame at
+guest 4775 a flat fog-coloured wedge over the cliff — a displaced strip exposing the background —
+disappears, and 3.9 % of the frame's pixels change with it.
+
+**What the caller does with it.** `InterpolationStats` reports the median corner motion, and the
+presenter repeats the current picture instead of drawing a frame that is not worth drawing: one whose
+median motion is under 0.75 px (a still picture, where a re-draw can only differ from the original),
+and one where fewer than half the strips paired (a cut or a fade, which would otherwise show one
+scene morphing into another). The library still refuses a frame whose *average* motion is over 48 px;
+the `<50 %` rule is the same intent applied to coverage, and `patch 024`'s documentation already
+claimed it while the code only refused a frame with *no* pair at all.
+
+**Presenting it, and capturing it.** The intermediate frame used to be read back to the host and
+uploaded again, twice per guest frame's worth of presents at 4x: 20 MB down and 20 MB up, the same
+round trip `Offscreen` documents as "the difference between a frame that fits 60 Hz with room to
+spare and one that just fits". It is now presented from the GPU image like any other frame, which is
+what makes the requested rate reachable: **119.8 presents/s** at `--present-rate 120`, `--scale 4`,
+16:9, in gameplay, against 113.5 with the round trip. And F11 now captures the picture that is on the
+glass: when that is the intermediate frame, `.ppm` is that image and a new `.interp` text file holds
+the geometry that drew it (the `.ta` beside it is the guest's own display list, which did *not* draw
+it). Without that, a report of a torn intermediate frame was a capture of the one frame that never
+showed the fault.
+
+**The on-screen counter moved to the GPU (same day).** It was the last thing dragging the frame back
+to the host: `pixels_now()` and `upload()` ran on *every* present while it was on, 1.30 ms of CPU and
+20 MB each way per present at 4x, and it cost 18-26 presents a second. The font is a grid of 5x7
+filled squares, so text needs no texture at all — `overlay::text_rects()` returns the same rectangles
+`draw_text()` would stamp, and the presenter draws them as solid quads in the pass that shows the
+frame anyway (`shaders/overlay.vert`/`.frag`, a second pipeline sharing the presentation pipeline's
+push constants, so a rectangle lands over exactly the picture pixel it covers). Measured, exclusive
+fullscreen at 4x, 16:9, `--sh4-clock 400`, `--present-rate 120`:
+
+| counter | opening 3D | menus |
+|---|---|---|
+| stamped into a host copy (before) | 93.6 presents/s | 99.1 |
+| drawn on the GPU (after) | **111.6** | **119.8** |
+| counter off, for comparison | 111.6 | 119.8 |
+
+The counter is now free: the present path reports `upload 0.00 ms` and the picture rate with it on is
+identical to the rate with it off. The F1 binding screen still composites on the host, because that
+screen is a full-window panel and the game is stopped while it is up. `--present-cpu` and the
+`DREAM_PRESENT_CPU` comparison are unchanged: that path still stamps, so the two paths remain
+byte-comparable. A unit test pins the two paths together — painting `text_rects()`'s rectangles must
+reproduce `draw_text()`'s pixels exactly.
+
+**The launcher now offers the rates the display actually has.** A fixed 60/120/144 list is wrong on a
+165 Hz panel, where 120 is held for one refresh and then two. `tools/launcher.py` asks Windows for the
+primary display's modes (`EnumDisplaySettingsW`) and builds the list from them: each refresh as one
+picture per refresh, half of one where that is still at least 60 Hz (72 from 144), and the common
+targets 120/144/180/240 so a display that reports only its desktop rate still has the usual choices.
+On this machine that is 60, 72, 75, 85, 100, 120, 144, 165, 180, 240; with no display to ask, the old
+fixed list comes back. The rows are the rate alone — the divisibility note that explains why the list
+is derived lives in the row's help text, not in every label. The interpolation checkbox follows
+the same list, a saved rate the display no longer reports stays selectable rather than blanking the
+box, and the self-test pins a 165 Hz panel, a 240 Hz panel, the fallback and the `DEVMODEW` layout
+(`dmDisplayFrequency` at 184, size 220 — a struct that would be easy to get subtly wrong).
+
+Measured on the same 4,800-frame scripted walk (`--present-rate 120`, windowed, unthrottled):
+
+| | before | after |
+|---|---|---|
+| strips paired, the 6,530-strip gameplay frame | 4,093 | 6,353 |
+| strips the interpolation moves, that frame's 2,041-strip translucent list | 221 | 1,962 |
+| shared corners that move apart (guest 4775), worst | 97 px | 0.014 px |
+| intermediates drawn | 1,155 | 326 |
+| of those, under half matched | 183 | 1 |
+| frames repeating a still picture | 0 | 828 |
+| presents/s in gameplay, 4x 16:9, rate 120 | 113.5 | 119.8 |
+| host time, 4,800 frames | 73.58 s | 74.75 s |
+
+The 828 repeats are still pictures: the scripted walk stands still for most of the run, and a still
+picture interpolated is the picture itself. The extra work is ~0.25 ms per interpolated present.
+
+`render/tests/test_interpolate.cpp` gains four cases (a list that shifted by three strips, a list
+submitted in reverse order, a shared seam, and the reported motion), each verified to fail when the
+mechanism it covers is removed. The render suite is 108 cases (2,020 assertions).
+
+**What is left, and why a rate can still look uneven.** Two things outside this change decide what the
+frame-rate counter reads, and both were measured while chasing this:
+
+* The on-screen counter is composited in the presenter's staging buffer, which needs the frame on the
+  host: `pixels_now()` reads 20 MB back and `upload()` sends 20 MB out **per present** — 1.30 ms of
+  CPU per present at 4x, against 0.00 ms when it is off, and it costs about ten presents a second.
+  Drawing the counter on the GPU (its font is 5x7 rectangles, so it is a handful of solid quads) is
+  the fix, and it is a presenter change, not an interpolation one.
+* A 165 Hz panel cannot show 120 pictures a second evenly: 1.375 refreshes per picture means pictures
+  are held 1 refresh and then 2, "so motion judders however fast the game is running", as the engine
+  already says at startup. With interpolation on, the even rates are the refresh itself (165) or half
+  of it; at 165 the app holds 141-146 presents a second in the densest scene with the counter off, and
+  the rest of the way is the cost of rasterising 5,400 strips at 5 megapixels twice per guest frame.
+  Exclusive fullscreen is the one mode that can pick a 120 Hz display mode for an even 120 (`patch
+  031`), and borderless cannot.
+
+**Measured hold pattern (2026-11-16, after a report that 60 fps feels smooth but 120 does not).** The
+pacing trace now histograms how long each picture actually stayed on the panel, in refreshes, which is
+the thing the eye judges and which no averaged rate can express. 165 Hz panel, `--scale 2`, 16:9,
+2,400 frames of the scripted walk:
+
+| requested | pictures held 1 / 2 / 3 / 4+ refreshes | picture rate | cadence |
+|---|---|---|---|
+| 60, no interpolation | 0.2 % / 1.8 % / **97.5 %** / 0.2 % | 55 Hz | **even** — three refreshes every time |
+| 120, no interpolation | **50.0 % / 49.8 %** / 0.1 % | 110 Hz | uneven: 6 ms and 12 ms holds alternate |
+| 120, interpolation | **44.5 % / 55.2 %** / 0.1 % | 106 Hz | uneven, the same mixture |
+| 165, interpolation | **88.3 % / 11.4 %** / 0.1 % | ~148 Hz | nearly even; the app misses one vblank in nine |
+
+So the report was right and the reasoning behind it was not: asking for 60 does *not* produce the
+2.75-refresh mixture the arithmetic predicts. The app is slightly late every frame, so the display
+holds each picture for three refreshes and the cadence is **even at 55 pictures a second** — slower,
+but steady. Asking for 120 lands half the pictures on one refresh and half on two, which is the worst
+mixture available: every other picture flashes past in 6 ms. That, and not the average rate, is what
+"120 does not feel smooth" describes. The even choice on this panel is the refresh itself; 82.5 (two
+refreshes) would be even as well but `--present-rate` is whole-number only, so it is not expressible.
+A 120 Hz display mode would make both 60 and 120 whole numbers of refreshes (two and one), which is
+why `--display exclusive` is worth trying on this panel, and borderless cannot change the mode.
+
+**Exclusive fullscreen is the mode that can be even, and it is — when the rate is affordable.** The
+same measurement in exclusive fullscreen (the engine picks a 120 Hz mode for a 120 Hz request and a
+165 Hz one for 165), 1,700 frames reaching the opening 3D scene, `--scale 4`, 16:9:
+
+| exclusive, 4x, opening scene | presents/s | pictures held 1 refresh | cadence |
+|---|---|---|---|
+| 120 Hz mode, counter off | **119.7** | 99.6 % | even |
+| 120 Hz mode, counter on | 111.5 | 97.2 % | nearly even |
+| 120 Hz mode, counter on, `--sh4-clock 400` (the reported settings) | 93.6 | 88.3 % | uneven again |
+| 165 Hz mode, 165 requested, counter off | 126.8 | 73.2 % | uneven: 4x cannot hold 165 |
+| 165 Hz mode, 165 requested, counter on | 101.0 | 51.1 % | the worst mixture |
+
+Two things follow. The counter is worth 18-26 presents a second at 4x (it reads the frame back and
+uploads it again, per present), and 4x cannot hold 165 — so on a 165 Hz panel the even rate is only
+reachable by putting the panel into 120 Hz, which exclusive fullscreen can do and borderless cannot.
+The launcher now offers 165 and 240 as well, for displays and scales where they are affordable, with
+the refresh-divisibility note in the option's help.
+
+**Interpolation does nothing in the opening scene, by design.** The red flyby moves less than a pixel
+a frame, so every one of its frames reports `0 px now` and is repeated rather than redrawn — 196-449
+repeats and *zero* intermediates in every run above. It is the worst place to judge the option: it
+engages where there is motion (337 intermediates in the scripted walk), and it cannot raise the rate
+in any scene, because each extra picture is a full extra render at the same resolution.
+
+Carried by `patches/0004-frame-interpolation-pairing.patch`, which applies after 0001-0003. It
+touches `render/{include,src,tests}` and `runtime/boot/boot_main.cpp`; the diagnostics it adds are
+`DREAM_INTERP_PAIR` (the two frames behind an interpolation, as text) and a comma list for
+`DREAM_INTERP_DUMP`, and F11's frame capture now writes the presented intermediate frame plus a
+`.interp` geometry dump when that is what is on screen.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

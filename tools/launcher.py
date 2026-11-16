@@ -15,6 +15,7 @@ Run with:  python tools/launcher.py      (or tools\launcher.bat)
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import re
@@ -181,6 +182,118 @@ def audio_device_choices(saved: str = "") -> list[tuple[str, str]]:
     return choices
 
 
+# --- the display's rates -------------------------------------------------------------------
+#
+# A present rate only looks smooth when the display can hold every picture for the same number of
+# refreshes, so the list of rates to offer comes from the display rather than from a fixed table: a
+# 165 Hz panel holds 120 pictures a second for one refresh and then two, which judders, while 165 is
+# held for one every time. `docs/ENGINE-CHANGES.md` (patch 039) has the measurements.
+
+
+class DEVMODEW(ctypes.Structure):
+    """DEVMODEW, laid out so that dmDisplayFrequency lands at its real offset (184).
+
+    The union of printing and display fields is written as its printing variant: both variants are
+    16 bytes, which is all the offsets after it depend on.
+    """
+
+    _fields_ = [
+        ("dmDeviceName", ctypes.c_wchar * 32),
+        ("dmSpecVersion", ctypes.c_ushort),
+        ("dmDriverVersion", ctypes.c_ushort),
+        ("dmSize", ctypes.c_ushort),
+        ("dmDriverExtra", ctypes.c_ushort),
+        ("dmFields", ctypes.c_ulong),
+        ("dmOrientation", ctypes.c_short),
+        ("dmPaperSize", ctypes.c_short),
+        ("dmPaperLength", ctypes.c_short),
+        ("dmPaperWidth", ctypes.c_short),
+        ("dmScale", ctypes.c_short),
+        ("dmCopies", ctypes.c_short),
+        ("dmDefaultSource", ctypes.c_short),
+        ("dmPrintQuality", ctypes.c_short),
+        ("dmColor", ctypes.c_short),
+        ("dmDuplex", ctypes.c_short),
+        ("dmYResolution", ctypes.c_short),
+        ("dmTTOption", ctypes.c_short),
+        ("dmCollate", ctypes.c_short),
+        ("dmFormName", ctypes.c_wchar * 32),
+        ("dmLogPixels", ctypes.c_ushort),
+        ("dmBitsPerPel", ctypes.c_ulong),
+        ("dmPelsWidth", ctypes.c_ulong),
+        ("dmPelsHeight", ctypes.c_ulong),
+        ("dmDisplayFlags", ctypes.c_ulong),
+        ("dmDisplayFrequency", ctypes.c_ulong),
+        ("dmICMMethod", ctypes.c_ulong),
+        ("dmICMIntent", ctypes.c_ulong),
+        ("dmMediaType", ctypes.c_ulong),
+        ("dmDitherType", ctypes.c_ulong),
+        ("dmReserved1", ctypes.c_ulong),
+        ("dmReserved2", ctypes.c_ulong),
+        ("dmPanningWidth", ctypes.c_ulong),
+        ("dmPanningHeight", ctypes.c_ulong),
+    ]
+
+
+def _devmode() -> "DEVMODEW":
+    devmode = DEVMODEW()
+    devmode.dmSize = ctypes.sizeof(DEVMODEW)
+    return devmode
+
+
+def display_refresh_rates() -> list[int]:
+    """Distinct refresh rates the primary display reports, ascending; [] when it cannot be asked."""
+    if sys.platform != "win32":
+        return []
+    try:
+        user32 = ctypes.windll.user32
+    except (AttributeError, OSError):
+        return []
+    rates: set[int] = set()
+    devmode = _devmode()
+    index = 0
+    while user32.EnumDisplaySettingsW(None, index, ctypes.byref(devmode)):
+        index += 1
+        hz = int(devmode.dmDisplayFrequency)
+        if hz > 1:  # 0 and 1 mean "the hardware's default", not a rate
+            rates.add(hz)
+        if index > 512:  # a driver that never says stop must not hang the launcher
+            break
+    return sorted(rates)
+
+
+def present_rate_choices(modes: list[int] | None = None) -> list[tuple[str, int]]:
+    """Rows for the present-rate combo: this display's own rates, plus the common targets.
+
+    The list comes from the display rather than from a fixed table, because a rate only looks smooth
+    when the panel can hold every picture for the same number of refreshes, and that depends on the
+    panel. Each refresh it reports is offered as one picture per refresh, and half of one is offered
+    where that is still at least 60 Hz (two refreshes per picture). 120, 144, 180 and 240 are kept
+    even when no mode reports them, so a display that is not being asked, or a VRR panel that reports
+    only its desktop rate, still has the usual choices; the engine caps a rate the display cannot
+    show and says so. With no modes at all the launcher falls back to that fixed list.
+    """
+    modes = sorted({hz for hz in (modes or []) if hz > 1})
+    if not modes:
+        return [("Match the game (60 Hz)", 0), ("120 Hz", 120), ("144 Hz", 144), ("165 Hz", 165),
+                ("240 Hz", 240)]
+
+    candidates = {60} | {hz for hz in modes}
+    candidates |= {hz // 2 for hz in modes if hz % 2 == 0 and hz // 2 >= 60}
+    candidates |= {120, 144, 180, 240}
+    rows: list[tuple[str, int]] = [("Match the game (60 Hz)", 0)]
+    for rate in sorted(candidates):
+        if rate <= 60:
+            continue
+        rows.append(("%d Hz" % rate, rate))
+    return rows
+
+
+DISPLAY_REFRESH_RATES = display_refresh_rates()
+PRESENT_RATE_CHOICES = present_rate_choices(DISPLAY_REFRESH_RATES)
+INTERPOLATION_RATES = [rate for _, rate in PRESENT_RATE_CHOICES if rate > 60]
+
+
 def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[str]:
     """The boot command line a settings dict describes. Pure, so --selftest can check it."""
     cmd = [BINARY, "--config", CONFIG, "--window"]
@@ -256,14 +369,19 @@ TABS = [
          "depends": ("aspect", "custom"), "width": 10,
          "help": "Two numbers, for example 32:9."},
         {"kind": "combo", "key": "present_rate", "label": "Present rate",
-         "values": [("Match the game (60 Hz)", 0), ("120 Hz", 120), ("144 Hz", 144)],
-         "help": "Presents up to this rate while the game logic stays at 60 Hz. Frames are "
-                 "repeated unless interpolation is on; a display that cannot show them caps the "
-                 "rate rather than slowing the game down."},
+         "values": PRESENT_RATE_CHOICES,
+         "help": "Presents up to this rate while the game logic stays at 60 Hz. The list comes from "
+                 "this display's own rates. What looks smooth is whether the rate divides the "
+                 "display's refresh, so every picture is held for the same time: on a 165 Hz panel "
+                 "120 is held for one refresh and then two, which judders, while 165 is held for "
+                 "one every time. Exclusive fullscreen can put the panel into a mode that matches; "
+                 "the engine caps a rate the display cannot show and says so."},
         {"kind": "check", "key": "frame_interpolation",
          "label": "Interpolation",
-         "depends": ("present_rate", (120, 144)),
-         "help": "Interpolates frames up to the rate selected above. Game logic stays at 60 hz."},
+         "depends": ("present_rate", INTERPOLATION_RATES),
+         "help": "Draws the frame between two guest frames instead of repeating one, so the extra "
+                 "presents carry real motion. Each extra picture is a full extra render, so it "
+                 "cannot raise the rate -- it fills the rate the display can already hold."},
         {"kind": "check", "key": "vsync", "label": "VSync",
          "help": "On, the picture is presented in step with the display. Off, it is presented "
                  "immediately, which tears but removes the display's pacing."},
@@ -272,7 +390,8 @@ TABS = [
                     ("Borderless fullscreen", "borderless"),
                     ("Exclusive fullscreen", "exclusive")]},
         {"kind": "check", "key": "fps", "label": "Show the frame counter",
-         "help": "Starts with the overlay on. F10 toggles it in game."},
+         "help": "Starts with the overlay on. F10 toggles it in game. It is drawn by the GPU over "
+                 "the finished frame, so it costs nothing at any present rate."},
     ]),
     ("Audio", [
         {"kind": "check", "key": "audio", "label": "Enable sound",
@@ -294,7 +413,11 @@ TABS = [
                  "sound closer to the picture; higher rides out longer frame stalls on a busy "
                  "machine. Changes take effect on the next launch."},
     ]),
-    ("Gameplay", [
+    ("Game", [
+        {"kind": "disc", "label": "Game disc",
+         "help": "Your own dump of the USA V1.000 release. GDI and CHD images are "
+                 "accepted; the launcher checks the disc before Play, so a wrong dump fails "
+                 "here instead of inside the game."},
         {"kind": "combo", "key": "controls", "label": "Controls", "width": 46,
          "values": [("Classic - Dreamcast pad", "classic"),
                     ("Modern - twin-stick, LT block, RT attack", "modern")],
@@ -306,9 +429,11 @@ TABS = [
                     ("Interpreter - reference, slow", "interpreter")],
          "help": "The translated path is the real thing. The interpreter is the reference the "
                  "translation is checked against."},
-        {"kind": "disc", "label": "Game disc"},
     ]),
 ]
+
+# The Game tab is first: the disc and the engine path are what a player acts on before playing.
+TABS.sort(key=lambda tab: ("Game", "Graphics", "Audio").index(tab[0]))
 
 
 # ----------------------------------------------------------------------------- UI
@@ -317,6 +442,9 @@ class Launcher(tk.Tk):
     BG = "#141013"
     FG = "#e8dcc8"
     DIM = "#a08c78"
+    OK = "#7fc97f"    # a disc that verified
+    BAD = "#e06c6c"   # no disc, or one that was rejected
+    WARN = "#e0b04a"  # selected but not checked yet
 
     def __init__(self) -> None:
         super().__init__()
@@ -337,13 +465,17 @@ class Launcher(tk.Tk):
         # Enumerate once before the tabs are built; the device combo reads this list object.
         AUDIO_DEVICES[:] = audio_device_choices(self.settings.get("audio_device", ""))
         self.image_path = self._initial_image()
+        self.disc_ok = False
         self.status = tk.StringVar(value="Ready.")
         self.vars: dict[str, tk.Variable] = {}
         self.combos: dict[str, ttk.Combobox] = {}
         self._dependent: list[tuple[str, str, tk.Widget]] = []
         self._build()
         self._sync_depends()
+        self._update_disc_state()
         self.protocol("WM_DELETE_WINDOW", self._close)
+        # Check the saved disc once the window is up, so a returning player sees "Disc OK".
+        self.after(150, self._auto_check_disc)
 
     def _initial_image(self) -> str:
         try:
@@ -414,7 +546,8 @@ class Launcher(tk.Tk):
                    command=lambda: self.open_folder(SAVES_DIR)).pack(side="left")
         ttk.Button(bar, text="Open settings folder",
                    command=lambda: self.open_folder(SETTINGS_DIR)).pack(side="left", padx=(8, 0))
-        ttk.Button(bar, text="Play", command=self.play).pack(side="right")
+        self.play_button = ttk.Button(bar, text="Play", command=self.play)
+        self.play_button.pack(side="right")
         ttk.Button(bar, text="Reset", command=self.reset).pack(side="right", padx=8)
         ttk.Button(bar, text="Quit", command=self._close).pack(side="right")
         tk.Label(parent, textvariable=self.status, bg=self.BG, fg=self.DIM, anchor="w",
@@ -454,6 +587,13 @@ class Launcher(tk.Tk):
             # The StringVar is the widget's textvariable, not a label beside it: _value_for reads
             # the var, so it must be what the combobox holds. Without the binding the var stays
             # empty and every selection silently falls back to the saved setting.
+            # A saved rate this display no longer reports stays selectable rather than showing a
+            # blank box: the engine still honours it, and a panel whose modes changed must not
+            # silently rewrite the player's setting.
+            if key == "present_rate":
+                saved = int(self.settings.get(key, 0) or 0)
+                if saved and all(value != saved for _, value in c["values"]):
+                    c["values"] = list(c["values"]) + [("%d Hz (not a mode here)" % saved, saved)]
             var = tk.StringVar(value=self._label_for(key))
             self.vars[key] = var
             labels = [label for label, _ in c["values"]]
@@ -508,10 +648,17 @@ class Launcher(tk.Tk):
             return frame
         if kind == "disc":
             frame = tk.Frame(tab, bg=self.BG)
-            self.disc_label = tk.Label(frame, text=self._disc_text(), bg=self.BG, fg=self.DIM,
+            top = tk.Frame(frame, bg=self.BG)
+            top.pack(anchor="w")
+            self.disc_label = tk.Label(top, text=self._disc_text(), bg=self.BG, fg=self.FG,
                                        anchor="w")
-            self.disc_label.pack(side="left", padx=(0, 8))
-            ttk.Button(frame, text="Change disc...", command=self.browse_disc).pack(side="left")
+            self.disc_label.pack(side="left", padx=(0, 10))
+            ttk.Button(top, text="Browse...", command=self.browse_disc).pack(side="left")
+            ttk.Button(top, text="Check disc", command=self.check_disc).pack(
+                side="left", padx=(8, 0))
+            self.disc_status = tk.Label(frame, text="", bg=self.BG, anchor="w",
+                                        font=("Segoe UI", 9, "bold"))
+            self.disc_status.pack(anchor="w", pady=(6, 0))
             return frame
         return None
 
@@ -607,30 +754,79 @@ class Launcher(tk.Tk):
             self.status.set("Opened " + path)
 
     def _disc_text(self) -> str:
+        # The state line underneath says what is missing; this is only the file name.
+        return os.path.basename(self.image_path) if self.image_path else ""
+
+    def _set_disc_state(self, ok: bool, text: str, colour: str) -> None:
+        """The one place that decides whether Play is allowed and what the disc line says."""
+        self.disc_ok = ok
+        if hasattr(self, "disc_status"):
+            self.disc_status.configure(text=text, fg=colour)
+        if hasattr(self, "play_button"):
+            self.play_button.state(["!disabled"] if ok else ["disabled"])
+
+    def _update_disc_state(self) -> None:
         if not self.image_path:
-            return "(no disc configured)"
-        return os.path.basename(self.image_path)
+            self._set_disc_state(False, "No disc selected", self.BAD)
+        elif not os.path.exists(self.image_path):
+            self._set_disc_state(False, "Disc file not found", self.BAD)
+        elif self.disc_ok:
+            self._set_disc_state(True, "Disc OK", self.OK)
+        else:
+            self._set_disc_state(False, "Not checked - press Check disc", self.WARN)
+
+    def _auto_check_disc(self) -> None:
+        if self.image_path and os.path.exists(self.image_path):
+            self.check_disc()
+        else:
+            self._update_disc_state()
+
+    def check_disc(self) -> bool:
+        """Verify the selected image; Play is only enabled for the supported disc."""
+        path = self.image_path
+        if not path:
+            self._set_disc_state(False, "No disc selected", self.BAD)
+            return False
+        if not os.path.exists(path):
+            self._set_disc_state(False, "Disc file not found", self.BAD)
+            return False
+        self.disc_status.configure(text="Checking...", fg=self.WARN)
+        self.status.set("Checking " + os.path.basename(path))
+        self.update_idletasks()
+        ok, report = verify_disc(path)
+        summary = describe_disc(report)
+        if ok:
+            write_image_path(path)
+            self._set_disc_state(True, "Disc OK", self.OK)
+            self.status.set("Disc OK - " + os.path.basename(path))
+        else:
+            first = summary.splitlines()[0] if summary else "Disc rejected"
+            self._set_disc_state(False, first, self.BAD)
+            self.status.set("REJECTED\n" + summary)
+        return ok
 
     def browse_disc(self) -> None:
         path = filedialog.askopenfilename(
-            title="Select a Draconus .gdi dump",
-            filetypes=[("GDI dumps", "*.gdi"), ("All files", "*.*")],
+            title="Select your Draconus disc image",
+            filetypes=[("Dreamcast disc images", "*.gdi *.chd"),
+                       ("GDI dump", "*.gdi"),
+                       ("CHD image", "*.chd"),
+                       ("All files", "*.*")],
         )
         if not path:
             return
-        self.status.set("Verifying...")
-        self.update_idletasks()
-        ok, report = verify_disc(path)
-        if not ok:
-            self.status.set("REJECTED\n" + describe_disc(report))
-            messagebox.showerror("Disc", "That dump did not verify:\n\n" + describe_disc(report))
-            return
-        write_image_path(path)
         self.image_path = path
         self.disc_label.configure(text=self._disc_text())
-        self.status.set("Disc verified and saved. " + describe_disc(report).splitlines()[0])
+        self._set_disc_state(False, "Checking...", self.WARN)
+        self.status.set("Selected " + os.path.basename(path))
+        self.after(50, self.check_disc)
 
     def play(self) -> None:
+        if not self.disc_ok:
+            messagebox.showerror(
+                "Disc",
+                "No verified disc selected.\n\nPick your own dump and press Check disc first.")
+            return
         if not os.path.exists(BINARY):
             messagebox.showerror("Build", "The recompiled build is missing:\n" + BINARY)
             return
@@ -726,6 +922,26 @@ def selftest() -> int:
     for flag in ("--audio-volume", "--audio-device", "--audio-buffer"):
         if flag in cmd:
             failures.append("sound off still passed %s" % flag)
+
+    # The present-rate list comes from the display's own rates, and the labels are just the rate. A
+    # 165 Hz panel that also reports 120 and 144 offers those, their halves that are still at least
+    # 60 (72 from 144), and the common targets that no mode reports.
+    rows = [value for _, value in present_rate_choices([60, 120, 144, 165])]
+    if rows != [0, 72, 120, 144, 165, 180, 240]:
+        failures.append("rates: 165 Hz panel produced %r" % (rows,))
+    if [label for label, _ in present_rate_choices([60, 120, 144, 165])][-1] != "240 Hz":
+        failures.append("rates: labels should be the rate alone")
+    # A 240 Hz panel reports 240, and 120 as its half; 144 and 180 are still offered.
+    rows = [value for _, value in present_rate_choices([60, 120, 240])]
+    if rows != [0, 120, 144, 180, 240]:
+        failures.append("rates: 240 Hz panel produced %r" % (rows,))
+    # No display to ask: the fixed list, so the dropdown is never empty.
+    fallback = [value for _, value in present_rate_choices([])]
+    if fallback != [0, 120, 144, 165, 240]:
+        failures.append("rates: fallback list changed: %r" % (fallback,))
+    if DEVMODEW.dmDisplayFrequency.offset != 184 or ctypes.sizeof(DEVMODEW) != 220:
+        failures.append("rates: DEVMODEW layout is %d bytes with the rate at %d" %
+                        (ctypes.sizeof(DEVMODEW), DEVMODEW.dmDisplayFrequency.offset))
 
     cmd = build_command(image, dict(base, audio_volume=35, audio_device="Speakers (GSP 370)",
                                     audio_buffer=93))
@@ -840,10 +1056,23 @@ def check_ui(app: Launcher) -> list[str]:
     if "--audio-volume" in cmd:
         failures.append("100%% volume kept --audio-volume: %s" % " ".join(cmd))
 
-    # The tabs that remain, and their order: a removed tab must not come back through a stale spec.
+    # The tabs that remain, and their order: Game first, because the disc comes before settings.
     names = [app.notebook.tab(i, "text") for i in range(len(app.notebook.tabs()))]
-    if names != ["Graphics", "Audio", "Gameplay"]:
+    if names != ["Game", "Graphics", "Audio"]:
         failures.append("tabs: %r" % names)
+
+    # The disc row gates Play. Nothing selected must mean no Play, whatever the saved settings say.
+    saved_image, saved_ok = app.image_path, app.disc_ok
+    app.image_path = ""
+    app._update_disc_state()
+    if "disabled" not in app.play_button.state():
+        failures.append("Play is enabled with no disc selected")
+    if app.disc_status.cget("text") != "No disc selected":
+        failures.append("disc state with no disc: %r" % app.disc_status.cget("text"))
+    # Put the real disc back so the window the screenshot shows is the one a player gets.
+    app.image_path, app.disc_ok = saved_image, saved_ok
+    app.disc_label.configure(text=app._disc_text())
+    app._update_disc_state()
 
     # The bottom bar's folder buttons are what is left of the old Saves tab: saving and loading are
     # the game's own now, but the card and the settings file still need to be findable.
@@ -882,7 +1111,14 @@ def smoke(shot: str | None = None) -> int:
     app = Launcher()
     app.update_idletasks()
     app.update()
+    # Verify whatever disc is configured before the screenshot: the window a player sees should
+    # show the real state, and a disc that no longer verifies is a failure, not a pretty picture.
+    disc_ok = None
+    if app.image_path and os.path.exists(app.image_path):
+        disc_ok = app.check_disc()
     failures = check_ui(app)
+    if disc_ok is False:
+        failures.append("the configured disc did not verify")
     if shot:
         # For checking the layout without a human: raise the window and grab every tab.
         try:
