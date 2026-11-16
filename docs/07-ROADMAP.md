@@ -72,6 +72,29 @@ the tool for any new divergence; it is described in `docs/UPSTREAM-REPORT.md`.
 Use the engine's Flycast oracle to compare the first cycles and identify which
 register or entry assumption differs, before translating more of the binary.
 
+### M3 — done (2026-11-16)
+
+The gate is one script, `tools\m3-check.ps1`, with three clauses, all green:
+
+* **Determinism.** Two 600-frame headless runs with `--write-hash` write the same
+  603-line file, SHA-256 `212f28f1…`; the check compares the whole file, so every
+  frame hash matches, not just the last.
+* **Capture replay.** A windowed 600-frame run takes the F11 bundle at presented frame
+  320 (guest frame 422), and `dream_render_view` draws it again (13 polygons,
+  960x720).
+* **First frame.** Our first non-blank picture is the game's first render at guest
+  frame 103 (the Crave logo fading in). Flycast's first non-black picture is the boot
+  ROM's Sega licence screen, so `tools\m3_first_frame.py` finds the first non-blank
+  *game* frame after it (frame 240) and compares the two: **MAE 0.92** against the
+  M5 tolerance of 16, with 0.93 mask overlap and 0.99 bounding-box IoU.
+
+Ours is earlier than Flycast for the same content (the engine has no boot ROM) and
+the pair is the same picture, so the clause holds under either reading, timing or
+pixels. `-SkipFlycast` runs the first two clauses alone. The one accepted state
+difference is the always-attached jump pack, which puts a "JUMPPACK OPERATIONAL"
+line on our title screen that Flycast does not draw; the M3 pair predates that line,
+and M5's title checkpoint stays inside its threshold with it.
+
 ### M5 — done (2026-11-15)
 
 A single scripted schedule — START at 1,000, START at 1,800, A at 2,300/2,800/3,100, START at
@@ -115,8 +138,7 @@ the measurements are in `docs/13-M6-AUDIO-BASELINE.md`; `tools/m6-check.ps1` rer
 Order is deliberate: boot, then frontend, then one level, then audio, then everything.
 Audio is late because the ARM7 program is the most self-contained subsystem and its
 failure mode (silence) does not block visual parity. M4's scripted-input path is now exercised by
-M5, M5 and M6 are done; M3's remaining clause is a like-for-like Flycast frame comparison, and M7
-continues on coverage and the full play-through.
+M5, and M3, M5 and M6 are done; M7 continues on coverage and the full play-through.
 
 ### M8–M10 — product
 

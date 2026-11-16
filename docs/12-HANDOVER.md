@@ -1,6 +1,6 @@
 # Handover — state of the project
 
-Updated 2026-11-15, after M5 (in-game) and the owner's save/load verification. The project's records are
+Updated 2026-11-16, after M3 (first frame) closed. The project's records are
 elsewhere: `docs/ENGINE-CHANGES.md` is the running ledger with every trace and dead end,
 `docs/UPSTREAM-REPORT.md` is the engine-side report, and `docs/07-ROADMAP.md` is the milestone plan
 this is measured against. This file is the pick-up point.
@@ -22,6 +22,7 @@ this is measured against. This file is the pick-up point.
 | Engine test suite | `ctest` in `engine/build-test` | 6/6 (76 runtime cases incl. the new regression) |
 | Audio (M6) | `tools\m6-check.ps1` | 10 s spectra at 1.0000 sample correlation; 600 s with no gap that Flycast does not also have |
 | In-game (M5) | `tools\m5-check.ps1` | **0 untranslated calls over 8,200 frames (60 s in gameplay); 10 Flycast checkpoints at MAE 1.46-13.58, threshold 16** |
+| First frame (M3) | `tools\m3-check.ps1` | **600-frame determinism, F11 replay, and the first non-blank pair vs Flycast at MAE 0.92 (threshold 16)** |
 | Save / load | the title's own Save and Load Game screens | **owner saved in-game and reloaded it, 2026-11-15** |
 
 **The translated path is now the fast one (2026-11-11).** It had been 0.15x — slower than the
@@ -322,19 +323,36 @@ Build trees: `engine/build-render` (playable, Vulkan + SDL3), `engine/build-repl
 
 The engine changes are in `patches/0001-engine-local-changes.patch`; `setup.ps1` applies them.
 
-## M3 status (2026-11-13)
+## M3 status (2026-11-16)
 
-- **Determinism: passes.** Two 600-frame headless runs with `--write-hash` produce byte-identical
-  files (same SHA-256), so the translated path is deterministic run to run.
-- **Capture replay: passes.** `tools\m3-check.ps1` runs the determinism check, takes an F11 bundle and
-  replays it through `dream_render_view`; both checks are green. The replay tool used to hang when
-  given `--screenshot` without `--frames` -- it opened a window and waited -- and now renders one
-  frame and exits in that case.
-- **First non-blank frame vs Flycast: measured.** `DREAM_FIRST_FRAME=1` puts our first non-black
-  frame (the Crave logo, fading in) at **1.8-2.2 s**; `tools\flycast-first-frame.ps1` puts
-  Flycast at 0.67 s for its licence screen and about 6 s for that same logo, because it plays the
-  licence first. Our picture appears earlier than Flycast's for the same content, so the gate is
-  met; the two screens themselves match (same logo, same layout).
+The gate is green and is one script: `tools\m3-check.ps1` (run it with `-SkipFlycast` for the
+two clauses that need no oracle).
+
+- **Determinism: passes.** Two 600-frame headless runs with `--write-hash` write the same
+  603-line file (SHA-256 `212f28f1…`). The check compares the whole file, so every frame's hash
+  matches, not just the last.
+- **Capture replay: passes.** The windowed run captures the F11 bundle at presented frame 320
+  (guest frame 422) from 600 frames, and `dream_render_view` draws it again (13 polygons, 960x720).
+  Two faults were found and fixed on 2026-11-16: the 420-frame version of the run presented only
+  317 pictures, three short of the capture point, and the engine's display notice on stderr
+  terminated the script under `$ErrorActionPreference = "Stop"` plus `*>` in Windows PowerShell.
+  The check now runs 600 frames and relaxes the preference around native tools, deciding on their
+  exit codes.
+- **First non-blank frame: passes, like-for-like.** Our first non-blank picture is the game's first
+  render at **guest frame 103** (the Crave logo fading in, 2.6-2.9 s wall on this machine).
+  Flycast's first non-black picture is its **boot ROM's Sega licence screen**, not game content
+  (it is on screen into the 230s here; the comparison sweep starts at frame 60), so
+  `tools\m3_first_frame.py` drives Flycast with the M5
+  Lua/PrintWindow path and finds the first non-blank **game** frame: **frame 240**, the same Crave
+  logo. The pair measures **MAE 0.92** against the M5 tolerance of 16 (RMSE 3.36, mask overlap
+  0.93, bounding-box IoU 0.99). Absolute frame numbers differ because our engine boots
+  `1ST_READ.BIN` directly; the comparison is content-aligned, and ours reaches the picture first.
+- **Known state difference.** The engine always attaches a jump pack (patch 029), so our title
+  screen draws "JUMPPACK OPERATIONAL" where Flycast draws nothing. The M3 pair is the logo before
+  that line exists and is unaffected; M5's title checkpoint contains the line and stays within its
+  threshold. This is deliberate — the pack is what makes the game's rumble work (README, Game
+  controls), so a strict title-screen diff would need a jump pack configured in Flycast. We accept
+  the difference instead.
 
 ## M9 plan (2026-11-13)
 
@@ -541,10 +559,7 @@ Order is by value per unit of risk, not by size:
    discovery/emission blocker in `docs/11-M2-RESULTS.md` still limits heavier, later scenes.
    `DREAM_TRACE_UNTRANSLATED` names what a new scene is missing, and `--suggest-config` turns the
    report into seeds.
-3. **M3 visual parity.** Flycast is installed and boots the disc; driving it and capturing is in
-   `docs/14-M3-M6-FLYCAST-REFERENCE.md`. `tools/m5-check.ps1` now provides the frame-exact Flycast
-   capture path, so M3's like-for-like comparison is mostly a matter of choosing its checkpoints.
-4. **M7 full play-through.** Credits, every level, and zero coverage gaps remain; the save/load
+3. **M7 full play-through.** Credits, every level, and zero coverage gaps remain; the save/load
    round-trip is owner-verified.
 
 ## Owner items

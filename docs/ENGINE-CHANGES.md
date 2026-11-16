@@ -1884,10 +1884,20 @@ unchanged: the presenter is not stretched and never leaves the unit square.
 presented frame, the guest frame and the time since the window opened. It is the M3 gate's "first
 non-blank frame" measurement and needs no screenshot.
 
-Measured: **our first non-blank is the Crave logo at 1.8-2.2 s** (presented 0, guest ~88).
-Flycast's first non-black frame is the Sega license screen at 0.67 s, and it reaches the same Crave
-logo at about 6 s because it plays the licence screen first (`tools\flycast-first-frame.ps1`). Our
-picture therefore appears earlier than Flycast's for the same content.
+Measured (2026-11-13): **our first non-blank is the Crave logo at 1.8-2.2 s** (presented 0,
+guest ~88). Flycast's first non-black frame is the Sega license screen at 0.67 s, and it reaches the
+same Crave logo at about 6 s because it plays the licence screen first
+(`tools\flycast-first-frame.ps1`). Our picture therefore appears earlier than Flycast's for the
+same content.
+
+**Re-measured and made like-for-like (2026-11-16).** On the current build the first non-blank is
+guest frame 103 (2.6-2.9 s wall here; the guest frame is the stable number and the seconds move with
+the window and machine). Flycast's first non-black picture is its boot ROM's licence screen; its
+first non-blank **game** picture is frame 240, the same Crave logo at a slightly earlier fade phase.
+`tools\m3_first_frame.py` finds that pair automatically and measures **MAE 0.92** (RMSE 3.36, mask
+overlap 0.93, bounding-box IoU 0.99) against the M5 threshold of 16; `tools\m3-check.ps1` runs it
+with the determinism and capture-replay clauses. The 11-13 guest frame and time were taken before
+later boot-sequence changes and should not be quoted as current.
 
 ## Patch 022: the window follows the scale, and fullscreen (2026-11-13)
 

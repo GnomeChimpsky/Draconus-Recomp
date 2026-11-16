@@ -307,9 +307,13 @@ diff rather than a loopback recording. Ten seconds of menu music after START mat
 sample correlation**, identical dominant peaks and octave-band levels within **0.01 dB**; the title
 screen is **silent in Flycast too**, so our title silence is correct. A **600-second** run has seven
 silent runs and every one is also silent in Flycast (the long ones are the game's attract-mode
-gaps), with no dropouts (`docs/13-M6-AUDIO-BASELINE.md`). Visual comparison against Flycast has
-started: the title screen matches apart from VMU state and aspect
-(`docs/14-M3-M6-FLYCAST-REFERENCE.md`).
+gaps), with no dropouts (`docs/13-M6-AUDIO-BASELINE.md`).
+
+**The first frame (M3) is done too.** `tools\m3-check.ps1` checks 600-frame determinism and the F11
+capture replay, then compares our first non-blank picture (guest frame 103, the Crave logo fading
+in) with Flycast's first non-blank *game* picture (frame 240, after its boot ROM's licence screen):
+the same logo at **MAE 0.92** against the M5 tolerance of 16 (`docs/14-M3-M6-FLYCAST-REFERENCE.md`).
+Ten further checkpoints are compared in M5.
 
 The engine fixes developed here are listed in `docs/UPSTREAM-REPORT.md`: hook dispatch at the
 interpreter's fetch boundary, an instruction-level tracer, a `--replay` false-positive fix that
