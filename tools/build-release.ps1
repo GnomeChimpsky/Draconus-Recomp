@@ -5,7 +5,9 @@
 #   tools\build-release.ps1 -SkipLauncher      # assemble everything but the frozen launcher
 #
 # The release is deliberately a small, explicit set of files: the game executable, the frozen
-# launcher, the title TOML, SDL3, the Visual C++ runtime DLLs, and the legal/notice files. It
+# launcher, the title TOML, SDL3, the Visual C++ runtime DLLs, and the legal/notice files. The
+# launcher and the _internal folder it needs sit at the root, so the player double-clicks
+# DraconusLauncher.exe rather than looking inside a folder. It
 # never copies engine/, extracted game files, dumps, saves, screenshots or captures: the runtime
 # reads the boot program from the player's own disc (patches/0005), so a release must not contain
 # an extracted 1ST_READ.BIN.
@@ -118,11 +120,18 @@ New-Item -ItemType Directory -Force $docs | Out-Null
 Copy-Item -LiteralPath (Join-Path $root "docs\LEGAL.md") -Destination (Join-Path $docs "LEGAL.md")
 
 if (-not $SkipLauncher) {
-    & (Join-Path $root "tools\build-launcher.ps1") -Dist $Out
-    $launcher = Join-Path $Out "DraconusLauncher\DraconusLauncher.exe"
+    $stage = Join-Path $Out ".launcher-stage"
+    & (Join-Path $root "tools\build-launcher.ps1") -Dist $stage
+    $built = Join-Path $stage "DraconusLauncher"
+    $launcher = Join-Path $built "DraconusLauncher.exe"
     if (-not (Test-Path -LiteralPath $launcher)) {
         throw "the frozen launcher was not produced at $launcher"
     }
+    # Flatten the onedir build: the player should not have to enter a folder, and the launcher
+    # finds everything it needs in the _internal folder beside it.
+    Move-Item -LiteralPath $launcher -Destination (Join-Path $Out "DraconusLauncher.exe")
+    Move-Item -LiteralPath (Join-Path $built "_internal") -Destination (Join-Path $Out "_internal")
+    Remove-Item -LiteralPath $stage -Recurse -Force
 }
 
 # A small, reproducible record of what was assembled.
@@ -140,7 +149,7 @@ $info = @(
     "repo:   https://github.com/GnomeChimpsky/Draconus-Recomp",
     "disc:   user supplies their own GDI or CHD",
     "",
-    "Run DraconusLauncher\DraconusLauncher.exe, pick your disc, press Check disc, then Play.",
+    "Run DraconusLauncher.exe, pick your disc, press Check disc, then Play.",
     "No disc image, extracted game file, save or screenshot is included."
 ) -join "`r`n"
 [System.IO.File]::WriteAllText((Join-Path $Out "BUILD-INFO.txt"), $info + "`r`n", $utf8)
@@ -164,5 +173,5 @@ Write-Host ("         {0:N1} MB, {1} files, commit {2}" -f ($sum.Sum / 1MB), $su
 if ($SkipLauncher) {
     Write-Host ("run:     {0}" -f (Join-Path $Out "DraconusRecomp.exe"))
 } else {
-    Write-Host ("run:     {0}" -f (Join-Path $Out "DraconusLauncher\DraconusLauncher.exe"))
+    Write-Host ("run:     {0}" -f (Join-Path $Out "DraconusLauncher.exe"))
 }

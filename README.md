@@ -55,8 +55,9 @@ script with `-ExecutionPolicy Bypass`. `docs/LEGAL.md` covers what you must supp
 
 ## Release build
 
-For players, the release is a prebuilt Windows x64 folder: `DraconusLauncher\DraconusLauncher.exe`,
-`DraconusRecomp.exe`, `draconus.toml`, `SDL3.dll`, and the Visual C++ runtime DLLs. It needs no
+For players, the release is a prebuilt Windows x64 folder: `DraconusLauncher.exe` (with the
+`_internal` folder beside it), `DraconusRecomp.exe`, `draconus.toml`, `SDL3.dll`, and the Visual C++
+runtime DLLs. It needs no
 Python or compiler, but does need a Vulkan-capable GPU driver. The launcher verifies your own
 GDI/CHD and runs the game with `--disc` pointing at it; the boot program is read from your disc, so
 no extracted `1ST_READ.BIN` ships. Non-ASCII account names, disc folders and file names are
@@ -110,7 +111,7 @@ individual `info`, `align`, `compare`, `gaps` and `raw2wav` commands.
 tools\launcher.bat
 ```
 
-This is the source-tree launcher; release players run `DraconusLauncher\DraconusLauncher.exe`
+This is the source-tree launcher; release players run `DraconusLauncher.exe` from the release folder
 instead and need no Python. Pick your `.gdi` or `.chd`, press **Check disc** (it refuses anything
 that is not the USA V1.000 release and saves the path when the config is writable), choose a
 resolution and a path, press **Play**. A read-only config no longer blocks Play: the selected
