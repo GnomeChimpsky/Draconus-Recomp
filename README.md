@@ -1,6 +1,6 @@
 <p align="center"><img src="Draconus%20Recomped%20Emblem%20light.png" alt="Draconus Recomped" width="720"></p>
 
-# Draconus-Recomp
+# Draconus-Recomped
 
 **Version 1.0** — first public release ([release notes](RELEASE-NOTES.md)).
 
