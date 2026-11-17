@@ -1,7 +1,7 @@
 # Handover — state of the project
 
-Updated 2026-11-16, after M3 (first frame) closed. The project's records are
-elsewhere: `docs/ENGINE-CHANGES.md` is the running ledger with every trace and dead end,
+Updated 2026-11-17, after the first two levels were played and M3 (first frame) closed. The
+project's records are elsewhere: `docs/ENGINE-CHANGES.md` is the running ledger with every trace and dead end,
 `docs/UPSTREAM-REPORT.md` is the engine-side report, and `docs/07-ROADMAP.md` is the milestone plan
 this is measured against. This file is the pick-up point.
 
@@ -23,6 +23,7 @@ this is measured against. This file is the pick-up point.
 | Audio (M6) | `tools\m6-check.ps1` | 10 s spectra at 1.0000 sample correlation; 600 s with no gap that Flycast does not also have |
 | In-game (M5) | `tools\m5-check.ps1` | **0 untranslated calls over 8,200 frames (60 s in gameplay); 10 Flycast checkpoints at MAE 1.46-13.58, threshold 16** |
 | First frame (M3) | `tools\m3-check.ps1` | **600-frame determinism, F11 replay, and the first non-blank pair vs Flycast at MAE 0.92 (threshold 16)** |
+| Play-through (M7) | first two levels, 2026-11-17 | owner played through; the faults it surfaced are fixed in patches 0009-0012; later levels, credits and zero gaps remain |
 | Save / load | the title's own Save and Load Game screens | **owner saved in-game and reloaded it, 2026-11-15** |
 
 **The translated path is now the fast one (2026-11-11).** It had been 0.15x — slower than the
@@ -549,6 +550,24 @@ the title's own additive glow and idle pose at a different animation phase, plus
 different texture filtering; composition, camera and HUD match. `tools\m5-check.ps1 -SkipFlycast`
 runs only the zero-call half. Engine patch `patches/0003-m5-coverage.patch` carries 037-038.
 
+## M7 — first two levels played (2026-11-17)
+
+The owner played through the first two levels. The faults that surfaced were in presentation and
+launch, not in the game logic, and are fixed:
+
+* **Three 16:9 HUD faults from level play.** The death screen's black fade split into tiles with the
+  world showing through two gaps, the map's destination markers did not move with the map, and the
+  item wheel's rotating model was squeezed twice. The overlay pass now has a near-depth slab, treats
+  a map and its markers as one element, and moves the wheel's model without rescaling it. The arena
+  floor also sorted in front of a character strip; translucent strips now sort by the mean of their
+  vertices' 1/w. Carried by `patches/0009-widescreen-overlay-depth.patch`.
+* **Launch and upgrade faults.** Old nested bindings are migrated to the one per-user folder, a
+  present rate above the panel's is clamped, and the Vulkan device is chosen after the window
+  surface exists so a hybrid laptop uses a GPU that can present to it. Carried by patches
+  0010-0012.
+
+M7 remains open for the later levels, the credits, and any coverage gap they expose.
+
 ## Next phase
 
 Order is by value per unit of risk, not by size:
@@ -559,8 +578,8 @@ Order is by value per unit of risk, not by size:
    discovery/emission blocker in `docs/11-M2-RESULTS.md` still limits heavier, later scenes.
    `DREAM_TRACE_UNTRANSLATED` names what a new scene is missing, and `--suggest-config` turns the
    report into seeds.
-3. **M7 full play-through.** Credits, every level, and zero coverage gaps remain; the save/load
-   round-trip is owner-verified.
+3. **M7 full play-through.** The first two levels are played (2026-11-17); the later levels, the
+   credits and any coverage gap they expose remain. The save/load round-trip is owner-verified.
 
 ## Owner items
 
