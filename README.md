@@ -267,6 +267,14 @@ stick (or the d-pad) moves menu cursors; and because the left trigger is now blo
 both-triggers **User Mode** chord is not available as it was. Modern is a layer over the player's
 bindings, not a separate file: `F1` still edits the base layout, and **Classic** restores it exactly.
 
+**Right-stick look.** The right stick's vertical axis is a soft look offset: push up to look up,
+down to look down, and it eases back to centre when released. It works with either controls preset
+and is capped at 20 degrees. The offset is a view-only layer applied to the projected 3D picture
+after the game has built it, so movement, collision, camera logic and cutscene sequencing are
+untouched; the HUD stays on the glass, and the item wheel's model is left in its ring. Turn on
+**Invert right-stick look** on the Game tab (or pass `play-draconus.ps1 -LookInvert`) if the
+direction feels backwards.
+
 ## Launcher
 
 Release players run `DraconusLauncher.exe` from the release folder and need no Python. From a source

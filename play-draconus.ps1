@@ -5,6 +5,7 @@
 #   .\play-draconus.ps1 -Scale 4 -Widescreen -Fullscreen   # 2560x1440 full screen
 #   .\play-draconus.ps1 -Interpret         # the development interpreter, for comparison
 #   .\play-draconus.ps1 -ModernControls    # left stick strafe, right stick turn, LT block, RT attack
+#   .\play-draconus.ps1 -LookInvert        # flip the right stick's soft look direction
 #   .\play-draconus.ps1 -Vmu .\card.vmu    # attach a particular memory card
 #   .\play-draconus.ps1 --max-frames 600   # extra args pass straight through
 #
@@ -53,6 +54,9 @@ param(
     # trigger blocks and the right trigger attacks. A and X keep their own buttons too; menus use
     # the right stick or the d-pad. The launcher exposes the same option as Controls > Modern.
     [switch]$ModernControls,
+    # -LookInvert: the right stick's vertical axis is a soft look offset that eases back to centre.
+    # It looks up when pushed up; this flips that if the direction feels backwards.
+    [switch]$LookInvert,
     # -Vmu FILE: attach this 128 KB card image. Without it the default per-user card is used
     # (%APPDATA%\dream-recomp\saves\draconus\vmu_a1.bin), created on the first run.
     [string]$Vmu = "",
@@ -99,6 +103,7 @@ if ($PresentRate -gt 0) { $arguments += @("--present-rate", "$PresentRate") }
 if ($Interpolate) { $arguments += "--frame-interpolation" }
 if ($DisplayMode -ne "windowed") { $arguments += @("--display", $DisplayMode) }
 if ($ModernControls) { $arguments += @("--controls", "modern") }
+if ($LookInvert) { $arguments += "--look-invert" }
 if ($Vmu) { $arguments += @("--vmu", $Vmu) }
 if ($Interpret -and -not $Translated) { $arguments += "--interpret" }
 if ($Extra) { $arguments += $Extra }
