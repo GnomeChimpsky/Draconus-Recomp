@@ -182,6 +182,7 @@ the disc path before starting and says so plainly if the dump is missing or was 
 ```powershell
 .\play-draconus.bat                              # window, translated path
 .\play-draconus.bat -Scale 2                     # 1280x960
+.\play-draconus.bat -Fov 75                      # a wider vertical field of view
 .\play-draconus.bat -Interpret                   # the development interpreter, for comparison
 .\play-draconus.bat --max-frames 600 --rtc-seed 1000000 --screenshot-at 500
 ```
@@ -219,7 +220,11 @@ its place; the rotating item model inside it takes only its scale from the proje
 with the wheel rather than squeezed a second time, so it keeps the size it has at 4:3 and stays in
 the wheel. Menus, the title and
 loading cards are flat 2D art, keep their 4:3 shape and are pillarboxed inside the wide window.
-`-Aspect 21:9` takes any ratio, `-Scale 2` draws at twice the guest's resolution and
+`-Aspect 21:9` takes any ratio. `-Fov 75` sets the vertical field of view (90 is the game's own;
+60-120 is the range the launcher offers); it shows more or less world above and below without
+changing the HUD, and composes with widescreen because the aspect and the FOV are separate
+projection inputs. The item wheel's model is scaled back about the wheel so the item stays inside
+its ring at any FOV. `-Scale 2` draws at twice the guest's resolution and
 opens the window at that size (4x at 16:9 is 2560x1440, shrunk to fit a smaller screen), and
 `-DisplayMode` chooses **windowed**, **borderless** (desktop fullscreen at the display's own size,
 which changes no display mode) or **exclusive** (one of the display's fullscreen modes, which can
@@ -284,7 +289,9 @@ python tools\launcher.py --selftest
   internal resolution (1x to 4x; the list names the window each scale opens at for the selected
   aspect — 4x is 2560x1440 at 16:9, not 4:3's 2560x1920, and 1x is upscaled to the 720-line
   minimum), widescreen
-  (off, 16:9, 21:9 or a custom ratio, hor+), display mode (windowed, borderless or exclusive
+  (off, 16:9, 21:9 or a custom ratio, hor+), field of view (60-120°; 90 is the game's own, and
+  above it the game can cull geometry at the far screen edges, so models may pop in when the
+  camera turns), display mode (windowed, borderless or exclusive
   fullscreen), present rate (the list is built from this display's own rates: each refresh it
   reports, so 60/72/120/144/165/180/240 on a 165 Hz panel, and 60/120/144/165/240 when it cannot be
   asked), frame interpolation for the extra presents, VSync and the frame counter. What looks smooth

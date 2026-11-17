@@ -3032,6 +3032,61 @@ Carried by `patches/0009-widescreen-overlay-depth.patch` (entries 044-045), whic
 `render/src/display_list.cpp`, `render/include/dream/render/display_list.h`,
 `render/src/vk/renderer.cpp` and `render/tests/test_display_list.cpp`, and applies after 0008.
 
+## Patch 046: a field-of-view override (2026-11-17)
+
+The title's projection is built from two separate inputs: a **vertical field of view** and a
+**4:3 aspect ratio**. The widescreen work found the aspect — a plain float at `0x0C098640`, 0.75 at
+4:3 — and `--aspect` rewrites it to `(4/3)/aspect`, then stretches 3D frames to fill the wide
+window. That changes the horizontal field only; on its own it is not a FOV control.
+
+The FOV is a separate constant at **`0x0C098648` = π/2 (90°)**, the value the projection builder at
+`0x0C1A85D0` receives as its first argument (called from `0x0C0983E6` with fov = π/2, aspect = 0.75,
+near = 0.2, far = 300). The same angle feeds the camera-matrix setup, but patching it zooms the
+picture uniformly rather than rotating the camera: verified at presented frame 5000 with
+`work\walk.replay`, `--patch 0x0C098648=1.2` (68.75°) zooms in and `=2.0` (114.6°) zooms out, with
+the HUD unchanged and no tilt. The title does not rewrite the constant in that scene: the patched
+frame is byte-identical with and without `DREAM_PATCH_REPEAT`. The title's own dynamic projection
+scale (`0x8C1C3C90`) multiplies this base, so a FOV change keeps the authored camera moves and only
+moves the range they work in.
+
+The feature is `--fov DEG` (30–150 at the engine, 60–120 in the launcher, default 90), backed by a
+new `[camera]` block:
+
+```toml
+[camera]
+fov_address = 0x0C098648
+fov_base_degrees = 90.0
+```
+
+The boot pokes the constant once before the first frame, prints the conversion (`fov: 90.0 -> 75.0
+degrees (1.308997 rad) at 0x0c098648; hud model scale 1.3032`), and refuses a non-default `--fov`
+on a title with no hook. The aspect and the FOV are independent, so `--aspect 16:9 --fov 75`
+composes: the aspect widens the projection at `0x0C098640` and the FOV scales both axes at
+`0x0C098648`. The launcher's Graphics tab gets a **Field of view** slider and `-Fov` is a named
+parameter on `play-draconus.ps1`.
+
+The slider keeps its 60–120° range, but warns above 90°: the game's region/portal visibility is
+authored for the 90° view, so a wider FOV can leave an adjacent region unsubmitted and its
+placeholder/unloaded edge visible until the camera turns. The FOV renderer patch cannot draw
+geometry the game has not submitted; the warning tells the player what the extra angle costs.
+
+**The item wheel follows the FOV.** A FOV change zooms the wheel's rotating 3D model with the world
+but leaves its panel in screen space, so the ring covered the item and only the top of the bottle
+stayed visible in the F11 capture. `compress_screen_overlays` now takes the projection FOV scale
+(`1 / tan(fov/2)`, 1 at 90°): the panel's contents are identified by submission order (the model is
+drawn after its panel, even when the zoom puts its `1/w` below the panel's), scaled back about the
+panel's centre in both axes, and raised by one constant just in front of the panel when they would
+otherwise be behind it. The panel itself is not moved; the contents keep their internal depth order.
+The captured wheel now renders the whole bottle inside the wheel, and a render test covers the
+behind-the-panel case (`--hud-fov SCALE` on `dream_render_view` reproduces it).
+
+Carried by `patches/0013-fov.patch`, which touches `translator/include/dream/translator/config/…/
+game_config.h`, `translator/src/config/game_config.cpp`, `runtime/boot/boot_main.cpp`,
+`translator/tests/test_config.cpp`, `docs/game-config.md`,
+`render/include/dream/render/display_list.h`, `render/src/display_list.cpp`,
+`render/src/view_main.cpp` and `render/tests/test_display_list.cpp`, and applies after 0012. The
+title's `[camera]` block and the launcher slider live in this repository.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

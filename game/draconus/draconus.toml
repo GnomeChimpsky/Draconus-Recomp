@@ -59,6 +59,14 @@ exclude = []
 x_scale_address = 0x0C098640
 x_scale_base = 0.75
 
+[camera]
+# The vertical field of view: 90 degrees (pi/2) at this address is the value the projection
+# builder receives. --fov replaces it, which zooms both axes; the 4:3 aspect above stays separate,
+# so --fov and --aspect compose. Found by patching the camera angle candidates and comparing the
+# frame (2026-11-17).
+fov_address = 0x0C098648
+fov_base_degrees = 90.0
+
 [[relocations]]
 # Detected by --suggest-config: the game copies 56 bytes from the image to the
 # general-exception vector at VBR+0x600 (VBR = 0x8C000000) and runs it there.

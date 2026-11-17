@@ -92,6 +92,7 @@ DEFAULTS = {
     "scale": 1,
     "aspect": "off",
     "aspect_custom": "16:9",
+    "fov": 90,
     "present_rate": 0,
     "frame_interpolation": False,
     "display_mode": "windowed",
@@ -502,6 +503,12 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
         cmd += ["--aspect", aspect]
     elif aspect == "custom" and str(s.get("aspect_custom", "")).strip():
         cmd += ["--aspect", str(s["aspect_custom"]).strip()]
+    # 90 is the game's own vertical FOV, so passing it would only add a line to every command line
+    # and to every settings file ever written. `or 90` rather than a defaulted get(): a stale
+    # settings file without the key must not crash here.
+    fov = int(s.get("fov") or 90)
+    if fov != 90:
+        cmd += ["--fov", str(fov)]
     if int(s.get("present_rate", 0)):
         cmd += ["--present-rate", str(int(s["present_rate"]))]
     if s.get("frame_interpolation") and int(s.get("present_rate", 0)) > 60:
@@ -548,6 +555,9 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
 
 TABS = [
     ("Graphics", [
+        {"kind": "note", "warn": True,
+         "text": "FOV above 90\u00b0 can cull models at the screen edges; they may pop in when you "
+                 "turn."},
         {"kind": "combo", "key": "sh4_clock", "label": "CPU clock",
          "values": [("200 MHz (default)", 200), ("250 MHz", 250), ("300 MHz (1.5x)", 300),
                     ("400 MHz (2x)", 400)],
@@ -567,6 +577,12 @@ TABS = [
         {"kind": "entry", "key": "aspect_custom", "label": "Custom ratio",
          "depends": ("aspect", "custom"), "width": 10,
          "help": "Two numbers, for example 32:9."},
+        {"kind": "slider", "key": "fov", "label": "Field of view", "min": 60, "max": 120,
+         "suffix": "\u00b0",
+         "help": "The vertical field of view. A wider angle shows more of the world above and "
+                 "below, and everything looks smaller; narrower zooms in. It composes with "
+                 "Widescreen: the aspect and the FOV are separate parts of the projection. The "
+                 "HUD and menus keep their size."},
         {"kind": "combo", "key": "present_rate", "label": "Present rate",
          "values": PRESENT_RATE_CHOICES,
          "help": "Presents up to this rate while the game logic stays at 60 Hz. The list is built "
@@ -770,9 +786,10 @@ class Launcher(tk.Tk):
         for c in controls:
             kind = c["kind"]
             if kind == "note":
-                tk.Label(tab, text=c["text"], bg=self.BG, fg=self.DIM, anchor="w",
+                fg = "#e0a030" if c.get("warn") else self.DIM
+                tk.Label(tab, text=c["text"], bg=self.BG, fg=fg, anchor="w",
                          justify="left", wraplength=700).grid(
-                    row=row, column=0, columnspan=2, sticky="w", pady=(18, 0))
+                    row=row, column=0, columnspan=2, sticky="w", pady=(8, 0))
                 row += 1
                 continue
 
@@ -1263,6 +1280,12 @@ def selftest() -> int:
     if "--controls" in cmd:
         failures.append("classic controls still passed --controls")
 
+    cmd = build_command(image, dict(base, fov=75))
+    expect("field of view", cmd, ["--fov", "75"])
+    cmd = build_command(image, dict(base))
+    if "--fov" in cmd:
+        failures.append("default field of view still passed --fov")
+
     # The tab spec must cover every default, or a control would be silently unset.
     keys = set()
     for _, controls in TABS:
@@ -1365,6 +1388,16 @@ def check_ui(app: Launcher) -> list[str]:
     cmd = build_command(app.image_path or "disc.gdi", app.collect())
     if "--controls" in cmd:
         failures.append("classic controls kept --controls: %s" % " ".join(cmd))
+
+    # The FOV slider must reach the command line, and its 90-degree default must not.
+    app.vars["fov"].set(75)
+    cmd = build_command(app.image_path or "disc.gdi", app.collect())
+    if "--fov" not in cmd or "75" not in cmd:
+        failures.append("field-of-view slider lost --fov: %s" % " ".join(cmd))
+    app.vars["fov"].set(90)
+    cmd = build_command(app.image_path or "disc.gdi", app.collect())
+    if "--fov" in cmd:
+        failures.append("90-degree field of view kept --fov: %s" % " ".join(cmd))
 
     # The volume slider must reach the command line; a Scale that only moves its own handle is
     # the same defect as a combo that only changes its text.

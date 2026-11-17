@@ -1,0 +1,641 @@
+diff --git a/docs/game-config.md b/docs/game-config.md
+index d530fbe..efdd9ff 100644
+--- a/docs/game-config.md
++++ b/docs/game-config.md
+@@ -38,6 +38,9 @@ symbols = "symbols.tsv"              # names file, see below
+ pointers = true                      # follow literal-pool pointers (default true)
+ sweep = true                         # linear sweep of gaps (default true)
+ 
++[camera]                             # optional: vertical field-of-view hook, used by --fov
++fov_address = 0x0C098648             # guest address of the FOV float (must be 4-byte aligned)
++fov_base_degrees = 90.0              # the title's own value at that address, for the default
+ 
+ [hle]                                # guest address -> runtime handler (Phase 2/3)
+ "0x0C080684" = "libc.bfslu"
+diff --git a/render/include/dream/render/display_list.h b/render/include/dream/render/display_list.h
+index 3e7d6d6..932d3dc 100644
+--- a/render/include/dream/render/display_list.h
++++ b/render/include/dream/render/display_list.h
+@@ -118,18 +118,26 @@ bool frame_uses_depth(const Frame& frame);
+ //  * A large flat quad at the HUD's own depth (within a small multiple of the world's near depth)
+ //    is a panel -- the item wheel is one -- and is compressed about the element's anchor, left
+ //    edge, right edge or centre. The 3D model submitted inside it takes only its *scale* from the
+-//    title's projection and is pinned to the panel's centre, so it is moved by as much as the
+-//    panel's centre moves rather than scaled again: its width is already the compressed one.
++//    title's projection and is pinned to the panel's centre, so at 16:9 it is moved by as much as
++//    the panel's centre moves rather than scaled again: its width is already the compressed one.
++//    A FOV change scales both axes, so its projected size is undone about the panel's centre before
++//    that shift.
+ //  * Every other screen-space quad in front of the world is compressed about its element's anchor.
+ //    Quads close to each other at one depth are one element and share an anchor, so a marker drawn
+ //    inside a map's rectangle moves with the map instead of staying at its own centre.
+ //  * A screen that spans the picture (a fade, a full-screen backdrop) is left alone: it has no
+ //    anchor, and a uniform overlay does not distort.
+ //
++// `fov_scale` is how much larger the title's projection draws at this FOV than at its default
++// (1 / tan(fov/2) relative to 90 degrees). The item wheel's 3D model is projected with the world,
++// so a FOV change resizes it inside a panel that stays in screen space; the panel pass undoes that
++// scale about the panel's centre before the widescreen shift. 1 leaves the contents alone.
++//
+ // `width` is the guest's screen width (640), which is the coordinate space the overlays are drawn
+-// in. Returns how many polygons were adjusted; a pure 2D frame or an aspect of 4:3 leaves the frame
+-// untouched.
+-std::size_t compress_screen_overlays(Frame& frame, float factor, float width);
++// in. Returns how many polygons were adjusted; a pure 2D frame, an aspect of 4:3 and a default FOV
++// leave the frame untouched.
++std::size_t compress_screen_overlays(Frame& frame, float factor, float width,
++                                     float fov_scale = 1.0f);
+ 
+ // Feed it the same 32-byte chunks the Tile Accelerator FIFO receives.
+ class DisplayList {
+diff --git a/render/src/display_list.cpp b/render/src/display_list.cpp
+index 93be2b7..ec66697 100644
+--- a/render/src/display_list.cpp
++++ b/render/src/display_list.cpp
+@@ -520,9 +520,12 @@ bool frame_uses_depth(const Frame& frame) {
+     return false;
+ }
+ 
+-std::size_t compress_screen_overlays(Frame& frame, float factor, float width) {
++std::size_t compress_screen_overlays(Frame& frame, float factor, float width,
++                                     float fov_scale) {
+     constexpr float kRelative = 1e-5f;
+-    if (!(factor > 0.0f) || std::fabs(factor - 1.0f) < 1e-6f || !(width > 0.0f))
++    const bool wide_aspect = factor > 0.0f && std::fabs(factor - 1.0f) >= 1e-6f;
++    const bool fov_zoom = fov_scale > 0.0f && std::fabs(fov_scale - 1.0f) >= 1e-6f;
++    if ((!wide_aspect && !fov_zoom) || !(width > 0.0f))
+         return 0;
+ 
+     // The depth of the nearest piece of world geometry. The overlays are drawn beyond it: the
+@@ -584,6 +587,28 @@ std::size_t compress_screen_overlays(Frame& frame, float factor, float width) {
+         }
+         ++adjusted;
+     };
++    // Scale one polygon about a point in both axes. This is the FOV correction: the item model's
++    // projection grew in x and y together, and its pin is the panel's centre, so undoing it is a
++    // uniform scale about that centre rather than the x-only compression widescreen needs.
++    auto scale_polygon_both = [&](Polygon* polygon, float ax, float ay, float scale) {
++        const std::size_t first = polygon->first;
++        const std::size_t last = std::min(frame.vertices.size(), first + polygon->count);
++        for (std::size_t i = first; i < last; ++i) {
++            frame.vertices[i].x = ax + (frame.vertices[i].x - ax) * scale;
++            frame.vertices[i].y = ay + (frame.vertices[i].y - ay) * scale;
++        }
++        if (polygon->tile_clip == 2 || polygon->tile_clip == 3) {
++            auto clip = [&](std::uint16_t v, float anchor) {
++                const float scaled = anchor + (static_cast<float>(v) - anchor) * scale;
++                return static_cast<std::uint16_t>(std::clamp(std::lround(scaled), 0l, 65535l));
++            };
++            polygon->clip_x0 = clip(polygon->clip_x0, ax);
++            polygon->clip_x1 = clip(polygon->clip_x1, ax);
++            polygon->clip_y0 = clip(polygon->clip_y0, ay);
++            polygon->clip_y1 = clip(polygon->clip_y1, ay);
++        }
++        ++adjusted;
++    };
+     std::vector<const Polygon*> handled;
+     auto is_handled = [&](const Polygon* polygon) {
+         return std::find(handled.begin(), handled.end(), polygon) != handled.end();
+@@ -637,10 +662,14 @@ std::size_t compress_screen_overlays(Frame& frame, float factor, float width) {
+     struct Panel {
+         float z = 0, min_x = 0, max_x = 0, min_y = 0, max_y = 0;
+         Polygon* quad = nullptr;
++        unsigned list = 0;
++        std::size_t order = 0;
+     };
+     std::vector<Panel> panels;
+-    for (auto& list : frame.lists) {
+-        for (Polygon& polygon : list) {
++    for (unsigned li = 0; li < kListCount; ++li) {
++        auto& list = frame.lists[li];
++        for (std::size_t pi = 0; pi < list.size(); ++pi) {
++            Polygon& polygon = list[pi];
+             if (polygon.count != 4)
+                 continue;
+             float lo, hi, min_x, max_x, min_y, max_y;
+@@ -654,7 +683,7 @@ std::size_t compress_screen_overlays(Frame& frame, float factor, float width) {
+             const float panel_w = max_x - min_x, panel_h = max_y - min_y;
+             if (panel_w < 128.0f || panel_h < 128.0f || panel_w > width * 0.9f)
+                 continue;
+-            panels.push_back(Panel{lo, min_x, max_x, min_y, max_y, &polygon});
++            panels.push_back(Panel{lo, min_x, max_x, min_y, max_y, &polygon, li, pi});
+         }
+     }
+     for (const Panel& panel : panels) {
+@@ -666,48 +695,89 @@ std::size_t compress_screen_overlays(Frame& frame, float factor, float width) {
+             anchor = panel.min_x;
+         else if (mid > width * (2.0f / 3.0f))
+             anchor = panel.max_x;
+-        const float mid = 0.5f * (panel.min_x + panel.max_x);
+-        float anchor = width * 0.5f;
+-        if (mid < width / 3.0f)
+-            anchor = panel.min_x;
+-        else if (mid > width * (2.0f / 3.0f))
+-            anchor = panel.max_x;
+-        for (auto& list : frame.lists) {
+-            for (Polygon& polygon : list) {
++        const float panel_mid_x = 0.5f * (panel.min_x + panel.max_x);
++        const float panel_mid_y = 0.5f * (panel.min_y + panel.max_y);
++        // Collect the panel's contents first: a FOV change can put the whole model behind the
++        // panel's own 1/w, and all of it then has to move forward by the same amount so the
++        // panel is drawn over it. Moving each polygon to a fixed depth would flatten the model.
++        std::vector<Polygon*> contents;
++        float content_min_z = std::numeric_limits<float>::infinity();
++        for (unsigned li = 0; li < kListCount; ++li) {
++            auto& list = frame.lists[li];
++            for (std::size_t pi = 0; pi < list.size(); ++pi) {
++                Polygon& polygon = list[pi];
+                 if (is_handled(&polygon))
+                     continue;
++                // The item model is submitted after the panel it belongs to, even when the FOV
++                // change puts its 1/w below the panel's. A world polygon behind the HUD was
++                // submitted before it, so submission order is the reliable "inside this panel"
++                // signal and depth is only a sanity bound.
++                const bool is_panel = &polygon == panel.quad;
++                if (!is_panel && (li < panel.list || (li == panel.list && pi <= panel.order)))
++                    continue;
+                 float lo, hi, min_x, max_x, min_y, max_y;
+                 if (!bounds(polygon, lo, hi, min_x, max_x, min_y, max_y))
+                     continue;
+                 if (min_x < panel.min_x - 1.0f || max_x > panel.max_x + 1.0f ||
+                     min_y < panel.min_y - 1.0f || max_y > panel.max_y + 1.0f)
+                     continue;
+-                // Only the panel's own nearby contents move with it: the item model sits just in
+-                // front of the wheel. A pause-menu overlay or a world effect that happens to
++                // Only the panel's own nearby contents move with it: the item model sits just
++                // beside the wheel. A pause-menu overlay or a world effect that happens to
+                 // overlap the panel's rectangle is far in front of it and stays where it is.
+-                if (&polygon != panel.quad &&
+-                    (lo <= panel.z + 0.05f || hi > panel.z + 1.5f))
+-                    continue;
+-                if (&polygon == panel.quad) {
+-                    scale_polygon(&polygon, anchor);
++                if (!is_panel) {
++                    if (fov_zoom) {
++                        if (lo < panel.z - 1.5f || hi > panel.z + 1.5f)
++                            continue;
++                    } else if (lo <= panel.z + 0.05f || hi > panel.z + 1.5f) {
++                        continue;
++                    }
++                }
++                if (is_panel) {
++                    if (wide_aspect)
++                        scale_polygon(&polygon, anchor);
++                    handled.push_back(&polygon);
+                 } else {
+-                    // The contents of a panel ride the title's projection: at 16:9 the widened
+-                    // projection has already squeezed their x by `factor` about the screen
+-                    // centre, so their width is the compressed width already. Scaling them again
+-                    // made the rotating item model a quarter too thin, which is what a HUD item
+-                    // looked like in play. Only their place is wrong: the model is pinned to the
+-                    // wheel's own centre (its transform translates to a screen point and takes
+-                    // only its *scale* from the projection), so it moves by as much as the
+-                    // panel's centre does -- (factor - 1) * (centre - anchor) -- and keeps its
+-                    // (already compressed) width. Shifting it by the projection's centre instead
+-                    // put the item against the screen edge, outside the wheel it belongs to.
+-                    const float panel_mid = 0.5f * (panel.min_x + panel.max_x);
+-                    shift_polygon(&polygon, (factor - 1.0f) * (panel_mid - anchor));
++                    contents.push_back(&polygon);
++                    content_min_z = std::min(content_min_z, lo);
+                 }
+-                handled.push_back(&polygon);
+             }
+         }
++        // A FOV change is a uniform projection zoom: undo it about the panel's centre so the
++        // model keeps the size it has at the title's default FOV. If the zoom put the model
++        // behind the panel, move the whole thing just in front of it; otherwise the ring covers
++        // the item it is supposed to show.
++        const float z_shift = (fov_zoom && std::isfinite(content_min_z) &&
++                               content_min_z < panel.z + 0.05f)
++                                  ? (panel.z + 0.1f) - content_min_z
++                                  : 0.0f;
++        for (Polygon* polygon : contents) {
++            if (z_shift != 0.0f) {
++                const std::size_t first = polygon->first;
++                const std::size_t last =
++                    std::min(frame.vertices.size(), first + polygon->count);
++                for (std::size_t i = first; i < last; ++i)
++                    frame.vertices[i].z += z_shift;
++            }
++            if (fov_zoom)
++                scale_polygon_both(polygon, panel_mid_x, panel_mid_y, 1.0f / fov_scale);
++            // The contents of a panel ride the title's projection: at 16:9 the widened
++            // projection has already squeezed their x by `factor` about the screen centre, so
++            // their width is the compressed width already. Scaling them again made the rotating
++            // item model a quarter too thin, which is what a HUD item looked like in play. Only
++            // their place is wrong: the model is pinned to the wheel's own centre (its transform
++            // translates to a screen point and takes only its *scale* from the projection), so it
++            // moves by as much as the panel's centre does -- (factor - 1) * (centre - anchor) --
++            // and keeps its (already compressed) width. Shifting it by the projection's centre
++            // instead put the item against the screen edge, outside the wheel it belongs to.
++            if (wide_aspect)
++                shift_polygon(polygon, (factor - 1.0f) * (panel_mid_x - anchor));
++            handled.push_back(polygon);
++        }
+     }
++    // The rest of this function is the widescreen overlay pass. A FOV-only change has already
++    // done all it needs to the panel contents and must not touch the screen-space HUD.
++    if (!wide_aspect)
++        return adjusted;
+ 
+     // A screen-space overlay is a four-vertex quad at one depth in front of the world. The HUD,
+     // its digits and its text are all drawn that way; the 3D effects that also sit in front of
+diff --git a/render/src/view_main.cpp b/render/src/view_main.cpp
+index afe0a42..e57cb03 100644
+--- a/render/src/view_main.cpp
++++ b/render/src/view_main.cpp
+@@ -7,6 +7,7 @@
+ // Capture a FILE with `crazytaxi_boot --dump-ta FILE`. --stats prints which render features the
+ // frame uses, per list, and the fog registers, without opening a window.
+ #include <array>
++#include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+@@ -97,6 +98,9 @@ int main(int argc, char** argv) {
+     bool stats = false, polygons = false;
+     const char* regs_path = nullptr;
+     double aspect = 0.0;
++    // --hud-fov SCALE: the projection's FOV scale (1 / tan(fov/2), 90 degrees = 1), so a captured
++    // frame can be checked with the same HUD-model correction the boot applies.
++    float hud_fov = 1.0f;
+     dream::render::vk::FrameGeometry geometry;
+     for (int i = 1; i < argc; ++i) {
+         if (!std::strcmp(argv[i], "--frames") && i + 1 < argc)
+@@ -137,6 +141,8 @@ int main(int argc, char** argv) {
+                 aspect = std::strtod(spec, nullptr);
+             }
+         }
++        else if (!std::strcmp(argv[i], "--hud-fov") && i + 1 < argc)
++            hud_fov = static_cast<float>(std::strtod(argv[++i], nullptr));
+         else if (argv[i][0] != '-')
+             path = argv[i];
+     }
+@@ -285,10 +291,12 @@ int main(int argc, char** argv) {
+     // --aspect: apply the same HUD/overlay compression the boot uses, for checking a captured
+     // frame at a widescreen aspect. The viewer window stays 4:3; the compressed image is what the
+     // presenter would stretch into the wide window.
+-    if (aspect > 0.0) {
++    if (aspect > 0.0 || std::fabs(hud_fov - 1.0f) > 1e-6f) {
++        const float factor = aspect > 0.0 ? static_cast<float>((4.0 / 3.0) / aspect) : 1.0f;
+         const std::size_t n = dream::render::compress_screen_overlays(
+-            decoder.frame(), static_cast<float>((4.0 / 3.0) / aspect), geometry.width);
+-        std::printf("  widescreen: %zu overlay polygon(s) compressed\n", n);
++            decoder.frame(), factor, geometry.width, hud_fov);
++        std::printf("  hud: %zu polygon(s) adjusted (aspect factor %.4f, fov scale %.4f)\n", n,
++                    static_cast<double>(factor), static_cast<double>(hud_fov));
+     }
+ 
+     // A screenshot is a one-frame job: without --frames the viewer is interactive and would wait
+diff --git a/render/tests/test_display_list.cpp b/render/tests/test_display_list.cpp
+index 8c9d61e..1d5c051 100644
+--- a/render/tests/test_display_list.cpp
++++ b/render/tests/test_display_list.cpp
+@@ -841,6 +841,79 @@ TEST_CASE("widescreen carries a HUD panel's 3D model with the panel") {
+ // the rocks' glow came apart and snapped back as each shaft crossed the 128-pixel size test. A
+ // panel is drawn at the HUD's depth, at or just behind the near plane, so a quad far behind that
+ // plane is scenery and must stay with the world.
++// A FOV change zooms the item model inside the wheel but not the screen-space panel. The model is
++// scaled back about the panel's centre; its submission after the panel identifies it even when a
++// narrow FOV puts its 1/w below the panel's own depth, while world geometry behind the wheel was
++// submitted before the panel and stays with the world.
++TEST_CASE("a field-of-view change keeps the item model inside its panel") {
++    Frame frame;
++    auto quad = [&](float x0, float y0, float x1, float y1, float z, int list) {
++        Polygon p;
++        p.first = static_cast<u32>(frame.vertices.size());
++        p.count = 4;
++        const float xs[4] = {x0, x1, x0, x1};
++        const float ys[4] = {y0, y0, y1, y1};
++        for (int i = 0; i < 4; ++i) {
++            Vertex v;
++            v.x = xs[i];
++            v.y = ys[i];
++            v.z = z;
++            frame.vertices.push_back(v);
++        }
++        frame.lists[list].push_back(p);
++        return p.first;
++    };
++    // The world's near plane is z = 2.0; the wheel panel is at z = 1.0.
++    const u32 world = quad(400, 400, 420, 420, 0.5f, 0);
++    frame.vertices[world + 1].z = 2.0f;
++    // A world polygon behind the wheel, submitted before the panel.
++    Polygon behind;
++    behind.first = static_cast<u32>(frame.vertices.size());
++    behind.count = 3;
++    const float bx[3] = {100, 150, 120}, by[3] = {350, 350, 400};
++    for (int i = 0; i < 3; ++i) {
++        Vertex v;
++        v.x = bx[i];
++        v.y = by[i];
++        v.z = 0.5f;
++        frame.vertices.push_back(v);
++    }
++    frame.lists[0].push_back(behind);
++    const u32 behind_first = behind.first;
++    const u32 panel = quad(1, 305, 257, 561, 1.0f, 2);
++    // The item model, submitted after the panel and *below* its depth: a narrow FOV moves the
++    // model's 1/w down, and submission order is what still says it belongs to the panel.
++    Polygon model;
++    model.first = static_cast<u32>(frame.vertices.size());
++    model.count = 3;
++    const float mx[3] = {100, 150, 120}, my[3] = {350, 350, 400};
++    for (int i = 0; i < 3; ++i) {
++        Vertex v;
++        v.x = mx[i];
++        v.y = my[i];
++        v.z = 0.5f;
++        frame.vertices.push_back(v);
++    }
++    frame.lists[2].push_back(model);
++    const u32 model_first = model.first;
++
++    CHECK(compress_screen_overlays(frame, 1.0f, 640.0f, 1.3f) == 1);
++    // The panel is screen-space art and does not move.
++    CHECK(frame.vertices[panel].x == doctest::Approx(1.0f));
++    CHECK(frame.vertices[panel + 3].y == doctest::Approx(561.0f));
++    // The model shrinks about the panel's centre (129, 433) by 1/1.3.
++    CHECK(frame.vertices[model_first].x == doctest::Approx(106.6923f));
++    CHECK(frame.vertices[model_first + 1].x == doctest::Approx(145.1538f));
++    CHECK(frame.vertices[model_first].y == doctest::Approx(369.1538f));
++    CHECK(frame.vertices[model_first + 2].y == doctest::Approx(407.6154f));
++    // It is also brought just in front of the panel so the ring cannot cover it.
++    CHECK(frame.vertices[model_first].z == doctest::Approx(1.1f));
++    // The world behind it, submitted before the panel, is untouched.
++    CHECK(frame.vertices[behind_first].x == doctest::Approx(100.0f));
++    CHECK(frame.vertices[behind_first].y == doctest::Approx(350.0f));
++    CHECK(frame.vertices[behind_first].z == doctest::Approx(0.5f));
++}
++
+ TEST_CASE("widescreen leaves a world-space particle quad alone") {
+     Frame frame;
+     auto quad = [&](float x0, float y0, float x1, float y1, float z, int list) {
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index 2fb726a..4b2cccb 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -10,6 +10,7 @@
+ #include <algorithm>
+ #include <cctype>
+ #include <chrono>
++#include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+@@ -732,13 +733,16 @@ struct Live {
+         // The wide projection squeezed the world's x, but a HUD, a menu or a line of text drawn
+         // over it is a screen-space quad the projection never touched. The presenter stretches the
+         // whole frame back, which would make those 4/3 too wide. Compress them by the same factor,
+-        // about each element's own anchor, to undo the presenter's stretch on them.
+-        if (uses_depth && wide_x_factor != 1.0f) {
++        // about each element's own anchor, to undo the presenter's stretch on them. A FOV change is
++        // the other half: it zooms the item wheel's projected model inside a panel that stays in
++        // screen space, so the panel pass also undoes that zoom about the panel's centre.
++        if (uses_depth && (wide_x_factor != 1.0f || hud_fov_scale != 1.0f)) {
+             const std::size_t overlays = dream::render::compress_screen_overlays(
+-                decoder.frame(), wide_x_factor, static_cast<float>(kGuestWidth));
++                decoder.frame(), wide_x_factor, static_cast<float>(kGuestWidth), hud_fov_scale);
+             if (overlays && std::getenv("DREAM_TRACE_SCENE"))
+-                std::printf("  widescreen: %zu overlay quad(s) compressed by %.4f\n", overlays,
+-                            static_cast<double>(wide_x_factor));
++                std::printf("  hud: %zu polygon(s) adjusted (aspect %.4f, fov %.4f)\n", overlays,
++                            static_cast<double>(wide_x_factor),
++                            static_cast<double>(hud_fov_scale));
+         }
+         // PT_ALPHA_REF: the punch-through threshold the guest chose, which changes per scene.
+         geometry.alpha_ref = static_cast<float>(pvr_.reg(0x11C) & 0xFFu) / 255.0f;
+@@ -1902,6 +1906,10 @@ struct Live {
+     // projection hook is configured. Screen-space overlays are compressed by it to undo the
+     // presenter's stretch; with no hook the world was not squeezed, so they must not be either.
+     float wide_x_factor = 1.0f;
++    // How much larger the FOV makes the projection than the title's default (1 / tan(fov/2),
++    // 90 degrees = 1). HUD panels stay in screen space, so their projected 3D contents are scaled
++    // back by this in compress_screen_overlays.
++    float hud_fov_scale = 1.0f;
+     // --frame-interpolation: between two guest frames, draw the geometry halfway between them
+     // instead of presenting the same picture twice. The history is the decoded vertex stream, not a
+     // copy of the finished image, so the intermediate is rasterised and depth-tested like any other
+@@ -2462,6 +2470,13 @@ void usage(const char* argv0, std::FILE* out) {
+         "                         which can change the panel's refresh). Implies --window;\n"
+         "                         --fullscreen is the old name for borderless.\n"
+         "  --scale N              draw at N times the guest's 640x480 (1 to 4, default 1)\n"
++        "  --aspect W:H           present the 4:3 frame in a window of this aspect and widen the\n"
++        "                         title's projection to match (hor+). 0 is 4:3; the title's TOML\n"
++        "                         names the projection hook.\n"
++        "  --fov DEG              replace the title's vertical field of view (30 to 150). The\n"
++        "                         title's TOML names the FOV hook; without one --fov is refused.\n"
++        "                         This composes with --aspect: the aspect and the FOV are separate\n"
++        "                         inputs to the projection.\n"
+         "  --present-rate N       present N frames a second while the guest keeps its 60 Hz\n"
+         "                         logic; the extra presents repeat a picture unless\n"
+         "                         --frame-interpolation is on\n"
+@@ -2661,6 +2676,11 @@ int run(int argc, char** argv) {
+     // --aspect W:H (or a decimal): present the 4:3 frame in a window of that aspect and, when the
+     // title config names a projection x scale, widen the field of view to match (hor+). 0 is 4:3.
+     double aspect = 0.0;
++    // --fov DEG: replace the title's vertical field of view, which is a plain angle the projection
++    // builder derives both screen scales from. Unlike --aspect this shows more or less world in
++    // both directions instead of squeezing one axis. Unset leaves the title's own value alone.
++    double fov = 0.0;
++    bool fov_set = false;
+     // --rtc-seed N: a fixed console clock, so two runs of the same build do the same thing and can
+     // be compared. Any non-zero value will do; the number itself only changes the date a title
+     // shows.
+@@ -2762,6 +2782,20 @@ int run(int argc, char** argv) {
+                 aspect = std::strtod(spec, nullptr);
+             }
+         }
++        else if (!std::strcmp(argv[i], "--fov") && i + 1 < argc) {
++            const char* text = argv[++i];
++            char* end = nullptr;
++            const double value = std::strtod(text, &end);
++            // The projection is a perspective with a 90-degree vertical default. Outside this
++            // range the near plane clips the world and the picture stops being a camera; refuse
++            // rather than draw a fisheye.
++            if (end == text || *end != '\0' || value < 30.0 || value > 150.0) {
++                std::fprintf(stderr, "--fov takes an angle in degrees, 30 to 150\n");
++                return 2;
++            }
++            fov = value;
++            fov_set = true;
++        }
+         else if (!std::strcmp(argv[i], "--interpret"))
+             interpret_all = true;
+         else if (!std::strcmp(argv[i], "--wav") && i + 1 < argc)
+@@ -2982,6 +3016,34 @@ int run(int argc, char** argv) {
+     } else if (aspect > 0.0) {
+         std::fprintf(stderr, "widescreen: this title has no projection hook configured\n");
+     }
++    // Field of view: the projection builder takes a vertical angle and derives both screen scales
++    // from it, so replacing that angle zooms both axes together. The title's own dynamic projection
++    // scale is a multiplier applied to this base, so a FOV change keeps the authored camera moves
++    // and only moves the range they work in. The value is a constant the title does not rewrite in
++    // gameplay, so one poke before the first frame holds; a scene that does rewrite it keeps its
++    // own value rather than being forced back every blank.
++    float hud_fov_scale = 1.0f;
++    if (fov_set && std::fabs(fov - cfg.fov_base_degrees) >= 1e-6) {
++        if (cfg.fov_address == 0) {
++            std::fprintf(stderr, "--fov: this title has no field-of-view hook configured\n");
++            return 2;
++        }
++        const double radians = fov * 3.14159265358979323846 / 180.0;
++        const float value = static_cast<float>(radians);
++        std::uint32_t word = 0;
++        std::memcpy(&word, &value, 4);
++        patches.emplace_back(cfg.fov_address, word);
++        // The projection's screen scale is 1/tan(fov/2); relative to the title's own value this is
++        // how much larger the item wheel's 3D model is drawn than the panel it sits in.
++        const double base_radians = cfg.fov_base_degrees * 3.14159265358979323846 / 180.0;
++        hud_fov_scale =
++            static_cast<float>(std::tan(base_radians / 2.0) / std::tan(radians / 2.0));
++        std::printf("fov: %.1f -> %.1f degrees (%.6f rad) at 0x%08x; hud model scale %.4f\n",
++                    cfg.fov_base_degrees, fov, static_cast<double>(value), cfg.fov_address,
++                    static_cast<double>(hud_fov_scale));
++    } else if (fov_set) {
++        std::printf("fov: %.1f degrees (the title's own value; no patch)\n", fov);
++    }
+     std::unique_ptr<dream::gdrom::Disc> disc;
+     if (cfg.disc_image) {
+         disc = dream::gdrom::open_disc(*cfg.disc_image, err);
+@@ -3377,6 +3439,7 @@ int run(int argc, char** argv) {
+         live->wide_x_factor = (aspect > 0.0 && cfg.widescreen_x_scale_address != 0)
+                                   ? static_cast<float>((4.0 / 3.0) / aspect)
+                                   : 1.0f;
++        live->hud_fov_scale = hud_fov_scale;
+         // After the window, because resolving a binding's name to a code needs SDL initialised.
+         live->bindings_path =
+             bindings_file_set ? bindings_file : dream::render::vk::default_bindings_path();
+diff --git a/translator/include/dream/translator/config/game_config.h b/translator/include/dream/translator/config/game_config.h
+index af8b934..b5a8ccd 100644
+--- a/translator/include/dream/translator/config/game_config.h
++++ b/translator/include/dream/translator/config/game_config.h
+@@ -52,6 +52,13 @@ struct GameConfig {
+     // at the picture (see docs/12-HANDOVER.md). Zero means the title has no known hook.
+     std::uint32_t widescreen_x_scale_address = 0;
+     double widescreen_x_scale_base = 0.0;
++    // The title's vertical field of view, in degrees, is the float at this guest address. The
++    // projection builder takes it as an angle and derives both screen scales from it; changing it
++    // zooms both axes rather than squeezing one. `--fov` replaces the value, and the 4:3 aspect
++    // above is independent, so a widescreen projection and a FOV change compose. Zero means the
++    // title has no known hook.
++    std::uint32_t fov_address = 0;
++    double fov_base_degrees = 90.0;
+ 
+     std::map<std::uint32_t, std::string> hle;    // guest address -> runtime handler name
+     std::map<std::uint32_t, std::string> hooks;  // guest address -> hook name
+diff --git a/translator/src/config/game_config.cpp b/translator/src/config/game_config.cpp
+index d91c727..6f9bbf6 100644
+--- a/translator/src/config/game_config.cpp
++++ b/translator/src/config/game_config.cpp
+@@ -172,6 +172,28 @@ bool finish(const toml::table& t, const std::filesystem::path& dir, GameConfig&
+             static_cast<std::uint32_t>(ws["x_scale_address"].value_or(std::int64_t{0}));
+         c.widescreen_x_scale_base = ws["x_scale_base"].value_or(0.0);
+     }
++    if (auto cam = t["camera"]; cam) {
++        if (!get_u32(cam["fov_address"], "camera.fov_address", c.fov_address, error, false))
++            return false;
++        if (c.fov_address & 3) {
++            error = "camera.fov_address must be 4-byte aligned";
++            return false;
++        }
++        if (auto b = cam["fov_base_degrees"]; b) {
++            std::optional<double> v = b.value<double>();
++            if (!v) {
++                // An integer is a natural way to write 90; accept it rather than send the author
++                // looking for a decimal point.
++                if (const auto i = b.value<std::int64_t>())
++                    v = static_cast<double>(*i);
++            }
++            if (!v || *v <= 0.0 || *v >= 180.0) {
++                error = "camera.fov_base_degrees must be an angle between 0 and 180 degrees";
++                return false;
++            }
++            c.fov_base_degrees = *v;
++        }
++    }
+     std::string sym;
+     if (!get_str(t["functions"]["symbols"], "functions.symbols", sym, error, false))
+         return false;
+diff --git a/translator/tests/test_config.cpp b/translator/tests/test_config.cpp
+index 612fe7c..ab6b613 100644
+--- a/translator/tests/test_config.cpp
++++ b/translator/tests/test_config.cpp
+@@ -177,3 +177,77 @@ overlay = true
+     CHECK_FALSE(c.relocations[1].no_fold);
+     CHECK(c.relocations[1].overlay);
+ }
++
++TEST_CASE("game config: the camera FOV hook is optional and validated") {
++    GameConfig c;
++    std::string err;
++    // A title with no camera block keeps the default and has no hook.
++    REQUIRE_MESSAGE(parse_game_config(kSample, ".", c, err), err);
++    CHECK(c.fov_address == 0u);
++    CHECK(c.fov_base_degrees == 90.0);
++
++    REQUIRE_MESSAGE(parse_game_config(R"(
++[game]
++id = "x"
++title = "X"
++[binary]
++path = "x.bin"
++load_address = 0x8C010000
++entry = 0x8C010000
++[camera]
++fov_address = 0x0C098648
++fov_base_degrees = 75.0
++)",
++                                      ".", c, err),
++                    err);
++    CHECK(c.fov_address == 0x0C098648u);
++    CHECK(c.fov_base_degrees == 75.0);
++
++    // An integer is accepted where a TOML float would be written.
++    REQUIRE_MESSAGE(parse_game_config(R"(
++[game]
++id = "x"
++title = "X"
++[binary]
++path = "x.bin"
++load_address = 0x8C010000
++entry = 0x8C010000
++[camera]
++fov_address = 0x0C098648
++fov_base_degrees = 90
++)",
++                                      ".", c, err),
++                    err);
++    CHECK(c.fov_base_degrees == 90.0);
++
++    // A bad angle names the field.
++    CHECK(!parse_game_config(R"(
++[game]
++id = "x"
++title = "X"
++[binary]
++path = "x.bin"
++load_address = 0x8C010000
++entry = 0x8C010000
++[camera]
++fov_address = 0x0C098648
++fov_base_degrees = 180.0
++)",
++                             ".", c, err));
++    CHECK(err.find("camera.fov_base_degrees") != std::string::npos);
++
++    // A misaligned address would write a float over the neighbouring word.
++    CHECK(!parse_game_config(R"(
++[game]
++id = "x"
++title = "X"
++[binary]
++path = "x.bin"
++load_address = 0x8C010000
++entry = 0x8C010000
++[camera]
++fov_address = 0x0C098649
++)",
++                             ".", c, err));
++    CHECK(err.find("4-byte aligned") != std::string::npos);
++}

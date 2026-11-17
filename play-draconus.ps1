@@ -32,6 +32,9 @@ param(
     # -Aspect takes any ratio, for example 21:9.
     [switch]$Widescreen,
     [string]$Aspect = "",
+    # -Fov 75: the vertical field of view in degrees, 60-120. 90 is the game's own; a wider angle
+    # shows more world above and below, a narrower one zooms in. It composes with -Widescreen.
+    [ValidateRange(60, 120)][int]$Fov = 0,
     # -DisplayMode: windowed (default), borderless (desktop fullscreen at the display's own size)
     # or exclusive (a fullscreen display mode, which can change the panel's refresh timing). A
     # system that refuses exclusive falls back to borderless.
@@ -90,6 +93,7 @@ $arguments = @("--config", $cfg, "--window")
 if ($Scale -ne 1) { $arguments += @("--scale", "$Scale") }
 $ratio = if ($Aspect) { $Aspect } elseif ($Widescreen) { "16:9" } else { "" }
 if ($ratio) { $arguments += @("--aspect", $ratio) }
+if ($Fov -gt 0) { $arguments += @("--fov", "$Fov") }
 if ($Fullscreen) { $arguments += "--fullscreen" }
 if ($PresentRate -gt 0) { $arguments += @("--present-rate", "$PresentRate") }
 if ($Interpolate) { $arguments += "--frame-interpolation" }

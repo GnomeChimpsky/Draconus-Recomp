@@ -11,6 +11,7 @@ this is measured against. This file is the pick-up point.
 |---|---|---|
 | Disc validation and extraction | `python -m dracdisc verify "<own dump>.gdi"` | 15 tests; byte-identical to the engine's `dcdisc` |
 | Play the game | `.\play-draconus.bat` | movies, menus, gameplay, input; deterministic |
+| Field of view | launcher **Field of view**, `-Fov 75` or `--fov 75` | vertical FOV 60-120 (90 default); zooms both axes, HUD unchanged, item wheel's model scaled/raised to stay in its ring; composes with widescreen. Above 90° the launcher warns that the game's region visibility can cull at the far edges and models can pop in when the camera turns |
 | Play the machine-translated path | `.\play-draconus.bat -Translated` | **600 frames and 1,800 frames, no fault, 0 task switches** |
 | Determinism check | `--rtc-seed 1000000` twice | identical cycles, GD-ROM sectors, TA chunks |
 | Translated vs interpreted parity | same 600-frame run | identical PVR/Maple counters; 41 cycles apart in 1.97 billion |
