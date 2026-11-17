@@ -264,7 +264,9 @@ produces `--scale 4 --aspect 16:9`, and closes it.
 The resolution list names the window each scale opens at for the selected aspect: 4x is 2560x1920
 at 4:3, or 2560x1440 at 16:9 (16:9 keeps the 2560 width and takes the height out of it). The 3D is
 drawn at 640x480 times the scale, and the engine's 720-line floor upscales 1x on a wide aspect. A
-window larger than the screen is shrunk to fit, so on a 1080p display 4x opens at the largest
+window larger than the desktop's work area is shrunk to fit and centred above the taskbar, and the
+bottom bar is laid out before the settings page, so Play and the folder buttons stay clickable when
+a short screen has to clip the page. On a 1080p display 4x opens at the largest
 16:9 the screen allows; **Exclusive fullscreen** takes the display's own mode instead, which is how
 4x 16:9 becomes exactly 2560x1440 on a 2560x1440 panel. The game itself always sees its 640x480
 framebuffer, which is why captures and reports say 640x480 at every setting.

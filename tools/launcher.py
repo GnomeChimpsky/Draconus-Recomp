@@ -434,17 +434,57 @@ def resolution_choices(aspect: str = "off", custom: str = "16:9") -> list[tuple[
     return rows
 
 
-def window_geometry(screen_w: int, screen_h: int) -> tuple[int, int, int, int]:
-    """The main window size and its minimum, clamped so both fit the screen.
+def window_geometry(screen_w: int, screen_h: int, margin_w: int = 80,
+                    margin_h: int = 140) -> tuple[int, int, int, int]:
+    """The main window size and its minimum, clamped so both fit the given area.
 
     The window wants 1240x780, but a laptop may be 1024x600: the height floor used to be 620 and
     overrode the screen clamp, and the width ignored the screen entirely, so the launcher opened
     with its bottom or right edge off-screen. A screen too small for the preferred size wins, and
     the minimum follows the clamped window rather than the preferred one.
     """
-    width = min(1240, max(320, screen_w - 80))
-    height = min(780, max(360, screen_h - 140))
+    width = min(1240, max(320, screen_w - margin_w))
+    height = min(780, max(360, screen_h - margin_h))
     return width, height, min(900, width), min(580, height)
+
+
+class RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+def screen_work_area(root: "tk.Misc") -> tuple[int, int, int, int]:
+    """The desktop area a window can use: the screen without the taskbar on Windows.
+
+    `winfo_screenheight()` is the whole display, including the strip the taskbar covers. Sizing the
+    window from that put its bottom buttons under the taskbar on a low-resolution laptop, where
+    every pixel matters. The work area is the rectangle Windows itself uses for maximized windows.
+    """
+    if sys.platform == "win32":
+        try:
+            rect = RECT()
+            # SPI_GETWORKAREA = 0x0030
+            if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+                width = int(rect.right - rect.left)
+                height = int(rect.bottom - rect.top)
+                if width > 0 and height > 0:
+                    return int(rect.left), int(rect.top), width, height
+        except (AttributeError, OSError):
+            pass
+    return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
+
+
+def window_placement(work: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """Window width/height and top-left corner, centred in the work area.
+
+    Centring is part of the fix: a window that is merely clamped can still be placed with its
+    bottom edge against the taskbar, which is where the buttons live.
+    """
+    left, top, work_w, work_h = work
+    width, height, _, _ = window_geometry(work_w, work_h, margin_w=40, margin_h=80)
+    x = left + max(0, (work_w - width) // 2)
+    y = top + max(0, (work_h - height) // 2)
+    return width, height, x, y
 
 
 def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[str]:
@@ -614,12 +654,11 @@ class Launcher(tk.Tk):
             ttk.Style(self).theme_use("clam")
         except tk.TclError:
             pass
-        # Tall enough for the longest tab, and never larger than the screen: on a small display the
-        # content is clipped rather than the window's controls being unreachable off-screen.
-        width, height, min_width, min_height = window_geometry(self.winfo_screenwidth(),
-                                                               self.winfo_screenheight())
-        self.geometry("%dx%d" % (width, height))
-        self.minsize(min_width, min_height)
+        # Fit the window to the desktop's work area (above the taskbar) and centre it, so the
+        # bottom bar is never flush against, or under, the taskbar on a low-resolution laptop.
+        width, height, x, y = window_placement(screen_work_area(self))
+        self.geometry("%dx%d+%d+%d" % (width, height, x, y))
+        self.minsize(min(900, width), min(580, height))
         self.settings = load_settings()
         # Enumerate once before the tabs are built; the device combo reads this list object.
         AUDIO_DEVICES[:] = audio_device_choices(self.settings.get("audio_device", ""))
@@ -695,16 +734,17 @@ class Launcher(tk.Tk):
         tk.Label(head, text="Settings", bg=self.BG, fg=self.FG,
                  font=("Segoe UI", 16, "bold")).pack(side="left")
 
-        nb = ttk.Notebook(parent)
-        self.notebook = nb
-        nb.pack(fill="both", expand=True, pady=(10, 12))
-        for name, controls in TABS:
-            tab = tk.Frame(nb, bg=self.BG)
-            nb.add(tab, text=name)
-            self._build_tab(tab, controls)
+        # The status line and the action bar are packed from the bottom before the notebook fills
+        # the rest. With the old order a short window squeezed the later-packed widgets, so the
+        # buttons a player presses first were the ones that fell off the bottom edge; now the
+        # settings page is what gets clipped when there is not enough height.
+        self.status_label = tk.Label(parent, textvariable=self.status, bg=self.BG, fg=self.DIM,
+                                     anchor="w", justify="left", wraplength=560)
+        self.status_label.pack(side="bottom", fill="x", pady=(8, 12))
 
         bar = tk.Frame(parent, bg=self.BG)
-        bar.pack(fill="x")
+        bar.pack(side="bottom", fill="x", pady=(12, 0))
+        self.action_bar = bar
         # The folders hold the things a player may want to look at outside the launcher: the card
         # the game saves to, and this window's own settings file.
         ttk.Button(bar, text="Open saves folder",
@@ -715,8 +755,14 @@ class Launcher(tk.Tk):
         self.play_button.pack(side="right")
         ttk.Button(bar, text="Reset", command=self.reset).pack(side="right", padx=8)
         ttk.Button(bar, text="Quit", command=self._close).pack(side="right")
-        tk.Label(parent, textvariable=self.status, bg=self.BG, fg=self.DIM, anchor="w",
-                 justify="left", wraplength=560).pack(fill="x", pady=(10, 0))
+
+        nb = ttk.Notebook(parent)
+        self.notebook = nb
+        for name, controls in TABS:
+            tab = tk.Frame(nb, bg=self.BG)
+            nb.add(tab, text=name)
+            self._build_tab(tab, controls)
+        nb.pack(fill="both", expand=True, pady=(10, 0))
 
     def _build_tab(self, tab: tk.Frame, controls: list[dict]) -> None:
         tab.configure(padx=18, pady=14)
@@ -1187,6 +1233,13 @@ def selftest() -> int:
     if window_geometry(1920, 1080) != (1240, 780, 900, 580):
         failures.append("geometry 1920x1080: %r" % (window_geometry(1920, 1080),))
 
+    # It is also centred inside the work area (screen minus taskbar), not just clamped: a typical
+    # 768-line laptop leaves 728 pixels above the taskbar.
+    if window_placement((0, 0, 1366, 728)) != (1240, 648, 63, 40):
+        failures.append("placement 1366x728: %r" % (window_placement((0, 0, 1366, 728)),))
+    if window_placement((1920, 0, 1920, 1040)) != (1240, 780, 2260, 130):
+        failures.append("placement 1920x1040: %r" % (window_placement((1920, 0, 1920, 1040)),))
+
     cmd = build_command(image, dict(base, audio_volume=35, audio_device="Speakers (USB Audio)",
                                     audio_buffer=93))
     expect("audio options", cmd,
@@ -1329,12 +1382,28 @@ def check_ui(app: Launcher) -> list[str]:
     if names != ["Game", "Graphics", "Audio"]:
         failures.append("tabs: %r" % names)
 
-    # Clamping is unit-tested; this is the real window, so a regression in the wiring still shows.
-    if (app.winfo_width() > app.winfo_screenwidth()
-            or app.winfo_height() > app.winfo_screenheight()):
-        failures.append("window %dx%d exceeds screen %dx%d" % (
-            app.winfo_width(), app.winfo_height(),
-            app.winfo_screenwidth(), app.winfo_screenheight()))
+    # Clamping and centring are unit-tested; this is the real window, so a regression in the
+    # wiring still shows. The window must fit the work area (the screen above the taskbar).
+    work = screen_work_area(app)
+    if (app.winfo_width() > work[2] or app.winfo_height() > work[3]
+            or app.winfo_x() < work[0] or app.winfo_y() < work[1]):
+        failures.append("window %dx%d+%d+%d does not fit the work area %r" % (
+            app.winfo_width(), app.winfo_height(), app.winfo_x(), app.winfo_y(), work))
+
+    # A low-resolution laptop gets a window too short for the settings page. The buttons must stay
+    # reachable: shrink below the instance minimum and check the action bar is still on screen.
+    saved_geometry, saved_min = app.geometry(), app.minsize()
+    app.minsize(600, 360)
+    app.geometry("900x420")
+    app.update()
+    bar = app.action_bar
+    if not bar.winfo_ismapped():
+        failures.append("action bar disappeared in a short window")
+    elif bar.winfo_rooty() + bar.winfo_height() > app.winfo_rooty() + app.winfo_height():
+        failures.append("action bar bottom is outside the short window")
+    app.minsize(*saved_min)
+    app.geometry(saved_geometry)
+    app.update()
 
     # The disc row gates Play. Nothing selected must mean no Play, whatever the saved settings say.
     saved_image, saved_ok = app.image_path, app.disc_ok
