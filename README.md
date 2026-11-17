@@ -2,7 +2,7 @@
 
 # Draconus-Recomp
 
-**Version 1.0** — the first public release ([release notes](RELEASE-NOTES.md)).
+**Version 1.0** — first public release ([release notes](RELEASE-NOTES.md)).
 
 A native Windows x64 static recompilation of **Draconus: Cult of the Wyrm**
 (Dreamcast, 2000, developed by Treyarch and published by Crave Entertainment; USA V1.000,
@@ -10,14 +10,11 @@ A native Windows x64 static recompilation of **Draconus: Cult of the Wyrm**
 
 The game's SH-4 code is translated ahead of time into C++, and the Dreamcast hardware
 (file system, controllers, video, sound, memory card) is replaced by native code. The
-result runs from the user's own disc — no disc data or extracted game files are included or
+result runs from the user's own disc, no disc data or extracted game files are included or
 distributed. A prebuilt release contains translated code but no disc assets; see
 `docs/LEGAL.md`.
 
-The game is playable at real time, and the recompiled path is the fast one: 1.0x with a window and
-3-4.5x headless depending on the scene (3.0x over 20,000 frames of gameplay). The first two levels
-have been played end to end; later levels and the credits are not yet verified
-(`docs/12-HANDOVER.md`). The development interpreter remains as a reference and a bring-up tool.
+The first three levels have been played end to end from the owner's own disc. Later levels are not yet verified.
 
 This repository holds the research, the disc tooling, the title configuration and the
 engine fixes. The engine itself is fetched by `setup.ps1` at a pinned commit, so it is
