@@ -1,0 +1,56 @@
+diff --git a/render/src/vk/window.cpp b/render/src/vk/window.cpp
+index 06404a2..10a5dea 100644
+--- a/render/src/vk/window.cpp
++++ b/render/src/vk/window.cpp
+@@ -277,6 +277,12 @@ bool Window::create(const char* title, int width, int height, bool want_validati
+         SDL_DisplayMode chosen{};
+         bool have_chosen = false;
+         const double desktop_hz = desktop ? static_cast<double>(desktop->refresh_rate) : 0.0;
++        // The requested content rate can be higher than the panel (the launcher deliberately
++        // offers only rates the display can hold, but --present-rate is a CLI too). Clamp it for
++        // the exclusive-mode choice and the diagnostic; presenting itself already caps to the
++        // display in boot_main, so this is what makes those two agree with what is shown.
++        const double content_hz =
++            (content_hz_ > 0.0 && desktop_hz > 0.0) ? std::min(content_hz_, desktop_hz) : content_hz_;
+         // A picture can only change on a vertical blank, so every presented picture is held for a
+         // whole number of refreshes. A refresh that is not a whole multiple of the title's rate
+         // therefore cannot hold every picture for the same time: 59.9 fps on a 165 Hz panel is 2.75
+@@ -285,7 +291,7 @@ bool Window::create(const char* title, int width, int height, bool want_validati
+         // whole multiple -- 120 Hz for 60 Hz content -- holds every picture for exactly the same
+         // time, so among the modes at the desktop's size, prefer the highest refresh that divides
+         // evenly, and keep the old choice when none does.
+-        auto divides_evenly = [this](double hz) { return holds_evenly(hz, content_hz_); };
++        auto divides_evenly = [content_hz](double hz) { return holds_evenly(hz, content_hz); };
+         auto pick = [&](bool whole_multiple_only) {
+             for (int i = 0; modes && i < mode_count; ++i) {
+                 const SDL_DisplayMode* mode = modes[i];
+@@ -304,7 +310,7 @@ bool Window::create(const char* title, int width, int height, bool want_validati
+                 }
+             }
+         };
+-        if (content_hz_ > 0.0)
++        if (content_hz > 0.0)
+             pick(/*whole_multiple_only=*/true);
+         if (!have_chosen)
+             pick(/*whole_multiple_only=*/false);
+@@ -410,8 +416,9 @@ bool Window::create(const char* title, int width, int height, bool want_validati
+     if (content_hz_ > 0.0) {
+         const double hz = refresh_hz();
+         if (hz > 0.0) {
+-            const double per_picture = hz / content_hz_;
+-            if (holds_evenly(hz, content_hz_)) {
++            const double content_hz = std::min(content_hz_, hz);
++            const double per_picture = hz / content_hz;
++            if (holds_evenly(hz, content_hz)) {
+                 std::fprintf(stderr,
+                              "display: %.2f Hz holds %.3f pictures per refresh -- a whole number, "
+                              "so every picture is shown for the same time\n",
+@@ -423,7 +430,7 @@ bool Window::create(const char* title, int width, int height, bool want_validati
+                              "motion judders however fast the game is running. A mode at %.1f Hz "
+                              "or %.1f Hz would be even, or interpolation over the extra refreshes\n",
+                              hz, per_picture, std::floor(per_picture), std::ceil(per_picture),
+-                             content_hz_, 2.0 * content_hz_);
++                             content_hz, 2.0 * content_hz);
+             }
+         }
+     }

@@ -1,0 +1,34 @@
+diff --git a/render/src/vk/window.cpp b/render/src/vk/window.cpp
+index ff446e9..06404a2 100644
+--- a/render/src/vk/window.cpp
++++ b/render/src/vk/window.cpp
+@@ -5,6 +5,7 @@
+ #include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
++#include <filesystem>
+ 
+ #include <SDL3/SDL.h>
+ #include <SDL3/SDL_vulkan.h>
+@@ -1243,6 +1244,21 @@ std::string default_bindings_path() {
+         return {};
+     std::string path = std::string(dir) + "bindings.txt";
+     SDL_free(dir);
++    // 0007 moved the bindings out of the nested folder. A player who rebound controls before that
++    // change still has the old file; copy it once so the upgrade does not silently reset their
++    // layout. The old path is derived from the new one, so a fresh install creates no extra folder.
++    std::error_code ec;
++    if (!std::filesystem::exists(path, ec)) {
++        const std::filesystem::path old_path =
++            std::filesystem::path(path).parent_path() / "dream-recomp" / "bindings.txt";
++        if (std::filesystem::exists(old_path, ec) && !ec) {
++            std::filesystem::copy_file(old_path, path,
++                                       std::filesystem::copy_options::overwrite_existing, ec);
++            if (ec)
++                std::fprintf(stderr, "bindings: could not migrate %s: %s\n",
++                             old_path.string().c_str(), ec.message().c_str());
++        }
++    }
+     return path;
+ }
+ 

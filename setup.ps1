@@ -89,15 +89,21 @@ function Test-EnginePatchMarkersBase {
 
 function Test-EnginePatchMarkers {
     if (-not (Test-EnginePatchMarkersBase)) { return $false }
-    # 0006, 0007 and 0008 postdate the feature list above, so each has its own probe; a tree that
-    # stops short of one must not be mistaken for a fully patched tree.
+    # 0006 onward postdate the feature list above, so each has its own probe; a tree that stops
+    # short of one must not be mistaken for a fully patched tree.
     $late = @(
         [bool](Select-String -LiteralPath (Join-Path $engine "runtime\boot\boot_main.cpp") `
                     -Pattern 'wmain|WideCharToMultiByte' -Quiet),
         [bool](Select-String -LiteralPath (Join-Path $engine "render\src\vk\window.cpp") `
                     -SimpleMatch 'SDL_GetPrefPath("", "dream-recomp")' -Quiet),
         [bool](Select-String -LiteralPath (Join-Path $engine "runtime\boot\boot_main.cpp") `
-                    -SimpleMatch 'present-rate takes a rate in Hz' -Quiet)
+                    -SimpleMatch 'present-rate takes a rate in Hz' -Quiet),
+        [bool](Select-String -LiteralPath (Join-Path $engine "render\src\vk\window.cpp") `
+                    -SimpleMatch 'could not migrate' -Quiet),
+        [bool](Select-String -LiteralPath (Join-Path $engine "render\src\vk\window.cpp") `
+                    -SimpleMatch 'The requested content rate can be higher than the panel' -Quiet),
+        [bool](Select-String -LiteralPath (Join-Path $engine "render\include\dream\render\vk\context.h") `
+                    -SimpleMatch 'create_device' -Quiet)
     )
     return -not ($late -contains $false)
 }
@@ -106,8 +112,10 @@ function Test-EnginePatchMarkers {
 $EngineUrl = "https://codeload.github.com/phobos665/dream-recomp/zip/51ca2766d2ebeae9caacda4e305eacb88cf64013"
 $EnginePin = "51ca2766d2ebeae9caacda4e305eacb88cf64013"
 
-# libchdr is the engine's only submodule. It is not pinned here; see docs/LEGAL.md.
-$LibchdrUrl = "https://codeload.github.com/rtissera/libchdr/zip/refs/heads/master"
+# libchdr is the engine's only submodule. Pin its commit too: a source build must not depend on
+# whatever master happens to contain on the day it is run.
+$LibchdrPin = "47d794151b2b64f6aba60304e6480f4f5a2bc24b"
+$LibchdrUrl = "https://codeload.github.com/rtissera/libchdr/zip/$LibchdrPin"
 
 function Get-Zip($url, $dest) {
     New-Item -ItemType Directory -Force $dl | Out-Null

@@ -291,50 +291,104 @@ def _devmode() -> "DEVMODEW":
     return devmode
 
 
+class DISPLAY_DEVICEW(ctypes.Structure):
+    """DISPLAY_DEVICEW, used to ask every attached display for its modes."""
+
+    _fields_ = [
+        ("cb", ctypes.c_ulong),
+        ("DeviceName", ctypes.c_wchar * 32),
+        ("DeviceString", ctypes.c_wchar * 128),
+        ("StateFlags", ctypes.c_ulong),
+        ("DeviceID", ctypes.c_wchar * 128),
+        ("DeviceKey", ctypes.c_wchar * 128),
+    ]
+
+
+DISPLAY_DEVICE_ATTACHED_TO_DESKTOP = 0x1
+DISPLAY_DEVICE_MIRRORING_DRIVER = 0x8
+ENUM_CURRENT_SETTINGS = 0xFFFFFFFF
+
+
+def _display_device_names(user32) -> list[str]:
+    names: list[str] = []
+    index = 0
+    while index < 32:
+        device = DISPLAY_DEVICEW()
+        device.cb = ctypes.sizeof(DISPLAY_DEVICEW)
+        if not user32.EnumDisplayDevicesW(None, index, ctypes.byref(device), 0):
+            break
+        index += 1
+        if not (device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP):
+            continue
+        if device.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER:
+            continue
+        if device.DeviceName and device.DeviceName not in names:
+            names.append(device.DeviceName)
+    return names
+
+
 def display_refresh_rates() -> list[int]:
-    """Distinct refresh rates the primary display reports, ascending; [] when it cannot be asked."""
+    """Refresh rates of every attached display, from its current mode and fullscreen modes.
+
+    Only the current desktop mode and the modes at the desktop resolution count: a 75 Hz mode that
+    exists only at 640x480 is not something a windowed 165 Hz panel can use. The game window opens
+    on the primary display, but a player can move it, so all attached displays contribute.
+    [] when the display cannot be asked (non-Windows or no driver).
+    """
     if sys.platform != "win32":
         return []
     try:
         user32 = ctypes.windll.user32
     except (AttributeError, OSError):
         return []
+    names = _display_device_names(user32)
     rates: set[int] = set()
-    devmode = _devmode()
-    index = 0
-    while user32.EnumDisplaySettingsW(None, index, ctypes.byref(devmode)):
-        index += 1
-        hz = int(devmode.dmDisplayFrequency)
-        if hz > 1:  # 0 and 1 mean "the hardware's default", not a rate
+    for name in names or [None]:
+        current = _devmode()
+        if not user32.EnumDisplaySettingsW(name, ENUM_CURRENT_SETTINGS,
+                                          ctypes.byref(current)):
+            continue
+        width, height = int(current.dmPelsWidth), int(current.dmPelsHeight)
+        hz = int(current.dmDisplayFrequency)
+        if hz > 1:
             rates.add(hz)
-        if index > 512:  # a driver that never says stop must not hang the launcher
-            break
+        # Fullscreen modes at the desktop size are the ones an exclusive-mode present rate can
+        # actually use. Enumerating every mode would add rates that belong to 640x480/800x600.
+        index = 0
+        while user32.EnumDisplaySettingsW(name, index, ctypes.byref(current)):
+            index += 1
+            if (int(current.dmPelsWidth) == width and int(current.dmPelsHeight) == height):
+                hz = int(current.dmDisplayFrequency)
+                if hz > 1:
+                    rates.add(hz)
+            if index > 512:  # a driver that never says stop must not hang the launcher
+                break
     return sorted(rates)
 
 
 def present_rate_choices(modes: list[int] | None = None) -> list[tuple[str, int]]:
-    """Rows for the present-rate combo: this display's own rates, plus the common targets.
+    """Rows for the present-rate combo: rates this display can hold evenly.
 
-    The list comes from the display rather than from a fixed table, because a rate only looks smooth
-    when the panel can hold every picture for the same number of refreshes, and that depends on the
-    panel. Each refresh it reports is offered as one picture per refresh, and half of one is offered
-    where that is still at least 60 Hz (two refreshes per picture). 120, 144, 180 and 240 are kept
-    even when no mode reports them, so a display that is not being asked, or a VRR panel that reports
-    only its desktop rate, still has the usual choices; the engine caps a rate the display cannot
-    show and says so. With no modes at all the launcher falls back to that fixed list.
+    A rate only looks smooth when the panel can hold every picture for the same number of
+    refreshes. Each current/fullscreen rate is offered, as is every divisor of it that is still at
+    least 60 Hz (144 offers 72, 240 offers 120 and 80); a 60 Hz display therefore offers no rate
+    it cannot show. With no modes at all the launcher falls back to the common targets so the
+    dropdown is not empty; the engine still caps a rate the display cannot show.
     """
     modes = sorted({hz for hz in (modes or []) if hz > 1})
     if not modes:
-        return [("Match the game (60 Hz)", 0), ("120 Hz", 120), ("144 Hz", 144), ("165 Hz", 165),
-                ("240 Hz", 240)]
+        return [("Match the game (60 Hz)", 0), ("120 Hz", 120), ("144 Hz", 144),
+                ("180 Hz", 180), ("240 Hz", 240)]
 
-    candidates = {60} | {hz for hz in modes}
-    candidates |= {hz // 2 for hz in modes if hz % 2 == 0 and hz // 2 >= 60}
-    candidates |= {120, 144, 180, 240}
+    candidates: set[int] = set()
+    for hz in modes:
+        if hz > 60:
+            candidates.add(hz)
+        for divisor in (2, 3, 4):
+            if hz % divisor == 0 and hz // divisor > 60:
+                candidates.add(hz // divisor)
     rows: list[tuple[str, int]] = [("Match the game (60 Hz)", 0)]
     for rate in sorted(candidates):
-        if rate <= 60:
-            continue
         rows.append(("%d Hz" % rate, rate))
     return rows
 
@@ -475,12 +529,11 @@ TABS = [
          "help": "Two numbers, for example 32:9."},
         {"kind": "combo", "key": "present_rate", "label": "Present rate",
          "values": PRESENT_RATE_CHOICES,
-         "help": "Presents up to this rate while the game logic stays at 60 Hz. The list comes from "
-                 "this display's own rates. What looks smooth is whether the rate divides the "
-                 "display's refresh, so every picture is held for the same time: on a 165 Hz panel "
-                 "120 is held for one refresh and then two, which judders, while 165 is held for "
-                 "one every time. Exclusive fullscreen can put the panel into a mode that matches; "
-                 "the engine caps a rate the display cannot show and says so."},
+         "help": "Presents up to this rate while the game logic stays at 60 Hz. The list is built "
+                 "from this display's current refresh and fullscreen modes at the desktop size, "
+                 "plus rates that divide them, so every picture is held for the same time. 0 "
+                 "matches the game. Exclusive fullscreen can switch to a listed mode; the engine "
+                 "caps a rate the display cannot show and says so."},
         {"kind": "check", "key": "frame_interpolation",
          "label": "Interpolation",
          "depends": ("present_rate", INTERPOLATION_RATES),
@@ -1084,20 +1137,24 @@ def selftest() -> int:
             failures.append("sound off still passed %s" % flag)
 
     # The present-rate list comes from the display's own rates, and the labels are just the rate. A
-    # 165 Hz panel that also reports 120 and 144 offers those, their halves that are still at least
-    # 60 (72 from 144), and the common targets that no mode reports.
+    # 165 Hz panel that also reports 120 and 144 offers those and their even divisors (72 from 144);
+    # it does not invent 180/240 modes it cannot show.
     rows = [value for _, value in present_rate_choices([60, 120, 144, 165])]
-    if rows != [0, 72, 120, 144, 165, 180, 240]:
+    if rows != [0, 72, 120, 144, 165]:
         failures.append("rates: 165 Hz panel produced %r" % (rows,))
-    if [label for label, _ in present_rate_choices([60, 120, 144, 165])][-1] != "240 Hz":
+    if [label for label, _ in present_rate_choices([60, 120, 144, 165])][-1] != "165 Hz":
         failures.append("rates: labels should be the rate alone")
-    # A 240 Hz panel reports 240, and 120 as its half; 144 and 180 are still offered.
+    # A 240 Hz panel reports 240 and 120, and 240 offers 80 as its third.
     rows = [value for _, value in present_rate_choices([60, 120, 240])]
-    if rows != [0, 120, 144, 180, 240]:
+    if rows != [0, 80, 120, 240]:
         failures.append("rates: 240 Hz panel produced %r" % (rows,))
-    # No display to ask: the fixed list, so the dropdown is never empty.
+    # A 60 Hz panel must not be offered rates it cannot show.
+    rows = [value for _, value in present_rate_choices([60])]
+    if rows != [0]:
+        failures.append("rates: 60 Hz panel produced %r" % (rows,))
+    # No display to ask: the common targets, so the dropdown is never empty.
     fallback = [value for _, value in present_rate_choices([])]
-    if fallback != [0, 120, 144, 165, 240]:
+    if fallback != [0, 120, 144, 180, 240]:
         failures.append("rates: fallback list changed: %r" % (fallback,))
     if DEVMODEW.dmDisplayFrequency.offset != 184 or ctypes.sizeof(DEVMODEW) != 220:
         failures.append("rates: DEVMODEW layout is %d bytes with the rate at %d" %
