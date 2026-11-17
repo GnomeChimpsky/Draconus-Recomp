@@ -49,9 +49,10 @@ boot program at LBA 547,857 inside `track05`.
    reuse pending explicit permission; technically the best benchmark we have.
 3. Repo lives beside the dumps (`DraconusRecomp/`), `work/` is generated and ignored.
 
-## Next step
+## Where 1.0 stands
 
-M2 is effectively met: the retail build now boots through 29 frames with GD-ROM,
-flash and PVR activity before faulting at `0x8C001006`, and the prototype boot
-reaches 53 frames. The next task is to translate more of the binary (pointer
-discovery works; `emit` must be fixed for a full set) and chase that fault.
+Version 1.0 is the first public release: the README's
+[quick start](../README.md#quick-start) is the entry point for players and builders, and
+`docs/12-HANDOVER.md` is the current state of play. M3 (first frame), M5 (in-game) and M6 (audio)
+are closed; M7 (full play-through) continues on the later levels, the credits and any coverage gaps
+they expose. The M2-era notes above are kept as the reconnaissance record.

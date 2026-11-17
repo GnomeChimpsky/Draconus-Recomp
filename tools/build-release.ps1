@@ -107,7 +107,7 @@ foreach ($dll in @("MSVCP140.dll", "VCRUNTIME140.dll", "VCRUNTIME140_1.dll")) {
     Copy-Item -LiteralPath $source -Destination (Join-Path $Out $dll)
 }
 
-foreach ($file in @("LICENSE", "README.md", "THIRD-PARTY-NOTICES.md",
+foreach ($file in @("LICENSE", "README.md", "RELEASE-NOTES.md", "THIRD-PARTY-NOTICES.md",
                     "Draconus Recomped Emblem light.png")) {
     $source = Join-Path $root $file
     if (-not (Test-Path -LiteralPath $source)) { throw "missing release file: $source" }

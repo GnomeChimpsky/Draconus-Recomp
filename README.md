@@ -2,12 +2,11 @@
 
 # Draconus-Recomp
 
+**Version 1.0** — the first public release ([release notes](RELEASE-NOTES.md)).
+
 A native Windows x64 static recompilation of **Draconus: Cult of the Wyrm**
 (Dreamcast, 2000, developed by Treyarch and published by Crave Entertainment; USA V1.000,
 `F888` / `T-402`), built on [`dream-recomp`](https://github.com/phobos665/dream-recomp).
-
-The game is playable at real time, and the recompiled path is the fast one: 1.0x with a window and
-3-4.5x headless depending on the scene (3.0x over 20,000 frames of gameplay). The development interpreter remains as a reference and a bring-up tool.
 
 The game's SH-4 code is translated ahead of time into C++, and the Dreamcast hardware
 (file system, controllers, video, sound, memory card) is replaced by native code. The
@@ -15,16 +14,81 @@ result runs from the user's own disc — no disc data or extracted game files ar
 distributed. A prebuilt release contains translated code but no disc assets; see
 `docs/LEGAL.md`.
 
+The game is playable at real time, and the recompiled path is the fast one: 1.0x with a window and
+3-4.5x headless depending on the scene (3.0x over 20,000 frames of gameplay). The first two levels
+have been played end to end; later levels and the credits are not yet verified
+(`docs/12-HANDOVER.md`). The development interpreter remains as a reference and a bring-up tool.
+
 This repository holds the research, the disc tooling, the title configuration and the
 engine fixes. The engine itself is fetched by `setup.ps1` at a pinned commit, so it is
 not vendored here. The project lives at
 <https://github.com/GnomeChimpsky/Draconus-Recomp>.
 
-## Where the work stands
+## Quick start
+
+Two paths: run the prebuilt release, or build it from source.
+
+### Play the release
+
+1. Download the release from
+   [Releases](https://github.com/GnomeChimpsky/Draconus-Recomp/releases) and unzip it anywhere.
+   There is no installer to run.
+2. Have your own dump ready: **Draconus: Cult of the Wyrm**, USA V1.000 (`F888` / `T-402`), as a
+   `.gdi` with its track files or a `.chd`. This is the only game data involved — the boot program
+   is read from your disc — and a dump that is not the USA V1.000 release (another region, or the
+   January 2000 prototype) is refused by hash.
+3. Double-click `DraconusLauncher.exe`, press **Browse...** and pick your dump — it is verified as
+   soon as it is selected — then press **Play**.
+
+The folder is self-contained: `DraconusRecomp.exe`, `draconus.toml`, `SDL3.dll` and the Visual C++
+runtime sit beside the frozen launcher, so a machine with no Python and no compiler can run it
+([Build the release](#build-the-release) lists what ships). What it does need:
+
+| Requirement | Note |
+|---|---|
+| Windows x64 | The project's only target; there is no Linux, macOS or 32-bit build. |
+| A Vulkan-capable GPU driver | The renderer is Vulkan, and `vulkan-1.dll` comes from the driver rather than the bundle. |
+| A dump of your own | USA V1.000, `.gdi` with its tracks or `.chd`, as above. |
+| A gamepad (optional) | The keyboard works out of the box; a pad is mapped on first plug-in. |
+
+Settings and bindings live under `%APPDATA%\dream-recomp` (`launcher.json`, `bindings.txt`), and a
+windowed run creates a blank 128 KB VMU card at `%APPDATA%\dream-recomp\saves\draconus\vmu_a1.bin`,
+so the game's own Save and Load screens work with no setup. Non-ASCII account names, folders and file
+names are supported.
+
+The keyboard works out of the box: arrows are the d-pad, `Z` `X` `A` `S` are A/B/X/Y, `Enter` is
+Start, `Q`/`W` are the triggers, `F1` rebinds, `F10` shows the frame counter, `F12` screenshots and
+`Escape` quits. [Play it](#play-it) has the display, save, controller and modern-controls options.
+
+To start the game without the launcher, from the release folder:
+
+```powershell
+.\DraconusRecomp.exe --config draconus.toml --disc "D:\dumps\draconus.gdi" --window
+```
+
+### Build from source
+
+```powershell
+git clone https://github.com/GnomeChimpsky/Draconus-Recomp DraconusRecomp
+cd DraconusRecomp
+.\setup.ps1 -SkipBuild                          # fetch the engine, patch it, install the title config
+tools\import-disc.bat "D:\dumps\draconus.gdi"   # verify the dump and point the config at it
+.\setup.ps1                                     # extract the boot file from the dump, then build
+.\play-draconus.bat                             # play the translated path
+```
+
+You need Visual Studio 2022 C++ build tools, CMake, Ninja, Python 3.9+, the Vulkan SDK and an SDL3
+build (`-Sdl3Dir <path>\cmake`); [Toolchain](#toolchain) has the notes and `docs/09-TOOLING.md` the
+full list. The build takes about five minutes and generates ~110 MB of C++.
+
+A source build needs a `.gdi`: `dracdisc extract` does not decode CHD. The release runtime reads a
+`.chd` directly, and `chdman extractcd -i game.chd -o game.gdi` converts one for a source build.
+
+## Status
 
 Audio (M6) is verified against Flycast: `docs/13-M6-AUDIO-BASELINE.md` has the captures, the
-spectral match and the ten-minute dropout run. `tools\m6-check.ps1` reruns the gate.
-
+spectral match and the ten-minute dropout run. `tools\m6-check.ps1` reruns the gate. The first
+frame (M3) and the in-game path (M5) are closed too; the open work is the full play-through (M7).
 
 `docs/12-HANDOVER.md` is the state of play: what works, what does not, the list of local
 engine changes, and the next three tasks. The engine-side findings are in
@@ -33,35 +97,28 @@ engine changes, and the next three tasks. The engine-side findings are in
 `docs/17-VMU-SAVES.md` covers the virtual memory card: where the per-user card lives, what
 `tools\vmu.py` reads, and how the game's own save and load screens use it.
 
-## From a fresh clone
+## Toolchain
 
 This repository deliberately does **not** contain the engine or any game data. `setup.ps1` fetches
 the engine at a pinned commit, applies the project's engine patches from `patches/` (ledgered in
-`docs/ENGINE-CHANGES.md`), installs the title configurations, and builds:
+`docs/ENGINE-CHANGES.md`) and installs the title configurations. The two-stage flow in the quick
+start is deliberate: the first run has nothing to translate yet and prepares the tree, and the
+second extracts the boot executable from the dump you imported and builds.
 
-```powershell
-git clone <your fork> DraconusRecomp
-cd DraconusRecomp
-.\setup.ps1 -SkipBuild                              # fetch, patch, install
-tools\import-disc.bat "D:\dumps\draconus.gdi"       # verify + point the config at your dump
-.\setup.ps1                                         # extract the boot file, then build
-```
+`docs/09-TOOLING.md` has the exact versions and the gotchas found while building this tree. SDL3 is
+not fetched: a build under `work\sdl3` is picked up automatically, otherwise pass
+`-Sdl3Dir <path>\cmake`. If PowerShell script execution is blocked, `setup.bat` runs the same script
+with `-ExecutionPolicy Bypass`. `docs/LEGAL.md` covers what you must supply.
 
-The first run says there is nothing to translate yet; the second extracts the boot executable from
-the dump you imported and builds. You need Visual Studio 2022 C++ build tools, CMake, Ninja,
-Python 3.9+, and the Vulkan SDK — see `docs/09-TOOLING.md`; if SDL3 is not in `work\sdl3`, pass
-`-Sdl3Dir <path>\cmake`. If PowerShell script execution is blocked, `setup.bat` runs the same
-script with `-ExecutionPolicy Bypass`. `docs/LEGAL.md` covers what you must supply.
-
-## Release build
+## Build the release
 
 For players, the release is a prebuilt Windows x64 folder: `DraconusLauncher.exe` (with the
-`_internal` folder beside it), `DraconusRecomp.exe`, `draconus.toml`, `SDL3.dll`, and the Visual C++
-runtime DLLs. It needs no
-Python or compiler, but does need a Vulkan-capable GPU driver. The launcher verifies your own
-GDI/CHD and runs the game with `--disc` pointing at it; the boot program is read from your disc, so
-no extracted `1ST_READ.BIN` ships. Non-ASCII account names, disc folders and file names are
-supported.
+`_internal` folder beside it), `DraconusRecomp.exe`, `draconus.toml`, `SDL3.dll`, the Visual C++
+runtime DLLs, the `LICENSE`, `LEGAL.md`, `THIRD-PARTY-NOTICES.md`, `README.md` and `RELEASE-NOTES.md`
+files, and a `BUILD-INFO.txt` recording the commit and build time. It needs no Python or compiler,
+but does need a Vulkan-capable GPU driver. The launcher verifies your own GDI/CHD and runs the game
+with `--disc` pointing at it; the boot program is read from your disc, so no extracted
+`1ST_READ.BIN` ships. Non-ASCII account names, disc folders and file names are supported.
 
 Build the release from a configured tree:
 
@@ -104,23 +161,6 @@ tools\m6-check.ps1
 
 `tools\flycast-m6.ps1` makes the Flycast reference on its own; `tools\audio-check.py` has the
 individual `info`, `align`, `compare`, `gaps` and `raw2wav` commands.
-
-## Graphical launcher
-
-```powershell
-tools\launcher.bat
-```
-
-This is the source-tree launcher; release players run `DraconusLauncher.exe` from the release folder
-instead and need no Python. Pick your `.gdi` or `.chd`, press **Check disc** (it refuses anything
-that is not the USA V1.000 release and saves the path when the config is writable), choose a
-resolution and a path, press **Play**. A read-only config no longer blocks Play: the selected
-image is passed with `--disc` for that session. The logic under the window is the same code the
-scripts use, and it has a headless self-test:
-
-```powershell
-python tools\launcher.py --selftest
-```
 
 ## Import a disc
 
@@ -227,9 +267,20 @@ bindings, not a separate file: `F1` still edits the base layout, and **Classic**
 
 ## Launcher
 
-`tools\launcher.bat` (or `python tools\launcher.py`) opens the graphical launcher: the project's
+Release players run `DraconusLauncher.exe` from the release folder and need no Python. From a source
+tree, `tools\launcher.bat` (or `python tools\launcher.py`) opens the same window: the project's
 emblem, the author credit and a link to the repository on the left, and Game, Graphics and Audio
 tabs on the right.
+
+Pick your `.gdi` or `.chd` with **Browse...**; it is verified as soon as it is selected and the path
+is saved when the config is writable. **Check disc** re-checks the current selection, and Play stays
+disabled until a disc passes. Choose a resolution and an engine path, press **Play**. A read-only
+config does not block Play: the selected image is passed with `--disc` for that session. The logic
+under the window is the same code the scripts use, and it has a headless self-test:
+
+```powershell
+python tools\launcher.py --selftest
+```
 
 * **Graphics** -- the CPU clock at the top (200 MHz is the console; more is an overclock that gives
   a heavy scene more cycles inside each frame, and can affect game speed and audio on some titles),
@@ -257,7 +308,7 @@ tabs on the right.
 The tabs are described by one table in the script (`TABS`) plus their keys in `DEFAULTS`, so adding
 an option is a few lines rather than new layout code. Settings persist under
 `%APPDATA%\dream-recomp\launcher.json` (the pre-release `%APPDATA%\DraconusRecomp` file is read as a
-fallback, so an upgrade keeps its choices); `python tools\launcher.py --selftest` checks the command
+fallback, so an upgrade keeps its choices); `--selftest` checks the command
 each setting produces, and `--smoke` builds the window, checks that selecting 4x and 16:9 really
 produces `--scale 4 --aspect 16:9`, and closes it.
 
@@ -271,7 +322,9 @@ a short screen has to clip the page. On a 1080p display 4x opens at the largest
 4x 16:9 becomes exactly 2560x1440 on a 2560x1440 panel. The game itself always sees its 640x480
 framebuffer, which is why captures and reports say 640x480 at every setting.
 
-## Rebuild the renderer build
+## Build the game by hand
+
+`setup.ps1` runs this for you; the manual commands are here for rebuilds and unusual layouts.
 
 ```powershell
 # Vulkan SDK (winget), SDL3 built locally, then:
@@ -292,9 +345,11 @@ python -m dracdisc extract  "<path to retail .gdi>" -o ..\..\work\extracted
 python -m unittest discover -s tests
 ```
 
-Status: **playable at real time**. The retail game boots, plays its movies, shows its menus, loads
-into gameplay and responds to input — menu navigation and character movement both work — from the
-owner's own disc, deterministically. Translation now covers 9,126 functions (1,071,709
+## Results and evidence
+
+The 1.0 build is playable at real time. The retail game boots, plays its movies, shows its menus,
+loads into gameplay and responds to input — menu navigation and character movement both work — from
+the owner's own disc, deterministically. Translation now covers 9,126 functions (1,071,709
 instructions), up from 3,285: pointer-table discovery is on, and it is what makes the recompiled
 path fast. A 60 s in-game scripted run now reports **0 untranslated calls**, and ten frame
 checkpoints compared with Flycast are within the M5 threshold (`tools\m5-check.ps1`).
@@ -328,6 +383,23 @@ path. The full chain and the dead ends are in `docs/ENGINE-CHANGES.md`.
 
 The earlier retail boot failure was a bug in this project's own multi-sector disc reader,
 fixed and regression-tested. See `docs/11-M2-RESULTS.md`.
+
+## Documentation
+
+The release bundle carries this README, `RELEASE-NOTES.md` and `docs/LEGAL.md`; the rest lives in the
+repository.
+
+| To | Read |
+|---|---|
+| see what 1.0 contains and what is known to be missing | [`RELEASE-NOTES.md`](RELEASE-NOTES.md) |
+| see what works, what does not and what is next | [`docs/12-HANDOVER.md`](docs/12-HANDOVER.md) |
+| follow every engine change, trace and dead end | [`docs/ENGINE-CHANGES.md`](docs/ENGINE-CHANGES.md) |
+| understand the disc, the boot program and the title | [`docs/01-DISC-FORENSICS.md`](docs/01-DISC-FORENSICS.md), [`docs/02-DRACONUS-TECHNICAL.md`](docs/02-DRACONUS-TECHNICAL.md) |
+| set up the toolchain | [`docs/09-TOOLING.md`](docs/09-TOOLING.md) |
+| see the milestone plan | [`docs/07-ROADMAP.md`](docs/07-ROADMAP.md) |
+| check the fidelity gates | [`docs/13-M6-AUDIO-BASELINE.md`](docs/13-M6-AUDIO-BASELINE.md), [`docs/14-M3-M6-FLYCAST-REFERENCE.md`](docs/14-M3-M6-FLYCAST-REFERENCE.md) |
+| work with saves and the VMU | [`docs/17-VMU-SAVES.md`](docs/17-VMU-SAVES.md) |
+| know what may be published | [`docs/LEGAL.md`](docs/LEGAL.md) |
 
 ## Licence
 
