@@ -3116,6 +3116,17 @@ Carried by `patches/0015-gamma.patch`, which touches `render/include/dream/rende
 `runtime/boot/boot_main.cpp`, and applies after 0013. The launcher slider, `-Gamma`, the README and
 the handover row live in this repository.
 
+## Patch 049: texture-count trace for the LOD investigation (2026-11-18)
+
+`DREAM_TRACE_TEXTURE=<tcw hex>` decodes each submitted display list and prints, once per render,
+how many polygons carry that texture: `tex frame N: count`. A character switching geometric detail
+shows a step in that count, which is how the LOD investigation in
+`docs/18-CHARACTER-LOD-INVESTIGATION.md` finds the frame without comparing screenshots. The path is
+env-gated and does nothing unless the variable is set; it adds no work to an ordinary run.
+
+Carried by `patches/0016-lod-trace.patch`, which touches `runtime/boot/boot_main.cpp` and applies
+after 0015.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

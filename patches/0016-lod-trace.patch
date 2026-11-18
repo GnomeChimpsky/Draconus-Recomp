@@ -1,0 +1,28 @@
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index 82100dd..94d3ec8 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -3150,6 +3150,23 @@ int run(int argc, char** argv) {
+             reached_ta = true;
+             throw StopRun{"first TA FIFO data"};
+         };
++    // DREAM_TRACE_TEXTURE=<tcw hex>: count the polygons carrying that texture in every display
++    // list, one line per render. A model that switches detail level shows a step in this count,
++    // which is how the frame of the switch is found without looking at the screen.
++    if (const char* want_tex = std::getenv("DREAM_TRACE_TEXTURE")) {
++        const auto want_tcw = static_cast<std::uint32_t>(std::strtoul(want_tex, nullptr, 16));
++        pvr.on_render = [&, want_tcw](const std::vector<std::uint32_t>& stream) {
++            dream::render::DisplayList dec;
++            dec.feed_stream(stream.data(), stream.size());
++            std::size_t count = 0;
++            for (unsigned l = 0; l < dream::render::kListCount; ++l)
++                for (const dream::render::Polygon& p : dec.frame().lists[l])
++                    if (p.tcw == want_tcw)
++                        ++count;
++            std::printf("tex frame %llu: %zu\n", static_cast<unsigned long long>(sys.spg.frames()),
++                        count);
++        };
++    }
+     // --dump-ta: capture one render's parameter stream for the renderer's tests. By default the
+     // first substantial one is taken, since the earliest renders are often near-empty.
+     if (!dump_ta.empty() || dump_ta_at_frame) {
