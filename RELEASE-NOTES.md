@@ -5,19 +5,55 @@ Draconus-Recomp is a native Windows x64 static recompilation of *Draconus: Cult 
 disc and ships no game data. The [README](README.md) is the manual; the
 [quick start](README.md#quick-start) is the shortest way in.
 
-## Unreleased
+## 1.1.0 — 2026-11-18
 
+The first update. Windows x64; the requirements and install steps are the same as 1.0, and the
+launcher can now update itself in place.
+
+### New
+
+* **Field of view.** `--fov DEG` replaces the title's vertical field of view; the game's own is 90°,
+  the launcher offers 60–120°, and the title TOML names the FOV constant at `0x0C098648`. Above 90°
+  the game can cull geometry at the far screen edges, so models may pop in when the camera turns —
+  the launcher warns under the slider. The aspect and the FOV are separate projection inputs, so
+  `-Fov 75` composes with `-Aspect 21:9`, and the item wheel's projected 3D model is scaled back
+  about the wheel so the item stays inside its ring at any FOV.
+* **Brightness / gamma.** `--gamma VALUE` (0.5–2.0; 1.0 is the original) applies a display curve to
+  the finished picture at presentation, and the frame counter's overlay takes the same curve. 1.0
+  takes the exact original path, so the default present is byte-identical, and the guest framebuffer
+  is untouched: F11 and F12 still capture the unmodified game. The launcher's **Brightness / gamma**
+  slider is 50–200%, and `--screenshot-presented` shows the adjusted screen.
 * **The launcher names its version and updates itself.** The window title and the left panel show
   the version, and **Check for updates** asks GitHub for the latest published release once a day (or
-  whenever it is pressed). When one exists it becomes **Update to 1.1**: the release's Windows zip
-  is downloaded, checked against the SHA-256 the release publishes when it has one, unpacked, and
-  installed in place. The player's disc path in `draconus.toml` is kept and everything under
+  whenever it is pressed). When one exists the button names the new version: the release's Windows
+  zip is downloaded, checked against the SHA-256 the release publishes when it has one, unpacked,
+  and installed in place. The player's disc path in `draconus.toml` is kept and everything under
   `%APPDATA%\dream-recomp` — settings, controller bindings and the memory card — is untouched. A
   PowerShell helper waits for the launcher to close before replacing the executable and its DLLs,
   holds the previous files until the copy has succeeded, and restores them if it has not. Source
   trees are sent to the releases page (their files come from git), and a read-only release folder
-  gets the manual route instead. `--check-updates` prints the comparison without opening the
-  window, and `--version` prints the current version.
+  gets the manual route instead. `--check-updates` prints the comparison without opening the window,
+  and `--version` prints the current version.
+* **Three levels, and an answer on character LOD.** The first three levels have been played end to
+  end from the owner's own disc (1.0 covered two); later levels and the credits remain open. The
+  character LOD that breaks up non-player characters beyond roughly six units is the retail game's
+  own behaviour — Flycast submits the same reduced mesh — so the recomp is faithful rather than
+  faulty. `docs/18-CHARACTER-LOD-INVESTIGATION.md` records the measurements and the five rejected
+  causes; `DREAM_TRACE_TEXTURE` is the trace that came out of it.
+
+### Upgrading from 1.0
+
+Unzip over the old folder, or press **Check for updates** in the launcher. The disc path in
+`draconus.toml` is kept and `%APPDATA%\dream-recomp` (settings, bindings, memory card) is untouched;
+a pre-1.0 settings file is still read as a fallback.
+
+### Known limitations
+
+* **The play-through is not finished.** The first three levels are played; later levels, the credits
+  and any coverage gap they expose remain (M7).
+* **FOV above 90° can pop models** at the screen edges, because the game culls by its original FOV.
+* **Character LOD** beyond about six units is the retail behaviour, not a recomp fault.
+* **Windows x64 only**, unsigned executables, no game data; the 1.0 notes have the rest.
 
 ## 1.0 — 2026-11-17
 

@@ -2,7 +2,7 @@
 
 # Draconus-Recomped
 
-**Version 1.0** — first public release ([release notes](RELEASE-NOTES.md)).
+**Version 1.1.0** — current release ([release notes](RELEASE-NOTES.md)).
 
 A native Windows x64 static recompilation of **Draconus: Cult of the Wyrm**
 (Dreamcast, 2000, developed by Treyarch and published by Crave Entertainment; USA V1.000,
@@ -373,7 +373,7 @@ python -m unittest discover -s tests
 
 ## Results and evidence
 
-The 1.0 build is playable at real time. The retail game boots, plays its movies, shows its menus,
+The 1.1.0 build is playable at real time. The retail game boots, plays its movies, shows its menus,
 loads into gameplay and responds to input — menu navigation and character movement both work — from
 the owner's own disc, deterministically. Translation now covers 9,126 functions (1,071,709
 instructions), up from 3,285: pointer-table discovery is on, and it is what makes the recompiled
@@ -417,7 +417,7 @@ repository.
 
 | To | Read |
 |---|---|
-| see what 1.0 contains and what is known to be missing | [`RELEASE-NOTES.md`](RELEASE-NOTES.md) |
+| see what 1.1.0 contains and what is known to be missing | [`RELEASE-NOTES.md`](RELEASE-NOTES.md) |
 | see what works, what does not and what is next | [`docs/12-HANDOVER.md`](docs/12-HANDOVER.md) |
 | follow every engine change, trace and dead end | [`docs/ENGINE-CHANGES.md`](docs/ENGINE-CHANGES.md) |
 | understand the disc, the boot program and the title | [`docs/01-DISC-FORENSICS.md`](docs/01-DISC-FORENSICS.md), [`docs/02-DRACONUS-TECHNICAL.md`](docs/02-DRACONUS-TECHNICAL.md) |

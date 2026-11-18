@@ -83,7 +83,7 @@ RELEASES_PAGE = REPOSITORY + "/releases"
 # compared with the latest published release; bump it when a release is cut (tools/build-release.ps1
 # copies it into BUILD-INFO.txt). The update check reads the latest *published* release from GitHub,
 # so a draft or pre-release is never offered.
-VERSION = "1.0"
+VERSION = "1.1.0"
 RELEASES_API = "https://api.github.com/repos/GnomeChimpsky/Draconus-Recomp/releases/latest"
 GAME_ID = "draconus"
 
