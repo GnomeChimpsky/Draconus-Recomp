@@ -105,7 +105,6 @@ DEFAULTS = {
     "audio_buffer": 0,
     "path": "translated",
     "controls": "classic",
-    "look_invert": False,
     "gamma": 100,
 }
 
@@ -532,8 +531,6 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
         cmd += ["--interpret"]
     if s.get("controls", "classic") == "modern":
         cmd += ["--controls", "modern"]
-    if s.get("look_invert"):
-        cmd += ["--look-invert"]
     gamma = int(s.get("gamma") or 100)
     if gamma != 100:
         cmd += ["--gamma", "%.2f" % (gamma / 100.0)]
@@ -645,9 +642,6 @@ TABS = [
          "help": "Modern enables twin stick controls: left stick moves and strafes, right stick "
                  "turns. Left trigger blocks, right trigger attacks. In this mode you use d-pad "
                  "instead of left stick to navigate menus."},
-        {"kind": "check", "key": "look_invert", "label": "Invert right-stick look",
-         "help": "The right stick's vertical axis looks up and down and eases back to centre. "
-                 "Turn this on if up feels down."},
         {"kind": "slider", "key": "gamma", "label": "Brightness / gamma", "min": 50, "max": 200,
          "suffix": "%",
          "help": "Gamma curve on the finished picture: 100% is the original; above it lifts dark "
@@ -1301,12 +1295,6 @@ def selftest() -> int:
     if "--fov" in cmd:
         failures.append("default field of view still passed --fov")
 
-    cmd = build_command(image, dict(base, look_invert=True))
-    expect("invert look", cmd, ["--look-invert"])
-    cmd = build_command(image, dict(base))
-    if "--look-invert" in cmd:
-        failures.append("default look direction passed --look-invert")
-
     cmd = build_command(image, dict(base, gamma=125))
     expect("brightness / gamma", cmd, ["--gamma", "1.25"])
     cmd = build_command(image, dict(base))
@@ -1425,12 +1413,6 @@ def check_ui(app: Launcher) -> list[str]:
     cmd = build_command(app.image_path or "disc.gdi", app.collect())
     if "--fov" in cmd:
         failures.append("90-degree field of view kept --fov: %s" % " ".join(cmd))
-
-    app.vars["look_invert"].set(True)
-    cmd = build_command(app.image_path or "disc.gdi", app.collect())
-    if "--look-invert" not in cmd:
-        failures.append("invert-look checkbox lost --look-invert: %s" % " ".join(cmd))
-    app.vars["look_invert"].set(False)
 
     app.vars["gamma"].set(125)
     cmd = build_command(app.image_path or "disc.gdi", app.collect())

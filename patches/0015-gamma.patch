@@ -136,10 +136,10 @@ index 55eea52..a60d41c 100644
          push.scale[0] = shown_aspect / target_aspect;
      } else {
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 030851e..4dd4d40 100644
+index 4b2cccb..94d3ec8 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
-@@ -630,6 +630,7 @@ struct Live {
+@@ -629,6 +629,7 @@ struct Live {
              error = presenter.error();
              return false;
          }
@@ -147,28 +147,28 @@ index 030851e..4dd4d40 100644
          renderer.set_memory(memory_.vram(), dream::mem::DcMemory::kVramSize,
                              pvr_.reg_block() + 0x1000 / 4, palette_format());
          // Collect every video-memory write the guest makes; the cache drops the covered textures
-@@ -1948,6 +1949,7 @@ struct Live {
-     float look_ndc_x = 0.75f, look_ndc_y = 1.0f;
-     float look_fixed = 0.0f;
-     bool look_invert = false;
+@@ -1910,6 +1911,7 @@ struct Live {
+     // 90 degrees = 1). HUD panels stay in screen space, so their projected 3D contents are scaled
+     // back by this in compress_screen_overlays.
+     float hud_fov_scale = 1.0f;
 +    float gamma = 1.0f;
      // --frame-interpolation: between two guest frames, draw the geometry halfway between them
      // instead of presenting the same picture twice. The history is the decoded vertex stream, not a
      // copy of the finished image, so the intermediate is rasterised and depth-tested like any other
-@@ -2519,6 +2521,9 @@ void usage(const char* argv0, std::FILE* out) {
-         "                         and checking. Without it the right stick's vertical axis drives a\n"
-         "                         soft look that eases back to centre; --look-invert flips it.\n"
-         "  --look-invert          invert the right stick's look direction\n"
+@@ -2477,6 +2479,9 @@ void usage(const char* argv0, std::FILE* out) {
+         "                         title's TOML names the FOV hook; without one --fov is refused.\n"
+         "                         This composes with --aspect: the aspect and the FOV are separate\n"
+         "                         inputs to the projection.\n"
 +        "  --gamma VALUE          display gamma for the finished picture, 0.5 to 2.0 (1.0 is the\n"
 +        "                         title's own). Above 1 lifts the dark and mid tones. Presentation\n"
 +        "                         only: an F11 capture keeps the guest's unmodified framebuffer.\n"
          "  --present-rate N       present N frames a second while the guest keeps its 60 Hz\n"
          "                         logic; the extra presents repeat a picture unless\n"
          "                         --frame-interpolation is on\n"
-@@ -2727,6 +2732,10 @@ int run(int argc, char** argv) {
-     // axis (unbound by the Dreamcast layout) drives the soft look. --look-invert flips the stick.
-     double look_degrees = 0.0;
-     bool look_set = false, look_invert = false;
+@@ -2681,6 +2686,10 @@ int run(int argc, char** argv) {
+     // both directions instead of squeezing one axis. Unset leaves the title's own value alone.
+     double fov = 0.0;
+     bool fov_set = false;
 +    // --gamma VALUE: a display curve on the finished picture. 1 is the title's own output; above
 +    // 1 lifts dark and mid tones, below 1 deepens them. It never touches the guest framebuffer.
 +    double gamma = 1.0;
@@ -176,10 +176,10 @@ index 030851e..4dd4d40 100644
      // --rtc-seed N: a fixed console clock, so two runs of the same build do the same thing and can
      // be compared. Any non-zero value will do; the number itself only changes the date a title
      // shows.
-@@ -2855,6 +2864,17 @@ int run(int argc, char** argv) {
+@@ -2796,6 +2805,17 @@ int run(int argc, char** argv) {
+             fov = value;
+             fov_set = true;
          }
-         else if (!std::strcmp(argv[i], "--look-invert"))
-             look_invert = true;
 +        else if (!std::strcmp(argv[i], "--gamma") && i + 1 < argc) {
 +            const char* text = argv[++i];
 +            char* end = nullptr;
@@ -194,16 +194,16 @@ index 030851e..4dd4d40 100644
          else if (!std::strcmp(argv[i], "--interpret"))
              interpret_all = true;
          else if (!std::strcmp(argv[i], "--wav") && i + 1 < argc)
-@@ -3103,6 +3123,8 @@ int run(int argc, char** argv) {
+@@ -3044,6 +3064,8 @@ int run(int argc, char** argv) {
      } else if (fov_set) {
          std::printf("fov: %.1f degrees (the title's own value; no patch)\n", fov);
      }
 +    if (gamma_set)
 +        std::printf("gamma: %.3f (presentation only; the guest framebuffer is unchanged)\n", gamma);
-     // The look offset reconstructs a camera ray from a projected vertex, so it needs the same x/y
-     // projection scales the title used: the 0.75/1.0 4:3 pair, the FOV factor and the widescreen
-     // aspect. They are independent of the HUD scale because the look pitch moves the world only.
-@@ -3499,6 +3521,8 @@ int run(int argc, char** argv) {
+     std::unique_ptr<dream::gdrom::Disc> disc;
+     if (cfg.disc_image) {
+         disc = dream::gdrom::open_disc(*cfg.disc_image, err);
+@@ -3427,6 +3449,8 @@ int run(int argc, char** argv) {
              display = dream::render::vk::DisplayMode::Borderless;
          else if (display_mode == "exclusive")
              display = dream::render::vk::DisplayMode::Exclusive;

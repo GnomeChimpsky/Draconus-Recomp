@@ -3087,46 +3087,6 @@ game_config.h`, `translator/src/config/game_config.cpp`, `runtime/boot/boot_main
 `render/src/view_main.cpp` and `render/tests/test_display_list.cpp`, and applies after 0012. The
 title's `[camera]` block and the launcher slider live in this repository.
 
-## Patch 047: a soft right-stick look offset (2026-11-17)
-
-The title's chase camera takes yaw from the stick but has no player-facing pitch: the Dreamcast
-pad has one stick, and the camera's vertical angle is the game's. A second stick can still add a
-look offset without touching the game's camera. The PVR receives vertices already projected to
-screen space, but screen x/y and `1/w` still identify the camera-space ray: with the projection's
-x/y scales, `dx = (x - cx) / (x_scale * cx)`, `dy = (y - cy) / (y_scale * cy)`, the ray is
-`(dx, dy, 1)`. Rotating it about the camera's horizontal axis and projecting it with the same
-scales pitches the picture; `z` becomes `z / dz'`.
-
-This is deliberately a **renderer** offset, applied in `apply_camera_pitch` after
-`compress_screen_overlays`. The game's camera, collision, visibility and cutscene logic are
-untouched; there is no per-frame guest-memory poke and no generated-code hook. Screen-space quads
-(HUD, text, fades, the background plane) have no depth span and stay on the glass. A HUD panel's
-projected 3D contents are identified with the same panel heuristic as the FOV work and skipped, so
-the item wheel's model stays in its ring instead of sliding with the world. The pitch is capped at
-20 degrees, has a 15% stick deadzone, and eases toward the stick and back to centre (0.2 per
-render); the sign is inverted by **Invert right-stick look** on the Game tab, `-LookInvert`, or
-`--look-invert`.
-
-The input is the raw right-stick Y axis, not a binding: the Dreamcast layout never used it, so
-Modern and Classic both leave it free. SDL is read first; the XInput fallback returns the same
-convention. At the engine, `--look DEG` applies a fixed pitch (-45..45) for captures and checking;
-`dream_render_view --look DEG --ndc-x X --ndc-y Y` reproduces it on a captured frame. The
-projection scales come from the title's 0.75/1.0 pair, the FOV factor and the widescreen aspect,
-so the offset composes with both.
-
-With no stick input and no `--look`, `look_pitch` stays zero and the render path is unchanged:
-presented frame 5000 with `work\walk.replay` is still byte-identical to the pre-look capture
-(SHA-256 `38DF6CCA…C5EB2`). A render test covers a pitched 3D triangle, an untouched screen-space
-quad and an untouched panel model. The look can expose the level's edge/backdrop when pitched away
-from the authored view, the same region-visibility limit the FOV warning describes.
-
-Carried by `patches/0014-look-offset.patch`, which adds `render/include/dream/render/camera_look.h`,
-`render/src/camera_look.cpp`, `render/tests/test_camera_look.cpp`, and touches
-`render/CMakeLists.txt`, `runtime/boot/boot_main.cpp`, `render/src/view_main.cpp`,
-`render/include/dream/render/vk/window.h` and `render/src/vk/window.cpp`, and applies after 0013.
-The launcher checkbox, the `-LookInvert` switch and this repository's README/handover rows live in
-this repository.
-
 ## Patch 048: brightness / gamma at presentation (2026-11-18)
 
 Dark scenes in this title are dark on a modern panel, and the guest has no display setting for it.
@@ -3153,7 +3113,7 @@ the three levels in the test capture were checked (mean 29.7 at 1.0, 56.1 at 1.5
 
 Carried by `patches/0015-gamma.patch`, which touches `render/include/dream/render/vk/present.h`,
 `render/src/vk/present.cpp`, `render/shaders/{present,overlay}.{vert,frag}` and
-`runtime/boot/boot_main.cpp`, and applies after 0014. The launcher slider, `-Gamma`, the README and
+`runtime/boot/boot_main.cpp`, and applies after 0013. The launcher slider, `-Gamma`, the README and
 the handover row live in this repository.
 
 ## Validation against the engine's own tests (2026-11-06)
