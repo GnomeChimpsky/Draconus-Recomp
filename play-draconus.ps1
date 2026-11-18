@@ -6,6 +6,7 @@
 #   .\play-draconus.ps1 -Interpret         # the development interpreter, for comparison
 #   .\play-draconus.ps1 -ModernControls    # left stick strafe, right stick turn, LT block, RT attack
 #   .\play-draconus.ps1 -LookInvert        # flip the right stick's soft look direction
+#   .\play-draconus.ps1 -Gamma 1.25        # lift the picture's dark and mid tones
 #   .\play-draconus.ps1 -Vmu .\card.vmu    # attach a particular memory card
 #   .\play-draconus.ps1 --max-frames 600   # extra args pass straight through
 #
@@ -57,6 +58,10 @@ param(
     # -LookInvert: the right stick's vertical axis is a soft look offset that eases back to centre.
     # It looks up when pushed up; this flips that if the direction feels backwards.
     [switch]$LookInvert,
+    # -Gamma 1.25: display gamma for the finished picture. 1.0 is the title's own output; above it
+    # lifts dark and mid tones, below it deepens them. It is presentation only: F11/F12 keep the
+    # guest's own framebuffer.
+    [ValidateRange(0.5, 2.0)][double]$Gamma = 1.0,
     # -Vmu FILE: attach this 128 KB card image. Without it the default per-user card is used
     # (%APPDATA%\dream-recomp\saves\draconus\vmu_a1.bin), created on the first run.
     [string]$Vmu = "",
@@ -104,6 +109,10 @@ if ($Interpolate) { $arguments += "--frame-interpolation" }
 if ($DisplayMode -ne "windowed") { $arguments += @("--display", $DisplayMode) }
 if ($ModernControls) { $arguments += @("--controls", "modern") }
 if ($LookInvert) { $arguments += "--look-invert" }
+if ($Gamma -ne 1.0) {
+    $gammaText = $Gamma.ToString([Globalization.CultureInfo]::InvariantCulture)
+    $arguments += @("--gamma", $gammaText)
+}
 if ($Vmu) { $arguments += @("--vmu", $Vmu) }
 if ($Interpret -and -not $Translated) { $arguments += "--interpret" }
 if ($Extra) { $arguments += $Extra }

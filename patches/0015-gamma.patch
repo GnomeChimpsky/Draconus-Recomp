@@ -1,0 +1,214 @@
+diff --git a/render/include/dream/render/vk/present.h b/render/include/dream/render/vk/present.h
+index 6efd601..b5357af 100644
+--- a/render/include/dream/render/vk/present.h
++++ b/render/include/dream/render/vk/present.h
+@@ -77,6 +77,11 @@ public:
+     // the cleared background showing.
+     bool draw(VkCommandBuffer cmd, VkExtent2D target);
+ 
++    // Display gamma for the finished picture: 1 is the title's own output, above 1 lifts the dark
++    // and mid tones, below 1 deepens them. Applied in the presentation shader (and to the frame
++    // counter's rectangles), so it never changes the guest's framebuffer or an F11 capture.
++    void set_gamma(float gamma) noexcept { gamma_ = gamma > 0.0f ? gamma : 1.0f; }
++
+     // The sampler's own filter, which now only decides how a *magnified* image is stretched: the
+     // guest's pixels shown as pixels, or blurred between them. Minification no longer goes through
+     // it at all -- draw() measures how many source pixels each drawn pixel covers and the fragment
+@@ -110,6 +115,7 @@ private:
+     VkDescriptorSet set_ = VK_NULL_HANDLE;
+     VkPipelineLayout layout_ = VK_NULL_HANDLE;
+     VkPipeline pipeline_ = VK_NULL_HANDLE;
++    float gamma_ = 1.0f;
+     VkSampler sampler_ = VK_NULL_HANDLE;
+     VkImage image_ = VK_NULL_HANDLE;
+     VkDeviceMemory memory_ = VK_NULL_HANDLE;
+diff --git a/render/shaders/overlay.frag b/render/shaders/overlay.frag
+index b3cf187..416e41a 100644
+--- a/render/shaders/overlay.frag
++++ b/render/shaders/overlay.frag
+@@ -6,6 +6,7 @@ layout(push_constant) uniform Push {
+     vec2 offset;
+     vec2 texel;
+     vec2 taps;
++    float gamma;
+ } push;
+ 
+ layout(location = 0) in vec4 v_colour;
+@@ -13,5 +14,10 @@ layout(location = 0) in vec4 v_colour;
+ layout(location = 0) out vec4 out_colour;
+ 
+ void main() {
+-    out_colour = v_colour;
++    // The image around the counter has already been through the same curve, so the counter has to
++    // take it too or it stays noticeably darker than the picture it sits on.
++    vec3 rgb = v_colour.rgb;
++    if (push.gamma != 1.0)
++        rgb = pow(max(rgb, vec3(0.0)), vec3(1.0 / push.gamma));
++    out_colour = vec4(rgb, v_colour.a);
+ }
+diff --git a/render/shaders/overlay.vert b/render/shaders/overlay.vert
+index fe3e8b7..e73e6e0 100644
+--- a/render/shaders/overlay.vert
++++ b/render/shaders/overlay.vert
+@@ -11,6 +11,7 @@ layout(push_constant) uniform Push {
+     vec2 offset;
+     vec2 texel;
+     vec2 taps;
++    float gamma;
+ } push;
+ 
+ layout(location = 0) in vec2 in_pos;
+diff --git a/render/shaders/present.frag b/render/shaders/present.frag
+index 225222b..0f3c93e 100644
+--- a/render/shaders/present.frag
++++ b/render/shaders/present.frag
+@@ -18,6 +18,7 @@ layout(push_constant) uniform Push {
+     vec2 offset;
+     vec2 texel;  // one source texel in texture coordinates
+     vec2 taps;   // source texels covered per output pixel, per axis; 1 when magnifying
++    float gamma;
+ } push;
+ 
+ layout(location = 0) in vec2 v_uv;
+@@ -27,6 +28,15 @@ layout(location = 0) out vec4 colour;
+ // looking at. Beyond that the extra taps buy less than they cost.
+ const int kMaxTaps = 4;
+ 
++// Gamma is a display curve on the finished picture: above 1 lifts the dark and mid tones without
++// clipping the whites, below 1 deepens them. 1 is the title's own output and takes the exact path
++// below, so an untouched capture stays byte-identical.
++vec3 apply_gamma(vec3 rgb) {
++    if (push.gamma == 1.0)
++        return rgb;
++    return pow(max(rgb, vec3(0.0)), vec3(1.0 / push.gamma));
++}
++
+ void main() {
+     // The fullscreen triangle is larger than the screen, and a letterboxed or pillarboxed draw
+     // scales it so the image covers only part of it. Outside that part the interpolated uv runs
+@@ -41,7 +51,7 @@ void main() {
+     // one tap and get nothing.
+     const ivec2 n = ivec2(clamp(ceil(push.taps - 0.05), vec2(1.0), vec2(float(kMaxTaps))));
+     if (n.x == 1 && n.y == 1) {
+-        colour = vec4(texture(image, v_uv).rgb, 1.0);
++        colour = vec4(apply_gamma(texture(image, v_uv).rgb), 1.0);
+         return;
+     }
+     // Taps are spread one source texel apart and centred on the output pixel, so the footprint is
+@@ -51,5 +61,5 @@ void main() {
+     for (int y = 0; y < n.y; ++y)
+         for (int x = 0; x < n.x; ++x)
+             sum += texture(image, first + vec2(float(x), float(y)) * push.texel).rgb;
+-    colour = vec4(sum / float(n.x * n.y), 1.0);
++    colour = vec4(apply_gamma(sum / float(n.x * n.y)), 1.0);
+ }
+diff --git a/render/shaders/present.vert b/render/shaders/present.vert
+index b69dc14..6cfa9f7 100644
+--- a/render/shaders/present.vert
++++ b/render/shaders/present.vert
+@@ -10,6 +10,7 @@ layout(push_constant) uniform Push {
+     vec2 offset;
+     vec2 texel;
+     vec2 taps;
++    float gamma;
+ } push;
+ 
+ layout(location = 0) out vec2 v_uv;
+diff --git a/render/src/vk/present.cpp b/render/src/vk/present.cpp
+index 55eea52..a60d41c 100644
+--- a/render/src/vk/present.cpp
++++ b/render/src/vk/present.cpp
+@@ -18,6 +18,7 @@ struct PushConstants {
+     float offset[2];
+     float texel[2];  // one source texel in texture coordinates
+     float taps[2];   // source texels per output pixel, per axis; 1 or less when magnifying
++    float gamma;     // display curve; 1 is the title's own output
+ };
+ 
+ VkShaderModule make_module(VkDevice device, const std::uint32_t* code, std::size_t bytes) {
+@@ -520,7 +521,7 @@ bool Presenter::draw(VkCommandBuffer cmd, VkExtent2D target) {
+     const float shown_aspect = content_aspect > 0.0f ? content_aspect : image_aspect;
+     const float target_aspect =
+         static_cast<float>(target.width) / static_cast<float>(target.height);
+-    PushConstants push{{1.0f, 1.0f}, {0.0f, 0.0f}, {0.0f, 0.0f}, {1.0f, 1.0f}};
++    PushConstants push{{1.0f, 1.0f}, {0.0f, 0.0f}, {0.0f, 0.0f}, {1.0f, 1.0f}, gamma_};
+     if (target_aspect > shown_aspect) {
+         push.scale[0] = shown_aspect / target_aspect;
+     } else {
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index 030851e..4dd4d40 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -630,6 +630,7 @@ struct Live {
+             error = presenter.error();
+             return false;
+         }
++        presenter.set_gamma(gamma);
+         renderer.set_memory(memory_.vram(), dream::mem::DcMemory::kVramSize,
+                             pvr_.reg_block() + 0x1000 / 4, palette_format());
+         // Collect every video-memory write the guest makes; the cache drops the covered textures
+@@ -1948,6 +1949,7 @@ struct Live {
+     float look_ndc_x = 0.75f, look_ndc_y = 1.0f;
+     float look_fixed = 0.0f;
+     bool look_invert = false;
++    float gamma = 1.0f;
+     // --frame-interpolation: between two guest frames, draw the geometry halfway between them
+     // instead of presenting the same picture twice. The history is the decoded vertex stream, not a
+     // copy of the finished image, so the intermediate is rasterised and depth-tested like any other
+@@ -2519,6 +2521,9 @@ void usage(const char* argv0, std::FILE* out) {
+         "                         and checking. Without it the right stick's vertical axis drives a\n"
+         "                         soft look that eases back to centre; --look-invert flips it.\n"
+         "  --look-invert          invert the right stick's look direction\n"
++        "  --gamma VALUE          display gamma for the finished picture, 0.5 to 2.0 (1.0 is the\n"
++        "                         title's own). Above 1 lifts the dark and mid tones. Presentation\n"
++        "                         only: an F11 capture keeps the guest's unmodified framebuffer.\n"
+         "  --present-rate N       present N frames a second while the guest keeps its 60 Hz\n"
+         "                         logic; the extra presents repeat a picture unless\n"
+         "                         --frame-interpolation is on\n"
+@@ -2727,6 +2732,10 @@ int run(int argc, char** argv) {
+     // axis (unbound by the Dreamcast layout) drives the soft look. --look-invert flips the stick.
+     double look_degrees = 0.0;
+     bool look_set = false, look_invert = false;
++    // --gamma VALUE: a display curve on the finished picture. 1 is the title's own output; above
++    // 1 lifts dark and mid tones, below 1 deepens them. It never touches the guest framebuffer.
++    double gamma = 1.0;
++    bool gamma_set = false;
+     // --rtc-seed N: a fixed console clock, so two runs of the same build do the same thing and can
+     // be compared. Any non-zero value will do; the number itself only changes the date a title
+     // shows.
+@@ -2855,6 +2864,17 @@ int run(int argc, char** argv) {
+         }
+         else if (!std::strcmp(argv[i], "--look-invert"))
+             look_invert = true;
++        else if (!std::strcmp(argv[i], "--gamma") && i + 1 < argc) {
++            const char* text = argv[++i];
++            char* end = nullptr;
++            const double value = std::strtod(text, &end);
++            if (end == text || *end != '\0' || value < 0.5 || value > 2.0) {
++                std::fprintf(stderr, "--gamma takes a value from 0.5 to 2.0 (1.0 is the title's own)\n");
++                return 2;
++            }
++            gamma = value;
++            gamma_set = true;
++        }
+         else if (!std::strcmp(argv[i], "--interpret"))
+             interpret_all = true;
+         else if (!std::strcmp(argv[i], "--wav") && i + 1 < argc)
+@@ -3103,6 +3123,8 @@ int run(int argc, char** argv) {
+     } else if (fov_set) {
+         std::printf("fov: %.1f degrees (the title's own value; no patch)\n", fov);
+     }
++    if (gamma_set)
++        std::printf("gamma: %.3f (presentation only; the guest framebuffer is unchanged)\n", gamma);
+     // The look offset reconstructs a camera ray from a projected vertex, so it needs the same x/y
+     // projection scales the title used: the 0.75/1.0 4:3 pair, the FOV factor and the widescreen
+     // aspect. They are independent of the HUD scale because the look pitch moves the world only.
+@@ -3499,6 +3521,8 @@ int run(int argc, char** argv) {
+             display = dream::render::vk::DisplayMode::Borderless;
+         else if (display_mode == "exclusive")
+             display = dream::render::vk::DisplayMode::Exclusive;
++        // Before start(), because start() creates the presenter and hands it the gamma.
++        live->gamma = static_cast<float>(gamma);
+         if (!live->start(
+                 scale, validation,
+                 cfg.title.empty() ? std::string("Dream Recomp") : cfg.title + " - Dream Recomp",

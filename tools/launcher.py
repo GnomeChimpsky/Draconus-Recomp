@@ -106,6 +106,7 @@ DEFAULTS = {
     "path": "translated",
     "controls": "classic",
     "look_invert": False,
+    "gamma": 100,
 }
 
 
@@ -533,6 +534,9 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
         cmd += ["--controls", "modern"]
     if s.get("look_invert"):
         cmd += ["--look-invert"]
+    gamma = int(s.get("gamma") or 100)
+    if gamma != 100:
+        cmd += ["--gamma", "%.2f" % (gamma / 100.0)]
     if not s.get("audio", True):
         cmd += ["--no-audio"]
     else:
@@ -644,6 +648,11 @@ TABS = [
         {"kind": "check", "key": "look_invert", "label": "Invert right-stick look",
          "help": "The right stick's vertical axis looks up and down and eases back to centre. "
                  "Turn this on if up feels down."},
+        {"kind": "slider", "key": "gamma", "label": "Brightness / gamma", "min": 50, "max": 200,
+         "suffix": "%",
+         "help": "Gamma curve on the finished picture: 100% is the original; above it lifts dark "
+                 "and mid tones, below it deepens them. This is a display setting, so F11 and F12 "
+                 "still capture the game's own framebuffer rather than the adjusted screen."},
         {"kind": "radio", "key": "path", "label": "Engine path",
          "values": [("Translated - fast", "translated"),
                     ("Interpreter - reference, slow", "interpreter")],
@@ -1298,6 +1307,12 @@ def selftest() -> int:
     if "--look-invert" in cmd:
         failures.append("default look direction passed --look-invert")
 
+    cmd = build_command(image, dict(base, gamma=125))
+    expect("brightness / gamma", cmd, ["--gamma", "1.25"])
+    cmd = build_command(image, dict(base))
+    if "--gamma" in cmd:
+        failures.append("default gamma still passed --gamma")
+
     # The tab spec must cover every default, or a control would be silently unset.
     keys = set()
     for _, controls in TABS:
@@ -1416,6 +1431,12 @@ def check_ui(app: Launcher) -> list[str]:
     if "--look-invert" not in cmd:
         failures.append("invert-look checkbox lost --look-invert: %s" % " ".join(cmd))
     app.vars["look_invert"].set(False)
+
+    app.vars["gamma"].set(125)
+    cmd = build_command(app.image_path or "disc.gdi", app.collect())
+    if "--gamma" not in cmd or "1.25" not in cmd:
+        failures.append("brightness / gamma slider lost --gamma 1.25: %s" % " ".join(cmd))
+    app.vars["gamma"].set(100)
 
     # The volume slider must reach the command line; a Scale that only moves its own handle is
     # the same defect as a combo that only changes its text.

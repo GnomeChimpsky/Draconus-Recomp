@@ -224,7 +224,9 @@ loading cards are flat 2D art, keep their 4:3 shape and are pillarboxed inside t
 60-120 is the range the launcher offers); it shows more or less world above and below without
 changing the HUD, and composes with widescreen because the aspect and the FOV are separate
 projection inputs. The item wheel's model is scaled back about the wheel so the item stays inside
-its ring at any FOV. `-Scale 2` draws at twice the guest's resolution and
+its ring at any FOV. `-Gamma 1.25` sets the finished picture's display gamma (1.0 is the title's own;
+above 1.0 lifts the dark and mid tones, below 1.0 deepens them); it is applied at presentation, so
+F11 and F12 keep the guest's unmodified framebuffer. `-Scale 2` draws at twice the guest's resolution and
 opens the window at that size (4x at 16:9 is 2560x1440, shrunk to fit a smaller screen), and
 `-DisplayMode` chooses **windowed**, **borderless** (desktop fullscreen at the display's own size,
 which changes no display mode) or **exclusive** (one of the display's fullscreen modes, which can
@@ -311,7 +313,11 @@ python tools\launcher.py --selftest
   the dropdown opens) and an audio buffer/latency choice. `--wav` still records the mixer's
   full-scale output regardless of the playback volume.
 * **Game** -- **Controls** (Classic Dreamcast pad, or Modern: left stick strafe, right stick
-  turn, LT block, RT attack), translated or interpreter engine path, and the game disc.
+  turn, LT block, RT attack), **Invert right-stick look**, **Brightness / gamma** (50-200%;
+  100% is the original), translated or interpreter engine path, and the game disc. The gamma is a
+  display curve on the finished picture: above 100% lifts dark and mid tones, below 100% deepens
+  them. It is applied when the picture is presented, so F11 and F12 still capture the game's own
+  framebuffer; `--screenshot-presented` shows the adjusted screen when comparing.
 * **Bottom bar** -- **Open saves folder** and **Open settings folder** open the per-user card's
   folder (`%APPDATA%\dream-recomp\saves\draconus`) and the per-user root
   (`%APPDATA%\dream-recomp`, with `launcher.json`, `bindings.txt` and `saves`). Saving and loading

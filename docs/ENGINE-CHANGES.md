@@ -3127,6 +3127,35 @@ Carried by `patches/0014-look-offset.patch`, which adds `render/include/dream/re
 The launcher checkbox, the `-LookInvert` switch and this repository's README/handover rows live in
 this repository.
 
+## Patch 048: brightness / gamma at presentation (2026-11-18)
+
+Dark scenes in this title are dark on a modern panel, and the guest has no display setting for it.
+The presentation shader already averages the finished frame; that is the right place for a display
+curve because it sees the whole picture, including the HUD, and touches neither the guest's
+framebuffer nor the game's textures. A single `gamma` push constant (0.5–2.0, 1.0 default) applies
+`pow(rgb, vec3(1.0 / gamma))` after the minification average: above 1 lifts the dark and mid tones
+without clipping the whites, below 1 deepens them. The one-tap magnification path takes the same
+curve. At 1.0 the shader returns the sampled colour unchanged, so the default present is
+byte-identical (presented frame 5000 hashes `8c1c7bb8…` with `--screenshot-presented`).
+
+The frame counter is a separate pipeline drawn over the picture, so `overlay.frag` applies the same
+curve to its colour; the CPU-stamped menu/counter path is part of the uploaded picture and is
+already covered. The push-constant block grows by one float in `present.vert`, `present.frag`,
+`overlay.vert` and `overlay.frag`; the pipeline layout range grows with it. There is no new shader,
+no extra pass and no per-frame host work.
+
+The engine option is `--gamma VALUE` (0.5–2.0), the launcher's Game-tab **Brightness / gamma**
+slider runs 50–200% and passes the value divided by 100 (`--gamma 1.25`), and `play-draconus.ps1`
+has `-Gamma 1.25`. This is deliberately **presentation only**: F11 and F12 capture the guest's own
+framebuffer, which is what keeps captures comparable, so the slider does not change them.
+`--screenshot-presented` reads the window after the presenter and does show the curve, which is how
+the three levels in the test capture were checked (mean 29.7 at 1.0, 56.1 at 1.5, 14.7 at 0.7).
+
+Carried by `patches/0015-gamma.patch`, which touches `render/include/dream/render/vk/present.h`,
+`render/src/vk/present.cpp`, `render/shaders/{present,overlay}.{vert,frag}` and
+`runtime/boot/boot_main.cpp`, and applies after 0014. The launcher slider, `-Gamma`, the README and
+the handover row live in this repository.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
