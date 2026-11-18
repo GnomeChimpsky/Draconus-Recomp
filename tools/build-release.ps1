@@ -142,8 +142,21 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
     $dirty = (& git -C $root status --porcelain 2>$null | Select-Object -First 1)
     if ($dirty) { $commit += "-dirty" }
 }
+# The launcher's VERSION is the release's version: it is what the window shows and what the update
+# check compares against a published tag. Read it from the one place it is written, and refuse to
+# assemble a release whose notes do not name it -- the two are bumped together.
+$launcherSource = Join-Path $root "tools\launcher.py"
+$versionMatch = Select-String -LiteralPath $launcherSource -Pattern '^VERSION\s*=\s*"([^"]+)"' |
+                Select-Object -First 1
+if (-not $versionMatch) { throw "tools\launcher.py has no VERSION constant" }
+$version = $versionMatch.Matches[0].Groups[1].Value
+$notes = Get-Content -LiteralPath (Join-Path $root "RELEASE-NOTES.md") -Raw
+if ($notes -notmatch ('(?m)^##\s*' + [regex]::Escape($version) + '(?:\s|$)')) {
+    throw "RELEASE-NOTES.md has no '## $version' section; bump VERSION and the notes together"
+}
 $info = @(
     "Draconus-Recomp release",
+    "version: $version",
     "commit: $commit",
     "built:  $(Get-Date -Format o)",
     "repo:   https://github.com/GnomeChimpsky/Draconus-Recomp",

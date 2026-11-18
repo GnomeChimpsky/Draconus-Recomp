@@ -27,6 +27,7 @@ this is measured against. This file is the pick-up point.
 | First frame (M3) | `tools\m3-check.ps1` | **600-frame determinism, F11 replay, and the first non-blank pair vs Flycast at MAE 0.92 (threshold 16)** |
 | Play-through (M7) | first two levels, 2026-11-17 | owner played through; the faults it surfaced are fixed in patches 0009-0012; later levels, credits and zero gaps remain |
 | Save / load | the title's own Save and Load Game screens | **owner saved in-game and reloaded it, 2026-11-15** |
+| Launcher version and updates | launcher **Check for updates**, `--check-updates`, `--version` | version shown in the title and left panel; GitHub's latest published release checked once a day (or on demand); SHA-256 verified when the release publishes one, installed in place, disc path and per-user data kept, previous files restored if the swap fails |
 
 **The translated path is now the fast one (2026-11-11).** It had been 0.15x — slower than the
 interpreter — because most of the title's code was running in the development interpreter. Three

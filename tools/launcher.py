@@ -3,11 +3,16 @@ r"""DraconusRecomp launcher: graphics, audio and gameplay settings, then Play.
 
 The window is a tabbed settings page on the right and a picture from the game on the left. Tabs and
 controls are described by TAB spec dictionaries (see TABS), so a new option is one dict entry plus
-its key in DEFAULTS -- no new layout code.
+its key in DEFAULTS -- no new layout code. The title bar and the left panel name the launcher's
+version (VERSION, in this file); when a newer release is published it can download, verify and
+install it from the window.
 
-The non-UI half (command line, settings file) is separated out so it can be exercised without a
-window:  python tools/launcher.py --selftest
+The non-UI half (command line, settings file, version comparison and the update feed) is separated
+out so it can be exercised without a window:
+         python tools/launcher.py --selftest
          python tools/launcher.py --smoke      (builds the window, checks the controls, closes it)
+         python tools/launcher.py --check-updates   (prints the latest release and exits)
+         python tools/launcher.py --version
 
 Run with:  python tools/launcher.py      (or tools\launcher.bat)
 """
@@ -16,13 +21,22 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
+import queue
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 import tkinter as tk
+import urllib.error
+import urllib.request
 import webbrowser
+import zipfile
 from tkinter import filedialog, messagebox, ttk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -64,6 +78,13 @@ else:
     BINARY = os.path.join(ROOT, "engine", "build-render", "games", "draconus", "draconus_boot.exe")
     ART = os.path.join(ROOT, "tools", "launcher-emblem.png")
 REPOSITORY = "https://github.com/GnomeChimpsky/Draconus-Recomp"
+RELEASES_PAGE = REPOSITORY + "/releases"
+# The launcher's own version, and the only place it is written down. It is shown in the window and
+# compared with the latest published release; bump it when a release is cut (tools/build-release.ps1
+# copies it into BUILD-INFO.txt). The update check reads the latest *published* release from GitHub,
+# so a draft or pre-release is never offered.
+VERSION = "1.0"
+RELEASES_API = "https://api.github.com/repos/GnomeChimpsky/Draconus-Recomp/releases/latest"
 GAME_ID = "draconus"
 
 # One per-user folder for everything this project writes: the launcher's settings, the
@@ -75,6 +96,10 @@ SETTINGS = os.path.join(USER_DIR, "launcher.json")
 LEGACY_SETTINGS = os.path.join(
     os.environ.get("APPDATA", os.path.expanduser("~")), "DraconusRecomp", "launcher.json"
 )
+# The update check's own state (when it last asked GitHub) and the helper's log. They are not
+# settings: the player never edits them, and they must not be copied between machines.
+UPDATE_STATE = os.path.join(USER_DIR, "updates.json")
+UPDATE_LOG = os.path.join(USER_DIR, "update.log")
 
 IMAGE_RE = re.compile(r'^\s*image\s*=\s*"(.*)"', re.MULTILINE)
 
@@ -106,6 +131,7 @@ DEFAULTS = {
     "path": "translated",
     "controls": "classic",
     "gamma": 100,
+    "check_updates": True,
 }
 
 
@@ -193,6 +219,409 @@ def save_settings(s: dict) -> None:
             json.dump({k: s[k] for k in DEFAULTS}, f, indent=2)
     except OSError:
         pass  # a read-only machine still gets to play with this run's settings
+
+
+# ----------------------------------------------------------------------------- versions and updates
+#
+# The check asks GitHub for the latest published release and compares its tag with VERSION. A
+# release build then downloads the Windows zip, checks the published SHA-256, unpacks it and hands
+# the swap to a small PowerShell helper: Windows will not let a running executable or its DLLs be
+# replaced, so the launcher closes and the helper waits for it before touching anything. The
+# player's settings, bindings and memory card live under %APPDATA%\dream-recomp and are untouched.
+
+
+class UpdateError(RuntimeError):
+    """A check, download or install that did not finish; the message is shown to the player."""
+
+
+def parse_version(text: str) -> tuple[tuple[int, ...], int]:
+    """A comparable form of "v1.2.3-rc1": ((1, 2, 3), 1) for a release, 0 for a pre-release.
+
+    Trailing zeroes are dropped so "1.0", "1.0.0" and "v1.0" compare equal, and a pre-release sorts
+    below the release it precedes (1.1-rc1 < 1.1). Build metadata after "+" does not order releases.
+    """
+    value = str(text).strip()
+    if value[:1] in ("v", "V"):
+        value = value[1:]
+    value = value.split("+", 1)[0]
+    core, _, pre = value.partition("-")
+    numbers = []
+    for part in core.split("."):
+        match = re.match(r"\d+", part)
+        numbers.append(int(match.group()) if match else 0)
+    while len(numbers) > 1 and numbers[-1] == 0:
+        numbers.pop()
+    return tuple(numbers), 0 if pre else 1
+
+
+def is_newer_version(candidate: str, current: str | None = None) -> bool:
+    """True when a release tag names something later than the running launcher."""
+    return parse_version(candidate) > parse_version(VERSION if current is None else current)
+
+
+def version_text(tag: str) -> str:
+    """The version as it is shown: the tag without its leading v ("v1.1.0" -> "1.1.0")."""
+    text = str(tag).strip()
+    return text[1:] if text[:1] in ("v", "V") else text
+
+
+def release_version(release: dict) -> str:
+    return version_text(str(release.get("tag_name") or release.get("name") or ""))
+
+
+def update_asset(release: dict) -> dict | None:
+    """The Windows x64 zip in a release, or None.
+
+    Linux, macOS and source archives are skipped, and the Windows build wins over an unlabelled
+    zip. The scoring is deliberately tolerant of a renamed asset: a release with a single
+    Draconus*.zip is still usable, while a release with only other platforms is not.
+    """
+    best, best_score = None, -1
+    for asset in release.get("assets") or []:
+        name = str(asset.get("name") or "")
+        low = name.lower()
+        url = str(asset.get("browser_download_url") or "")
+        if not low.endswith(".zip") or not url:
+            continue
+        if any(other in low for other in ("linux", "darwin", "macos", "osx", "arm64", "source")):
+            continue
+        score = 0
+        if "windows" in low or "win" in low:
+            score += 3
+        if "x64" in low or "win64" in low or "amd64" in low:
+            score += 2
+        if low.startswith("draconus"):
+            score += 1
+        if score > best_score:
+            best, best_score = asset, score
+    return best
+
+
+def fetch_latest_release(url: str = RELEASES_API, timeout: float = 12) -> dict | None:
+    """The latest published release, or None when the repository has no releases yet."""
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "DraconusRecomp-Launcher/%s" % VERSION,
+                 "Accept": "application/vnd.github+json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            release = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        if exc.code in (403, 429):
+            raise UpdateError("GitHub's request limit was reached; try again later") from None
+        raise UpdateError("GitHub answered %d %s" % (exc.code, exc.reason)) from None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise UpdateError("could not reach GitHub (%s)" % getattr(exc, "reason", exc)) from None
+    except ValueError:
+        raise UpdateError("GitHub sent a release that could not be read") from None
+    if not isinstance(release, dict):
+        raise UpdateError("GitHub sent a release that could not be read")
+    return release
+
+
+def download_asset(asset: dict, destination: str, progress=None, timeout: float = 60) -> None:
+    """Download a release asset. `progress(done, total)` is called as the bytes arrive."""
+    url = str(asset.get("browser_download_url") or "")
+    if not url:
+        raise UpdateError("the release has no download for this platform")
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "DraconusRecomp-Launcher/%s" % VERSION})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response, \
+                open(destination, "wb") as out:
+            total = int(response.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                chunk = response.read(1 << 16)
+                if not chunk:
+                    break
+                out.write(chunk)
+                done += len(chunk)
+                if progress is not None:
+                    progress(done, total)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise UpdateError("the download failed (%s)" % getattr(exc, "reason", exc)) from None
+
+
+def digest_matches(path: str, published: str) -> bool:
+    """Check a GitHub asset digest ("sha256:<hex>"). An empty digest cannot be checked."""
+    algorithm, _, expected = str(published).partition(":")
+    if not expected:
+        return True
+    try:
+        digest = hashlib.new(algorithm.strip().lower())
+    except ValueError:
+        return False
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest().lower() == expected.strip().lower()
+
+
+def safe_extract(archive: str, destination: str) -> None:
+    """Unpack a release zip, refusing paths that leave the destination and symbolic links."""
+    with zipfile.ZipFile(archive) as zf:
+        for info in zf.infolist():
+            name = info.filename.replace("\\", "/")
+            parts = [part for part in name.split("/") if part not in ("", ".")]
+            if (name.startswith("/") or re.match(r"^[A-Za-z]:", name)
+                    or any(part == ".." for part in parts)):
+                raise UpdateError("the update archive contains an unsafe path: %s" % name)
+            if ((info.external_attr >> 16) & 0o170000) == 0o120000:
+                raise UpdateError("the update archive contains a symbolic link: %s" % name)
+            if not parts:
+                continue
+            target = os.path.join(destination, *parts)
+            if info.is_dir():
+                os.makedirs(target, exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with zf.open(info) as source, open(target, "wb") as out:
+                shutil.copyfileobj(source, out)
+
+
+def find_payload_root(directory: str) -> str:
+    """The folder in an unpacked release that holds DraconusLauncher.exe.
+
+    The release zip keeps its files at the top; a repacked zip may put them under one folder. Both
+    layouts work, so the launcher does not depend on how the maintainer zipped the folder.
+    """
+    if os.path.isfile(os.path.join(directory, "DraconusLauncher.exe")):
+        return directory
+    children = [name for name in os.listdir(directory) if name != "__MACOSX"]
+    folders = [name for name in children if os.path.isdir(os.path.join(directory, name))]
+    files = [name for name in children if os.path.isfile(os.path.join(directory, name))]
+    if len(folders) == 1 and not files:
+        return find_payload_root(os.path.join(directory, folders[0]))
+    return directory
+
+
+def validate_payload(root: str) -> None:
+    """Refuse an archive that is not a release before it is allowed near the install folder."""
+    for needed in ("DraconusLauncher.exe", "DraconusRecomp.exe", "draconus.toml"):
+        if not os.path.isfile(os.path.join(root, needed)):
+            raise UpdateError(
+                "the downloaded archive is not a Draconus-Recomp release (no %s)" % needed)
+
+
+def payload_version(root: str) -> str:
+    """The version in the unpacked release's BUILD-INFO.txt, or "" for a build that predates it."""
+    try:
+        with open(os.path.join(root, "BUILD-INFO.txt"), encoding="utf-8", errors="replace") as f:
+            match = re.search(r"(?m)^\s*version\s*:\s*(\S+)", f.read())
+    except OSError:
+        return ""
+    return match.group(1) if match else ""
+
+
+def prepare_update(archive: str, workdir: str) -> str:
+    """Unpack and validate an update archive; returns the folder to install from.
+
+    `workdir` is a folder the caller owns and removes after the update has been applied.
+    """
+    payload = os.path.join(workdir, "payload")
+    os.makedirs(payload, exist_ok=True)
+    safe_extract(archive, payload)
+    root = find_payload_root(payload)
+    validate_payload(root)
+    return root
+
+
+def read_update_state() -> dict:
+    try:
+        with open(UPDATE_STATE, encoding="utf-8") as f:
+            state = json.load(f)
+        return state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_update_state(**values) -> None:
+    state = read_update_state()
+    state.update(values)
+    try:
+        os.makedirs(USER_DIR, exist_ok=True)
+        with open(UPDATE_STATE, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+    except OSError:
+        pass
+
+
+def update_check_due(hours: int = 24, now: float | None = None,
+                     state: dict | None = None) -> bool:
+    """An automatic check at most once a day; the manual button always checks."""
+    checked = (read_update_state() if state is None else state).get("checked_at")
+    if not isinstance(checked, (int, float)):
+        return True
+    return (time.time() if now is None else now) - checked >= hours * 3600
+
+
+def folder_writable(path: str) -> bool:
+    """Can this folder be replaced in place? A read-only release is playable but not updatable."""
+    probe = os.path.join(path, ".draconus-write-test")
+    try:
+        with open(probe, "w", encoding="utf-8"):
+            pass
+        os.remove(probe)
+        return True
+    except OSError:
+        return False
+
+
+# The update helper. The launcher downloads a release, unpacks it, writes this script beside the
+# payload and starts it with the current process's id, then closes so that Windows releases the
+# executable and DLLs the helper has to replace. The helper waits for that exit, moves the new files
+# in, keeps the player's disc path in draconus.toml, and starts the new launcher. It is one fixed
+# string with no templating, so every value arrives as a command-line parameter. It runs under
+# Windows PowerShell, which is present on every supported Windows.
+UPDATER_SCRIPT = r"""# Draconus-Recomp update helper.
+#
+# Written by the launcher, which starts it and then closes so that Windows releases the launcher
+# executable and its DLLs. The helper waits for that process to end, moves the new files in, keeps
+# the player's disc path, and starts the new launcher. Every file the helper displaces is kept in
+# an update-backup-* folder until the copy has succeeded, so a failure puts everything back.
+param(
+    [Parameter(Mandatory = $true)][string]$InstallDir,
+    [Parameter(Mandatory = $true)][string]$Payload,
+    [Parameter(Mandatory = $true)][int]$WaitPid,
+    [Parameter(Mandatory = $true)][string]$Restart,
+    [Parameter(Mandatory = $true)][string]$UpdatedTo,
+    [string]$Log = "",
+    [string]$Cleanup = "",
+    [switch]$NoRestart,
+    [switch]$Silent
+)
+
+$ErrorActionPreference = "Stop"
+
+function Write-Log([string]$Message) {
+    if (-not $Log) { return }
+    try {
+        $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
+        Add-Content -LiteralPath $Log -Value $line
+    } catch { }
+}
+
+function Show-Failure([string]$Message) {
+    Write-Log "FAILED: $Message"
+    if ($Silent) { return }
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        [System.Windows.Forms.MessageBox]::Show(
+            ("The update to {0} could not be installed.`n`n{1}`n`nThe previous files were put back. Log: {2}" -f $UpdatedTo, $Message, $Log),
+            "Draconus-Recomp update", "OK", "Error") | Out-Null
+    } catch { }
+}
+
+try {
+    $install = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
+    $payloadDir = [IO.Path]::GetFullPath($Payload).TrimEnd('\')
+    Write-Log "update to $UpdatedTo started: payload=$payloadDir install=$install"
+
+    # Wait for the launcher that started this helper. Its executable and DLLs cannot be replaced
+    # while it runs.
+    $deadline = (Get-Date).AddSeconds(120)
+    while (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue) {
+        if ((Get-Date) -gt $deadline) { throw "the launcher did not close within two minutes" }
+        Start-Sleep -Milliseconds 200
+    }
+
+    if (-not (Test-Path -LiteralPath $payloadDir)) { throw "the downloaded update is gone: $payloadDir" }
+    if (-not (Test-Path -LiteralPath $install)) { throw "the install folder is gone: $install" }
+    foreach ($needed in @("DraconusLauncher.exe", "DraconusRecomp.exe", "draconus.toml")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $payloadDir $needed))) {
+            throw "the downloaded update is incomplete (no $needed)"
+        }
+    }
+
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $backup = Join-Path $install ("update-backup-" + $stamp)
+    New-Item -ItemType Directory -Force -Path $backup | Out-Null
+
+    # The release TOML is a template; the player's copy names their disc. Keep that one line.
+    $toml = Join-Path $install "draconus.toml"
+    $oldToml = $null
+    $imageLine = $null
+    if (Test-Path -LiteralPath $toml) {
+        $oldToml = [IO.File]::ReadAllText($toml)
+        $match = [regex]::Match($oldToml, '(?m)^[ \t]*image[ \t]*=.*$')
+        if ($match.Success) { $imageLine = $match.Value }
+    }
+
+    $moved = @()
+    try {
+        foreach ($item in (Get-ChildItem -LiteralPath $payloadDir -Force)) {
+            $target = Join-Path $install $item.Name
+            if (Test-Path -LiteralPath $target) {
+                Move-Item -LiteralPath $target -Destination (Join-Path $backup $item.Name) -Force
+                $moved += $item.Name
+            }
+            Copy-Item -LiteralPath $item.FullName -Destination $target -Recurse -Force
+            Write-Log ("installed " + $item.Name)
+        }
+
+        if ($imageLine) {
+            $newToml = Join-Path $install "draconus.toml"
+            $newText = [IO.File]::ReadAllText($newToml)
+            $pattern = [regex]'(?m)^[ \t]*image[ \t]*=.*$'
+            $newText = $pattern.Replace($newText, $imageLine.Replace('$', '$$'), 1)
+            [IO.File]::WriteAllText($newToml, $newText)
+            Write-Log "kept the configured disc path"
+        }
+
+        foreach ($needed in @("DraconusLauncher.exe", "DraconusRecomp.exe", "draconus.toml")) {
+            if (-not (Test-Path -LiteralPath (Join-Path $install $needed))) {
+                throw "the installed update is incomplete (no $needed)"
+            }
+        }
+    } catch {
+        $message = $_.Exception.Message
+        Write-Log ("ERROR: " + $message)
+        # Put back exactly what this helper moved.
+        foreach ($name in $moved) {
+            $target = Join-Path $install $name
+            if (Test-Path -LiteralPath $target) {
+                Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            Move-Item -LiteralPath (Join-Path $backup $name) -Destination $target -Force -ErrorAction SilentlyContinue
+        }
+        if ($oldToml -and -not (Test-Path -LiteralPath $toml)) {
+            [IO.File]::WriteAllText($toml, $oldToml)
+        }
+        # Nothing to keep if every displaced file came back; leave the folder otherwise so a
+        # manual recovery is possible.
+        if (Test-Path -LiteralPath $backup) {
+            if ((Get-ChildItem -LiteralPath $backup -Force | Measure-Object).Count -eq 0) {
+                Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Show-Failure $message
+        if (-not $NoRestart -and (Test-Path -LiteralPath $Restart)) {
+            Start-Process -FilePath $Restart -WorkingDirectory ([IO.Path]::GetDirectoryName($Restart))
+        }
+        exit 1
+    }
+
+    Write-Log "update installed"
+    Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+    if ($Cleanup -and (Test-Path -LiteralPath $Cleanup)) {
+        Remove-Item -LiteralPath $Cleanup -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (-not $NoRestart) {
+        Start-Process -FilePath $Restart -ArgumentList @("--updated", $UpdatedTo) -WorkingDirectory ([IO.Path]::GetDirectoryName($Restart))
+    }
+    exit 0
+} catch {
+    Show-Failure $_.Exception.Message
+    if (-not $NoRestart -and $Restart -and (Test-Path -LiteralPath $Restart)) {
+        Start-Process -FilePath $Restart -WorkingDirectory ([IO.Path]::GetDirectoryName($Restart))
+    }
+    exit 1
+}
+"""
 
 
 def list_audio_devices() -> list[str]:
@@ -652,6 +1081,11 @@ TABS = [
                     ("Interpreter - reference, slow", "interpreter")],
          "help": "The translated path is the real thing. The interpreter is the reference the "
                  "translation is checked against."},
+        {"kind": "check", "key": "check_updates", "label": "Check for updates on start",
+         "help": "Asks GitHub once a day whether a newer release exists and offers to install it "
+                 "from the button at the bottom of the window. An update keeps your settings, "
+                 "controller bindings and memory card; checking by hand works whatever this is "
+                 "set to."},
     ]),
 ]
 
@@ -669,9 +1103,9 @@ class Launcher(tk.Tk):
     BAD = "#e06c6c"   # no disc, or one that was rejected
     WARN = "#e0b04a"  # selected but not checked yet
 
-    def __init__(self) -> None:
+    def __init__(self, auto_update_check: bool = True, updated_to: str = "") -> None:
         super().__init__()
-        self.title("Draconus: Cult of the Wyrm - Launcher")
+        self.title("Draconus: Cult of the Wyrm - Launcher " + VERSION)
         self.configure(bg=self.BG)
         try:
             # The native Windows theme draws its own backgrounds, which fight the launcher's dark
@@ -689,18 +1123,32 @@ class Launcher(tk.Tk):
         AUDIO_DEVICES[:] = audio_device_choices(self.settings.get("audio_device", ""))
         self.image_path = self._initial_image()
         self.disc_ok = False
-        self.status = tk.StringVar(value="Ready.")
+        self.status = tk.StringVar(
+            value=("Updated to %s. Ready." % updated_to) if updated_to else "Ready.")
         self.vars: dict[str, tk.Variable] = {}
         self.combos: dict[str, ttk.Combobox] = {}
         self._dependent: list[tuple[str, str, tk.Widget]] = []
+        # The update check runs on a worker thread; results come back through a queue that the Tk
+        # thread drains, so no Tk call is ever made from the worker.
+        self._auto_update_check = auto_update_check
+        self._ui_queue: queue.Queue = queue.Queue()
+        self._update_thread: threading.Thread | None = None
+        self._update_busy = False
+        self._update_release: dict | None = None
+        self._update_label_fg = self.DIM
+        self._status_before_check = "Ready."
+        self._closing = False
         # The saved aspect decides the pixel counts the resolution rows show.
         self._refresh_resolution()
         self._build()
         self._sync_depends()
         self._update_disc_state()
         self.protocol("WM_DELETE_WINDOW", self._close)
+        self._pump()
         # Check the saved disc once the window is up, so a returning player sees "Disc OK".
         self.after(150, self._auto_check_disc)
+        if auto_update_check:
+            self.after(1200, self._auto_check_updates)
 
     def _initial_image(self) -> str:
         try:
@@ -744,6 +1192,8 @@ class Launcher(tk.Tk):
                  font=("Georgia", 11, "italic")).pack()
         tk.Label(parent, text="static recompilation", bg=self.BG, fg=self.DIM,
                  font=("Segoe UI", 8)).pack(pady=(6, 0))
+        tk.Label(parent, text="Version " + VERSION, bg=self.BG, fg=self.DIM,
+                 font=("Segoe UI", 9)).pack(pady=(2, 0))
         tk.Label(parent, text="by GnomeChimpsky", bg=self.BG, fg=self.DIM,
                  font=("Georgia", 10, "italic")).pack(pady=(28, 0))
         link = tk.Label(parent, text="Github repository", bg=self.BG, fg=self.FG,
@@ -752,6 +1202,15 @@ class Launcher(tk.Tk):
         link.bind("<Button-1>", lambda _e: self.open_repository())
         link.bind("<Enter>", lambda _e: link.configure(fg="#f0c674"))
         link.bind("<Leave>", lambda _e: link.configure(fg=self.FG))
+        # The update state sits under the link: "Up to date", or "Version 1.1 is available" as a
+        # second way to start the update (the bottom bar's button is the first).
+        self.update_label = tk.Label(parent, text="", bg=self.BG, fg=self.DIM,
+                                     font=("Segoe UI", 9, "bold"), cursor="hand2",
+                                     wraplength=320, justify="center")
+        self.update_label.pack(pady=(18, 0))
+        self.update_label.bind("<Button-1>", lambda _e: self._update_label_clicked())
+        self.update_label.bind("<Enter>", lambda _e: self.update_label.configure(fg="#f0c674"))
+        self.update_label.bind("<Leave>", lambda _e: self._update_label_colour())
 
     def _build_right(self, parent: tk.Frame) -> None:
         head = tk.Frame(parent, bg=self.BG)
@@ -776,6 +1235,11 @@ class Launcher(tk.Tk):
                    command=lambda: self.open_folder(SAVES_DIR)).pack(side="left")
         ttk.Button(bar, text="Open settings folder",
                    command=lambda: self.open_folder(SETTINGS_DIR)).pack(side="left", padx=(8, 0))
+        # The update button changes its label and action when a newer release is known: "Check for
+        # updates", then "Update to 1.1" (or "Download 1.1" when this build cannot install it).
+        self.update_button = ttk.Button(bar, text="Check for updates",
+                                        command=lambda: self.check_updates(True))
+        self.update_button.pack(side="left", padx=(16, 0))
         self.play_button = ttk.Button(bar, text="Play", command=self.play)
         self.play_button.pack(side="right")
         ttk.Button(bar, text="Reset", command=self.reset).pack(side="right", padx=8)
@@ -995,12 +1459,285 @@ class Launcher(tk.Tk):
         self._dependent.clear()
         self._build()
         self._sync_depends()
+        # The rebuilt button starts unlabelled by an earlier check; a check already in flight will
+        # still land on it when it finishes.
+        self._update_release = None
+        self._set_update_label("", self.DIM)
+        self._set_update_button("Check for updates", lambda: self.check_updates(True))
 
     # -- actions --------------------------------------------------------------------------
     def open_repository(self) -> None:
         """Open the project's GitHub page in the default browser."""
         if not webbrowser.open(REPOSITORY):
             self.status.set("No browser could be opened; the repository is " + REPOSITORY)
+
+    def open_releases(self) -> None:
+        """Open the releases page: the manual way to update, and the fallback when a release has
+        no Windows zip (or this copy is a source tree or a read-only folder)."""
+        if not webbrowser.open(RELEASES_PAGE):
+            self.status.set("No browser could be opened; the releases page is " + RELEASES_PAGE)
+
+    # -- updates --------------------------------------------------------------------------
+    #
+    # The network runs on a worker thread. Its results are put on a queue and dispatched by _pump
+    # on the Tk thread: no Tk call is made off the Tk thread, which is what makes the window stay
+    # live while GitHub is slow and does not crash when it answers quickly.
+
+    def _pump(self) -> None:
+        try:
+            while True:
+                callback, args = self._ui_queue.get_nowait()
+                callback(*args)
+        except queue.Empty:
+            pass
+        if not self._closing:
+            try:
+                self.after(100, self._pump)
+            except tk.TclError:
+                pass
+
+    def _post(self, callback, *args) -> None:
+        self._ui_queue.put((callback, args))
+
+    def _auto_check_updates(self) -> None:
+        if self.settings.get("check_updates", True):
+            self.check_updates(manual=False)
+
+    def can_self_update(self) -> bool:
+        """A frozen release in a writable folder is the only layout the helper can replace."""
+        return FROZEN and folder_writable(ROOT)
+
+    def _set_update_button(self, text: str, command=None) -> None:
+        if not hasattr(self, "update_button"):
+            return
+        self.update_button.configure(text=text,
+                                     command=command or (lambda: self.check_updates(True)))
+        self.update_button.state(["!disabled"] if command is not None else ["disabled"])
+
+    def _set_update_label(self, text: str, colour: str) -> None:
+        self._update_label_fg = colour
+        if hasattr(self, "update_label"):
+            self.update_label.configure(text=text, fg=colour)
+
+    def _update_label_colour(self) -> None:
+        if hasattr(self, "update_label"):
+            self.update_label.configure(fg=self._update_label_fg)
+
+    def _update_label_clicked(self) -> None:
+        release = self._update_release
+        if (release is not None and update_asset(release) is not None
+                and self.can_self_update()):
+            self.install_update()
+        else:
+            self.open_releases()
+
+    def check_updates(self, manual: bool = True) -> None:
+        """Ask GitHub for the latest published release and put the result in the window."""
+        if self._closing or self._update_busy:
+            return
+        if self._update_thread is not None and self._update_thread.is_alive():
+            return
+        if not manual:
+            if not self.settings.get("check_updates", True):
+                return
+            if not update_check_due():
+                return
+        self._status_before_check = self.status.get()
+        self._update_busy = True
+        self._set_update_button("Checking...", None)
+        self.status.set("Checking for updates...")
+        self._update_thread = threading.Thread(target=self._check_worker, args=(manual,),
+                                               daemon=True)
+        self._update_thread.start()
+
+    def _check_worker(self, manual: bool) -> None:
+        try:
+            release = fetch_latest_release()
+        except UpdateError as exc:
+            self._post(self._check_failed, manual, str(exc))
+            return
+        self._post(self._check_done, manual, release)
+
+    def _check_failed(self, manual: bool, message: str) -> None:
+        self._update_busy = False
+        self._update_thread = None
+        # No check stamp on a failure: the next launch tries again rather than waiting a day for a
+        # transient error (offline, a GitHub hiccup) to pass.
+        self._set_update_button("Check for updates", lambda: self.check_updates(True))
+        if manual:
+            self.status.set("Could not check for updates: " + message)
+            messagebox.showwarning("Updates", "Could not check for updates:\n\n" + message)
+        else:
+            # An automatic check is silent: being offline is not something to interrupt a player
+            # about, and the button still works.
+            self.status.set(self._status_before_check)
+
+    def _check_done(self, manual: bool, release: dict | None) -> None:
+        self._update_busy = False
+        self._update_thread = None
+        write_update_state(checked_at=time.time())
+        latest = release_version(release) if release else ""
+        asset = update_asset(release) if release else None
+        if not release or not latest:
+            self._update_release = None
+            self._set_update_label("", self.DIM)
+            self._set_update_button("Check for updates", lambda: self.check_updates(True))
+            if manual:
+                self.status.set("No releases have been published yet.")
+            else:
+                self.status.set(self._status_before_check)
+            return
+        if not is_newer_version(latest):
+            self._update_release = None
+            self._set_update_label("Up to date", self.OK)
+            self._set_update_button("Check for updates", lambda: self.check_updates(True))
+            if manual:
+                self.status.set("You have the latest version, %s." % VERSION)
+            else:
+                self.status.set(self._status_before_check)
+            return
+
+        self._update_release = release
+        shown = version_text(latest)
+        self._set_update_label("Version %s is available" % shown, self.WARN)
+        if asset is not None and self.can_self_update():
+            self._set_update_button("Update to %s" % shown, self.install_update)
+            self.status.set("Version %s is available - press the update button to install it."
+                            % shown)
+        else:
+            self._set_update_button("Download %s" % shown, self.open_releases)
+            if asset is None:
+                self.status.set("Version %s is available, but the release has no Windows "
+                                "download; the releases page has the details." % shown)
+            elif not FROZEN:
+                self.status.set("Version %s is available - a source tree updates with git; the "
+                                "releases page has the download." % shown)
+            else:
+                self.status.set("Version %s is available, but this folder is not writable; "
+                                "unzip the release over it instead." % shown)
+
+    def install_update(self) -> None:
+        release = self._update_release
+        asset = update_asset(release) if release else None
+        if not release or asset is None:
+            self.open_releases()
+            return
+        if not FROZEN:
+            self.status.set("Source builds update with git; opening the releases page.")
+            self.open_releases()
+            return
+        if not folder_writable(ROOT):
+            messagebox.showerror(
+                "Update",
+                "The launcher's folder cannot be written to:\n\n%s\n\nUnzip the new release over "
+                "it instead. Your settings and saves are not in that folder." % ROOT)
+            return
+        latest = version_text(release_version(release))
+        if not messagebox.askyesno(
+                "Update",
+                "Update Draconus-Recomp from %s to %s?\n\nThe launcher closes, replaces its files "
+                "in\n%s\nand starts again. Your settings, controller bindings and memory card are "
+                "kept." % (VERSION, latest, ROOT)):
+            return
+        size = int(asset.get("size") or 0)
+        try:
+            free = shutil.disk_usage(tempfile.gettempdir()).free
+        except OSError:
+            free = 0
+        if size and free and free < size * 2 + 64 * 1024 * 1024:
+            messagebox.showerror("Update", "There is not enough free disk space to download and "
+                                           "unpack the update.")
+            return
+        self._update_busy = True
+        self._set_update_button("Downloading...", None)
+        self.status.set("Downloading %s..." % (asset.get("name") or "the update"))
+        self._update_thread = threading.Thread(target=self._download_worker,
+                                               args=(asset, latest), daemon=True)
+        self._update_thread.start()
+
+    def _download_worker(self, asset: dict, latest: str) -> None:
+        workspace = tempfile.mkdtemp(prefix="draconus-update-")
+        archive = os.path.join(workspace, "update.zip")
+        last_reported = [0]
+
+        def progress(done: int, total: int) -> None:
+            # One status update per megabyte; each 64 KB chunk would only flood the queue.
+            if done // (1 << 20) != last_reported[0] or (total and done >= total):
+                last_reported[0] = done // (1 << 20)
+                self._post(self._progress, done, total)
+
+        try:
+            download_asset(asset, archive, progress=progress)
+            expected_size = int(asset.get("size") or 0)
+            if expected_size and os.path.getsize(archive) != expected_size:
+                raise UpdateError("the download is %d bytes, not the %d the release lists"
+                                  % (os.path.getsize(archive), expected_size))
+            published = str(asset.get("digest") or "")
+            if published:
+                self._post(self.status.set, "Verifying the download...")
+                if not digest_matches(archive, published):
+                    raise UpdateError("the downloaded file does not match the release checksum")
+            self._post(self.status.set, "Unpacking the update...")
+            payload = prepare_update(archive, workspace)
+            built = payload_version(payload)
+            if built and parse_version(built) != parse_version(latest):
+                raise UpdateError("the download is version %s, not %s" % (built, latest))
+            self._post(self._apply_update, workspace, payload, latest)
+        except (UpdateError, OSError, zipfile.BadZipFile) as exc:
+            shutil.rmtree(workspace, ignore_errors=True)
+            self._post(self._update_failed, str(exc))
+        except Exception as exc:  # the player gets a message, not a traceback
+            shutil.rmtree(workspace, ignore_errors=True)
+            self._post(self._update_failed, "the update failed (%s)" % exc)
+
+    def _progress(self, done: int, total: int) -> None:
+        if total:
+            self.status.set("Downloading update... %d%%" % min(100, done * 100 // total))
+        else:
+            self.status.set("Downloading update... %d MB" % (done // (1 << 20)))
+
+    def _update_failed(self, message: str) -> None:
+        self._update_busy = False
+        self._update_thread = None
+        self._set_update_button("Check for updates", lambda: self.check_updates(True))
+        self.status.set("The update did not finish: " + message)
+        messagebox.showerror("Update", "The update did not finish:\n\n" + message)
+
+    def _apply_update(self, workspace: str, payload: str, latest: str) -> None:
+        """Write and start the helper; it waits for this process to exit before touching files."""
+        script = os.path.join(workspace, "apply-update.ps1")
+        restart = os.path.join(ROOT, "DraconusLauncher.exe")
+        if not os.path.isfile(restart) and not FROZEN:
+            restart = os.path.abspath(__file__)
+        try:
+            with open(script, "w", encoding="utf-8", newline="\n") as f:
+                f.write(UPDATER_SCRIPT)
+            command = [
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-WindowStyle", "Hidden", "-File", script,
+                "-InstallDir", ROOT,
+                "-Payload", payload,
+                "-WaitPid", str(os.getpid()),
+                "-Restart", restart,
+                "-UpdatedTo", latest,
+                "-Log", UPDATE_LOG,
+                "-Cleanup", workspace,
+            ]
+            subprocess.Popen(command, cwd=workspace,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except OSError as exc:
+            shutil.rmtree(workspace, ignore_errors=True)
+            self._update_failed("could not start the update helper (%s)" % exc)
+            return
+        self.status.set("Installing %s - the launcher will restart..." % latest)
+        self.update_idletasks()
+        try:
+            save_settings(self.collect())
+        finally:
+            self._closing = True
+            self.destroy()
 
     def open_folder(self, path: str) -> None:
         """Show a folder in the desktop's file manager, creating it if it does not exist yet.
@@ -1144,6 +1881,7 @@ class Launcher(tk.Tk):
         try:
             save_settings(self.collect())
         finally:
+            self._closing = True
             self.destroy()
 
 
@@ -1300,6 +2038,98 @@ def selftest() -> int:
     cmd = build_command(image, dict(base))
     if "--gamma" in cmd:
         failures.append("default gamma still passed --gamma")
+
+    # The version comparison the update check depends on. A release tag and the launcher's own
+    # number are written differently -- v1.0.0 against 1.0 -- and a pre-release must not be offered
+    # as an upgrade over the release it precedes.
+    if parse_version("v1.0.0") != parse_version("1.0"):
+        failures.append("versions: v1.0.0 and 1.0 do not compare equal")
+    for newer, older in (("v1.0.1", "1.0"), ("1.1", "1.0"), ("1.0.10", "1.0.9"),
+                         ("2.0", "1.99"), ("1.10", "1.9")):
+        if not is_newer_version(newer, older):
+            failures.append("versions: %s should be newer than %s" % (newer, older))
+    for same in ("1.0", "v1.0.0", "1.0.0+build.7"):
+        if is_newer_version(same, "1.0"):
+            failures.append("versions: %s should not be newer than 1.0" % same)
+    if is_newer_version("1.1-rc1", "1.1"):
+        failures.append("versions: a pre-release was offered over its release")
+    if not is_newer_version("1.1", "1.1-rc1"):
+        failures.append("versions: a release should be newer than its pre-release")
+    if is_newer_version("0.9", "1.0"):
+        failures.append("versions: an older release was offered")
+
+    # The Windows asset is picked out of a multi-platform release; source and other platforms are
+    # not offered as an update, and a release with no zip has no download at all.
+    sample = {"tag_name": "v1.1.0", "assets": [
+        {"name": "DraconusRecomp-1.1-source.zip", "browser_download_url": "https://x/source.zip"},
+        {"name": "DraconusRecomp-1.1-linux-x64.zip", "browser_download_url": "https://x/linux.zip"},
+        {"name": "DraconusRecomp-1.1-win64.zip", "browser_download_url": "https://x/win.zip"},
+    ]}
+    picked = update_asset(sample)
+    if not picked or picked["name"] != "DraconusRecomp-1.1-win64.zip":
+        failures.append("updates: picked %r" % (picked,))
+    if update_asset({"assets": [{"name": "readme.txt"}]}) is not None:
+        failures.append("updates: a release with no zip still had an asset")
+    if update_asset({}) is not None:
+        failures.append("updates: an empty release still had an asset")
+    if release_version(sample) != "1.1.0":
+        failures.append("updates: release version is %r" % release_version(sample))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = os.path.join(tmp, "fixture.bin")
+        with open(fixture, "wb") as f:
+            f.write(b"draconus\n")
+        known = hashlib.sha256(b"draconus\n").hexdigest()
+        if not digest_matches(fixture, "sha256:" + known):
+            failures.append("updates: a matching digest was rejected")
+        if digest_matches(fixture, "sha256:" + "0" * 64):
+            failures.append("updates: a wrong digest was accepted")
+        if not digest_matches(fixture, ""):
+            failures.append("updates: an unpublished digest should not fail the check")
+
+        # A zip-slip entry must be refused, and a good archive with one wrapper folder must be
+        # found by prepare_update and validated.
+        unsafe = os.path.join(tmp, "unsafe.zip")
+        with zipfile.ZipFile(unsafe, "w") as zf:
+            zf.writestr("../escape.txt", "x")
+        try:
+            safe_extract(unsafe, os.path.join(tmp, "unsafe-out"))
+        except UpdateError:
+            pass
+        else:
+            failures.append("updates: an archive writing outside its folder was accepted")
+
+        good = os.path.join(tmp, "good.zip")
+        with zipfile.ZipFile(good, "w") as zf:
+            zf.writestr("DraconusRecomp-1.1/DraconusLauncher.exe", b"launcher")
+            zf.writestr("DraconusRecomp-1.1/DraconusRecomp.exe", b"game")
+            zf.writestr("DraconusRecomp-1.1/draconus.toml", "image = \"CHANGE-ME\"\n")
+            zf.writestr("DraconusRecomp-1.1/BUILD-INFO.txt", "version: 1.1\n")
+        root = prepare_update(good, os.path.join(tmp, "payload"))
+        if os.path.basename(root) != "DraconusRecomp-1.1":
+            failures.append("updates: payload root is %r" % (root,))
+        if payload_version(root) != "1.1":
+            failures.append("updates: BUILD-INFO version is %r" % (payload_version(root),))
+
+        # A release zip without the game executable is not a release.
+        incomplete = os.path.join(tmp, "incomplete.zip")
+        with zipfile.ZipFile(incomplete, "w") as zf:
+            zf.writestr("DraconusLauncher.exe", b"launcher")
+        try:
+            prepare_update(incomplete, os.path.join(tmp, "incomplete-payload"))
+        except UpdateError:
+            pass
+        else:
+            failures.append("updates: an archive without the game executable was accepted")
+
+    # The automatic check runs at most once a day; a missing or unreadable stamp means "due".
+    now = 1_000_000.0
+    if not update_check_due(hours=24, now=now, state={}):
+        failures.append("updates: a missing check stamp should be due")
+    if update_check_due(hours=24, now=now, state={"checked_at": now - 3600}):
+        failures.append("updates: a check an hour ago should not be due")
+    if not update_check_due(hours=24, now=now, state={"checked_at": now - 25 * 3600}):
+        failures.append("updates: a check a day ago should be due")
 
     # The tab spec must cover every default, or a control would be silently unset.
     keys = set()
@@ -1492,6 +2322,16 @@ def check_ui(app: Launcher) -> list[str]:
         if label not in labels:
             failures.append("left panel: %r missing" % label)
 
+    # The version is shown twice: in the title bar and under the subtitle. The update button is
+    # what a manual check is pressed from.
+    if VERSION not in app.title():
+        failures.append("title does not name the version: %r" % app.title())
+    if ("Version " + VERSION) not in labels:
+        failures.append("left panel does not name the version: %r" % ("Version " + VERSION,))
+    if not hasattr(app, "update_button") or app.update_button.cget("text") != "Check for updates":
+        failures.append("update button is %r" % (
+            app.update_button.cget("text") if hasattr(app, "update_button") else "(missing)",))
+
     # The repository link must open the project's page and nothing else.
     opened: list[str] = []
     real_open = webbrowser.open
@@ -1506,7 +2346,9 @@ def check_ui(app: Launcher) -> list[str]:
 
 
 def smoke(shot: str | None = None) -> int:
-    app = Launcher()
+    # No automatic network in a self-test: the window must build and its buttons work on a machine
+    # with no connection, and a check would race the assertions below.
+    app = Launcher(auto_update_check=False)
     app.update_idletasks()
     app.update()
     # Verify whatever disc is configured before the screenshot: the window a player sees should
@@ -1542,14 +2384,43 @@ def smoke(shot: str | None = None) -> int:
     return 1 if failures else 0
 
 
+def check_updates_cli() -> int:
+    """--check-updates: print the result and exit. 0 up to date, 1 newer, 2 check failed."""
+    print("Draconus-Recomp launcher %s" % VERSION)
+    try:
+        release = fetch_latest_release()
+    except UpdateError as exc:
+        print("check failed: %s" % exc)
+        return 2
+    if not release:
+        print("no release has been published yet")
+        return 0
+    latest = release_version(release)
+    asset = update_asset(release)
+    print("latest release: %s" % (latest or "(unnamed)"))
+    print("download: %s" % (asset.get("name") if asset else "(none for Windows)"))
+    newer = is_newer_version(latest)
+    print("update available: %s" % ("yes" if newer else "no"))
+    return 1 if newer else 0
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--shot", default=None)
+    ap.add_argument("--check-updates", action="store_true",
+                    help="ask GitHub for the latest release, print it and exit")
+    ap.add_argument("--version", action="version",
+                    version="Draconus-Recomp launcher %s" % VERSION)
+    # The update helper starts the new launcher with the version it installed, so the window can
+    # say so; it is not a player-facing option.
+    ap.add_argument("--updated", metavar="VERSION", default="", help=argparse.SUPPRESS)
     args = ap.parse_args()
     if args.selftest:
         sys.exit(selftest())
+    if args.check_updates:
+        sys.exit(check_updates_cli())
     if args.smoke:
         sys.exit(smoke(args.shot))
-    Launcher().mainloop()
+    Launcher(updated_to=args.updated).mainloop()

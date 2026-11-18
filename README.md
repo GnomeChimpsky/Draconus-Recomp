@@ -35,7 +35,9 @@ Two paths: run the prebuilt release, or build it from source.
    is read from your disc — and a dump that is not the USA V1.000 release (another region, or the
    January 2000 prototype) is refused by hash.
 3. Double-click `DraconusLauncher.exe`, press **Browse...** and pick your dump — it is verified as
-   soon as it is selected — then press **Play**.
+   soon as it is selected — then press **Play**. The launcher shows its version and can update
+   itself: **Check for updates** asks GitHub for the latest release and installs it in place,
+   keeping your disc path, settings and saves.
 
 The folder is self-contained: `DraconusRecomp.exe`, `draconus.toml`, `SDL3.dll` and the Visual C++
 runtime sit beside the frozen launcher, so a machine with no Python and no compiler can run it
@@ -112,9 +114,9 @@ with `-ExecutionPolicy Bypass`. `docs/LEGAL.md` covers what you must supply.
 For players, the release is a prebuilt Windows x64 folder: `DraconusLauncher.exe` (with the
 `_internal` folder beside it), `DraconusRecomp.exe`, `draconus.toml`, `SDL3.dll`, the Visual C++
 runtime DLLs, the `LICENSE`, `LEGAL.md`, `THIRD-PARTY-NOTICES.md`, `README.md` and `RELEASE-NOTES.md`
-files, and a `BUILD-INFO.txt` recording the commit and build time. It needs no Python or compiler,
-but does need a Vulkan-capable GPU driver. The launcher verifies your own GDI/CHD and runs the game
-with `--disc` pointing at it; the boot program is read from your disc, so no extracted
+files, and a `BUILD-INFO.txt` recording the version, commit and build time. It needs no Python or
+compiler, but does need a Vulkan-capable GPU driver. The launcher verifies your own GDI/CHD and runs
+the game with `--disc` pointing at it; the boot program is read from your disc, so no extracted
 `1ST_READ.BIN` ships. Non-ASCII account names, disc folders and file names are supported.
 
 Build the release from a configured tree:
@@ -126,7 +128,10 @@ tools\build-release.ps1 -Out D:\out     # elsewhere
 
 The script sanitizes `draconus.toml` to the `CHANGE-ME` placeholder, copies the VC++ runtime,
 rebuilds the frozen launcher unless `-SkipLauncher`, and fails if the output contains a disc
-image, an extracted file, or other game data. `tools\build-launcher.ps1` builds only the launcher.
+image, an extracted file, or other game data. It also refuses to assemble a release when
+`RELEASE-NOTES.md` has no section for the launcher's `VERSION`, so the number, the notes and the
+package are bumped together; `BUILD-INFO.txt` carries that version for the updater to check against
+the release tag. `tools\build-launcher.ps1` builds only the launcher.
 
 ## Checking the translated path
 
@@ -314,6 +319,17 @@ python tools\launcher.py --selftest
   folder (`%APPDATA%\dream-recomp\saves\draconus`) and the per-user root
   (`%APPDATA%\dream-recomp`, with `launcher.json`, `bindings.txt` and `saves`). Saving and loading
   are the game's own, so there is no card setting here.
+* **Updates** -- the window title and the left panel show the launcher's version, and **Check for
+  updates** asks GitHub for the latest published release (once a day automatically, or whenever the
+  button is pressed). When one exists the button becomes **Update to 1.1**: a release build
+  downloads the Windows zip, checks the SHA-256 the release publishes when it has one, unpacks it,
+  and closes so a small PowerShell helper can replace the running executable and its DLLs. The
+  helper keeps the player's `image` line in `draconus.toml`, leaves everything under
+  `%APPDATA%\dream-recomp` (settings, bindings, memory card) alone, holds the previous files until
+  the copy succeeds, and restores them if it does not. A source tree is pointed at the releases page
+  instead, because its files come from git; a read-only release folder is also refused, with the
+  manual route named. `--check-updates` prints the same comparison without opening the window, and
+  `--version` prints the current version.
 
 The tabs are described by one table in the script (`TABS`) plus their keys in `DEFAULTS`, so adding
 an option is a few lines rather than new layout code. Settings persist under

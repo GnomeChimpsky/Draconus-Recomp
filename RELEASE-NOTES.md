@@ -5,6 +5,20 @@ Draconus-Recomp is a native Windows x64 static recompilation of *Draconus: Cult 
 disc and ships no game data. The [README](README.md) is the manual; the
 [quick start](README.md#quick-start) is the shortest way in.
 
+## Unreleased
+
+* **The launcher names its version and updates itself.** The window title and the left panel show
+  the version, and **Check for updates** asks GitHub for the latest published release once a day (or
+  whenever it is pressed). When one exists it becomes **Update to 1.1**: the release's Windows zip
+  is downloaded, checked against the SHA-256 the release publishes when it has one, unpacked, and
+  installed in place. The player's disc path in `draconus.toml` is kept and everything under
+  `%APPDATA%\dream-recomp` — settings, controller bindings and the memory card — is untouched. A
+  PowerShell helper waits for the launcher to close before replacing the executable and its DLLs,
+  holds the previous files until the copy has succeeded, and restores them if it has not. Source
+  trees are sent to the releases page (their files come from git), and a read-only release folder
+  gets the manual route instead. `--check-updates` prints the comparison without opening the
+  window, and `--version` prints the current version.
+
 ## 1.0 — 2026-11-17
 
 The first public release. Windows x64.
