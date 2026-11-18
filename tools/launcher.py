@@ -988,9 +988,6 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
 
 TABS = [
     ("Graphics", [
-        {"kind": "note", "warn": True,
-         "text": "FOV above 90\u00b0 can cull models at the screen edges; they may pop in when you "
-                 "turn."},
         {"kind": "combo", "key": "sh4_clock", "label": "CPU clock",
          "values": [("200 MHz (default)", 200), ("250 MHz", 250), ("300 MHz (1.5x)", 300),
                     ("400 MHz (2x)", 400)],
@@ -1012,6 +1009,8 @@ TABS = [
          "help": "Two numbers, for example 32:9."},
         {"kind": "slider", "key": "fov", "label": "Field of view", "min": 60, "max": 120,
          "suffix": "\u00b0",
+         "warning": "FOV above 90\u00b0 might cull models at screen edges, causing pop in when "
+                    "you turn.",
          "help": "The vertical field of view. A wider angle shows more of the world above and "
                  "below, and everything looks smaller; narrower zooms in. It composes with "
                  "Widescreen: the aspect and the FOV are separate parts of the projection. The "
@@ -1272,6 +1271,11 @@ class Launcher(tk.Tk):
             if widget is not None:
                 widget.grid(row=row, column=1, sticky="w", padx=(18, 0), pady=(10, 0))
             row += 1
+            if c.get("warning"):
+                tk.Label(tab, text=c["warning"], bg=self.BG, fg="#e0a030", anchor="w",
+                         justify="left", wraplength=720, font=("Segoe UI", 9)).grid(
+                    row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
+                row += 1
             # The explanation sits under its row rather than in a third column: a long radio label
             # or a wide combo pushed a third column off the edge of the window.
             if c.get("help"):
