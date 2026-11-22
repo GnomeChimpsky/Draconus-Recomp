@@ -54,6 +54,17 @@ param(
     # trigger blocks and the right trigger attacks. A and X keep their own buttons too; menus use
     # the right stick or the d-pad. The launcher exposes the same option as Controls > Modern.
     [switch]$ModernControls,
+    # -Haptics: drive the pads through renhdrum.dll (third_party\renhdrum\), which is what reaches a
+    # DualSense's voice-coil actuators, a Pro Controller's HD Rumble and an Xbox pad's four motors.
+    # Without it, or without the DLL, the jump pack drives the pad's two motors as before.
+    [switch]$Haptics,
+    # -TriggerFeedback: pulse the trigger that made an impact -- the block that took a hit, the swing
+    # that landed. -TriggerResistance: hold LT and feel it resist while the block is up. Both need a
+    # wired DualSense.
+    [switch]$TriggerFeedback,
+    [switch]$TriggerResistance,
+    [switch]$HapticsSpeaker,
+    [ValidateRange(10, 100)][int]$HapticsStrength = 100,
     # -Gamma 1.25: display gamma for the finished picture. 1.0 is the title's own output; above it
     # lifts dark and mid tones, below it deepens them. It is presentation only: F11/F12 keep the
     # guest's own framebuffer.
@@ -94,6 +105,14 @@ if ((Test-Path $sdl) -and -not (Test-Path $dll)) {
     Write-Host "copied SDL3.dll next to the executable"
 }
 
+# RenHDrum is loaded from the executable's own folder, so a source run needs the same copy the
+# release bundle carries. Missing means plain rumble, never a failed launch.
+$renhdrum = Join-Path $root "third_party\renhdrum\renhdrum.dll"
+$renhdrumBeside = Join-Path (Split-Path $exe) "renhdrum.dll"
+if ((Test-Path $renhdrum) -and -not (Test-Path $renhdrumBeside)) {
+    Copy-Item $renhdrum $renhdrumBeside
+}
+
 $arguments = @("--config", $cfg, "--window")
 if ($Scale -ne 1) { $arguments += @("--scale", "$Scale") }
 $ratio = if ($Aspect) { $Aspect } elseif ($Widescreen) { "16:9" } else { "" }
@@ -104,6 +123,15 @@ if ($PresentRate -gt 0) { $arguments += @("--present-rate", "$PresentRate") }
 if ($Interpolate) { $arguments += "--frame-interpolation" }
 if ($DisplayMode -ne "windowed") { $arguments += @("--display", $DisplayMode) }
 if ($ModernControls) { $arguments += @("--controls", "modern") }
+if ($Haptics) {
+    $arguments += "--haptics"
+    if ($TriggerFeedback) { $arguments += "--trigger-feedback" }
+    if ($TriggerResistance) { $arguments += "--trigger-resistance" }
+    if ($HapticsSpeaker) { $arguments += "--haptics-speaker" }
+    if ($HapticsStrength -ne 100) { $arguments += @("--haptics-strength", "$HapticsStrength") }
+} elseif ($TriggerFeedback -or $TriggerResistance) {
+    Write-Host "trigger feedback needs -Haptics; ignoring it"
+}
 if ($Gamma -ne 1.0) {
     $gammaText = $Gamma.ToString([Globalization.CultureInfo]::InvariantCulture)
     $arguments += @("--gamma", $gammaText)
@@ -120,6 +148,17 @@ if ($Interpret -and -not $Translated) {
 }
 if ($ModernControls) {
     Write-Host "controls: modern (left stick strafe, right stick turn, LT block, RT attack)"
+}
+if ($Haptics) {
+    $feel = @()
+    if ($TriggerFeedback) { $feel += "hit feedback" }
+    if ($TriggerResistance) { $feel += "block resistance" }
+    if ($HapticsSpeaker) { $feel += "speaker" }
+    $suffix = if ($feel.Count -gt 0) { " + " + ($feel -join ", ") } else { "" }
+    Write-Host ("haptics: HD rumble" + $suffix)
+    if (-not (Test-Path $renhdrumBeside)) {
+        Write-Host "  renhdrum.dll is not beside the build: plain rumble will be used"
+    }
 }
 
 & $exe @arguments

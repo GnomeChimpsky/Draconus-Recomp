@@ -569,7 +569,7 @@ index eaee9e3..3476772 100644
      void destroy();
  
 diff --git a/render/include/dream/render/vk/texture_cache.h b/render/include/dream/render/vk/texture_cache.h
-index 7dd89a2..724839f 100644
+index 7dd89a2..44a115a 100644
 --- a/render/include/dream/render/vk/texture_cache.h
 +++ b/render/include/dream/render/vk/texture_cache.h
 @@ -46,6 +46,11 @@ public:
@@ -584,6 +584,36 @@ index 7dd89a2..724839f 100644
  
      // The descriptor set for a polygon's texture, or VK_NULL_HANDLE when it cannot be decoded.
      // `cmd` is a command buffer outside a render pass, used for the upload.
+@@ -68,6 +73,11 @@ public:
+     // Textures dropped because the renderer wrote over them: a non-zero count means the title
+     // really is rendering to a texture rather than merely double buffering.
+     std::uint32_t overwritten = 0;
++    // Textures that were dropped because the bytes they were decoded from no longer match what the
++    // cache decoded: the guest rewrote video memory through a path no write hook reported. A
++    // non-zero count on a screen means the invalidation missed that write, and the entry has been
++    // decoded again from what is in video memory now.
++    std::uint32_t revalidated = 0;
+     const std::string& error() const noexcept { return error_; }
+ 
+ private:
+@@ -86,9 +96,17 @@ private:
+         VkDescriptorSet set = VK_NULL_HANDLE;
+         HostBuffer staging;
+         TextureInfo info;
++        // A fingerprint of the bytes this entry was decoded from (see source_digest).
++        std::uint64_t digest = 0;
+     };
+ 
+     void free_entry(Entry& e);
++    // A cheap fingerprint of the region of video memory a texture is decoded from: a fixed number
++    // of eight-byte samples spread across it. Decoding a texture is expensive and video memory is
++    // sampled from it cheaply, so this is the guard against a guest write no hook reported (a DMA
++    // path not modelled, a cache-block store, a render to texture): on a cache hit the fingerprint
++    // is recomputed and the entry is decoded again when it no longer matches.
++    std::uint64_t source_digest(const TextureInfo& info) const;
+     VkSampler sampler_for(std::uint32_t tsp, bool tiled);
+     bool upload(VkCommandBuffer cmd, Entry& entry, const std::vector<std::uint32_t>& pixels);
+ 
 diff --git a/render/include/dream/render/vk/window.h b/render/include/dream/render/vk/window.h
 index 4133b49..55f7c37 100644
 --- a/render/include/dream/render/vk/window.h
@@ -728,7 +758,7 @@ index b2489da..225222b 100644
      // third of it unsampled, which is the aliasing this exists to remove. The small bias keeps a
      // 1:1 image on the single-tap path, where any averaging would only blur it -- without it a
 diff --git a/render/src/display_list.cpp b/render/src/display_list.cpp
-index 5586152..bcdc850 100644
+index 5586152..f9f3347 100644
 --- a/render/src/display_list.cpp
 +++ b/render/src/display_list.cpp
 @@ -2,7 +2,10 @@
@@ -742,7 +772,7 @@ index 5586152..bcdc850 100644
  
  namespace dream::render {
  
-@@ -483,4 +486,297 @@ bool polygon_tiles(const Frame& frame, const Polygon& polygon) {
+@@ -483,4 +486,303 @@ bool polygon_tiles(const Frame& frame, const Polygon& polygon) {
      return false;
  }
  
@@ -883,6 +913,12 @@ index 5586152..bcdc850 100644
 +    for (const Panel& panel : panels) {
 +        if (is_handled(panel.quad))
 +            continue;
++        const float mid = 0.5f * (panel.min_x + panel.max_x);
++        float anchor = width * 0.5f;
++        if (mid < width / 3.0f)
++            anchor = panel.min_x;
++        else if (mid > width * (2.0f / 3.0f))
++            anchor = panel.max_x;
 +        const float mid = 0.5f * (panel.min_x + panel.max_x);
 +        float anchor = width * 0.5f;
 +        if (mid < width / 3.0f)
@@ -1519,18 +1555,29 @@ index 0000000..f2f25e4
 +
 +}  // namespace dream::render
 diff --git a/render/src/view_main.cpp b/render/src/view_main.cpp
-index 8cd6e3a..b0c9cb8 100644
+index 8cd6e3a..afe0a42 100644
 --- a/render/src/view_main.cpp
 +++ b/render/src/view_main.cpp
-@@ -95,6 +95,7 @@ int main(int argc, char** argv) {
+@@ -93,8 +93,10 @@ int main(int argc, char** argv) {
+     const char* screenshot = nullptr;
+     bool fit = false, all_lists = false, show_framebuffer = false;
      const char* vram_path = nullptr;
++    const char* reload_vram = nullptr;
      bool stats = false, polygons = false;
      const char* regs_path = nullptr;
 +    double aspect = 0.0;
      dream::render::vk::FrameGeometry geometry;
      for (int i = 1; i < argc; ++i) {
          if (!std::strcmp(argv[i], "--frames") && i + 1 < argc)
-@@ -121,11 +122,24 @@ int main(int argc, char** argv) {
+@@ -115,17 +117,32 @@ int main(int argc, char** argv) {
+             all_lists = true;
+         else if (!std::strcmp(argv[i], "--vram") && i + 1 < argc)
+             vram_path = argv[++i];
++        else if (!std::strcmp(argv[i], "--reload-vram") && i + 1 < argc)
++            reload_vram = argv[++i];
+         else if (!std::strcmp(argv[i], "--stats"))
+             stats = true;
+         else if (!std::strcmp(argv[i], "--polygons"))
              polygons = true;
          else if (!std::strcmp(argv[i], "--regs") && i + 1 < argc)
              regs_path = argv[++i];
@@ -1556,7 +1603,17 @@ index 8cd6e3a..b0c9cb8 100644
          return 2;
      }
  
-@@ -264,8 +278,20 @@ int main(int argc, char** argv) {
+@@ -159,7 +176,8 @@ int main(int argc, char** argv) {
+                             p.tcw);
+                 for (std::uint32_t i = 0; i < p.count; ++i) {
+                     const dream::render::Vertex& v = frame.vertices[p.first + i];
+-                    std::printf(" (%.1f %.1f %.4f %08x %08x)", v.x, v.y, v.z, v.base, v.offset);
++                    std::printf(" (%.1f %.1f %.4f %.5f %.5f %08x %08x)", v.x, v.y, v.z, v.u, v.v,
++                                v.base, v.offset);
+                 }
+                 std::printf("\n");
+             }
+@@ -264,8 +282,20 @@ int main(int argc, char** argv) {
          }
      }
  
@@ -1571,13 +1628,39 @@ index 8cd6e3a..b0c9cb8 100644
 +
 +    // A screenshot is a one-frame job: without --frames the viewer is interactive and would wait
 +    // for the window to close, which turned every scripted capture replay into a hang.
-+    const int loop_frames = frames > 0 ? frames : (screenshot ? 1 : 0);
++    const int loop_frames = frames > 0 ? frames : (reload_vram ? 2 : (screenshot ? 1 : 0));
      int drawn = 0;
 -    while (window.poll() && (frames == 0 || drawn < frames)) {
 +    while (window.poll() && (loop_frames == 0 || drawn < loop_frames)) {
          std::uint32_t image = 0;
          VkCommandBuffer cmd = VK_NULL_HANDLE;
          if (!window.begin_frame(image, cmd)) {
+@@ -306,7 +336,25 @@ int main(int argc, char** argv) {
+                 renderer.punch_through_polygons, renderer.drawn_vertices, renderer.pipelines,
+                 renderer.textures().decoded, renderer.textures().failed);
+         ++drawn;
++        // --reload-vram FILE: put new bytes under the cache after the first draw without telling
++        // it, which is exactly what a write no hook reports looks like. The second draw has to
++        // notice and decode again; if it does not, the numbers after this line are the symptom.
++        if (reload_vram && drawn == 1) {
++            std::ifstream rf(reload_vram, std::ios::binary);
++            std::vector<char> fresh((std::istreambuf_iterator<char>(rf)), {});
++            if (fresh.size() == vram.size()) {
++                std::memcpy(vram.data(), fresh.data(), vram.size());
++                std::printf("  replaced video memory from %s (%zu bytes) behind the cache's back\n",
++                            reload_vram, fresh.size());
++            } else {
++                std::fprintf(stderr, "  %s is not the same size as the loaded video memory\n",
++                             reload_vram);
++            }
++        }
+     }
++    std::printf("  cache: %u decoded, %u failed, %u revalidated after video memory changed\n",
++                renderer.textures().decoded, renderer.textures().failed,
++                renderer.textures().revalidated);
+     if (screenshot) {
+         std::vector<std::uint8_t> pixels;
+         std::uint32_t w = 0, h = 0;
 diff --git a/render/src/vk/offscreen.cpp b/render/src/vk/offscreen.cpp
 index 41d2488..c11e591 100644
 --- a/render/src/vk/offscreen.cpp
@@ -2074,7 +2157,7 @@ index 78777d2..02b815d 100644
          destroy();
          return false;
 diff --git a/render/src/vk/texture_cache.cpp b/render/src/vk/texture_cache.cpp
-index f2eac2e..41ebe45 100644
+index f2eac2e..ae16f60 100644
 --- a/render/src/vk/texture_cache.cpp
 +++ b/render/src/vk/texture_cache.cpp
 @@ -87,7 +87,12 @@ bool TextureCache::set_palette(const std::uint32_t* palette_ram, PaletteFormat f
@@ -2106,6 +2189,47 @@ index f2eac2e..41ebe45 100644
      }
      if (doomed.empty())
          return 0;
+@@ -138,6 +147,10 @@ VkSampler TextureCache::sampler_for(std::uint32_t tsp, bool tiled) {
+     return sampler;
+ }
+ 
++std::uint64_t TextureCache::source_digest(const TextureInfo& info) const {
++    return texture_digest(info, vram_, vram_size_);
++}
++
+ bool TextureCache::upload(VkCommandBuffer cmd, Entry& e, const std::vector<std::uint32_t>& pixels) {
+     const VkDeviceSize bytes = pixels.size() * 4;
+     if (!e.staging.ensure(*ctx_, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
+@@ -218,8 +231,19 @@ VkDescriptorSet TextureCache::get(VkCommandBuffer cmd, std::uint32_t tcw, std::u
+     const std::uint64_t key =
+         (static_cast<std::uint64_t>(tcw) << 32) | (tsp & 0x3Fu) | (tiled ? 0x40u : 0u);
+     if (auto it = entries_.find(key); it != entries_.end()) {
+-        ++hits;
+-        return it->second.set;
++        Entry& hit = it->second;
++        // A failed entry has nothing to verify and must stay a failure. A real one is checked
++        // against video memory: the guest can rewrite a texture through a path that reports no
++        // write (a DMA engine not modelled, a cache-block store, a render to texture), and the
++        // decoded pixels would then be the previous picture while the framebuffer claims to show
++        // the new one. That is exactly the class of bug the invalidation ranges cannot see.
++        if (!hit.set || hit.digest == 0 || source_digest(hit.info) == hit.digest) {
++            ++hits;
++            return hit.set;
++        }
++        ++revalidated;
++        free_entry(hit);
++        entries_.erase(it);
+     }
+ 
+     Entry e;
+@@ -234,6 +258,7 @@ VkDescriptorSet TextureCache::get(VkCommandBuffer cmd, std::uint32_t tcw, std::u
+         entries_.emplace(key, std::move(e));
+         return VK_NULL_HANDLE;
+     }
++    e.digest = source_digest(e.info);
+     if (!upload(cmd, e, pixels)) {
+         ++failed;
+         entries_.emplace(key, std::move(e));
 diff --git a/render/src/vk/window.cpp b/render/src/vk/window.cpp
 index 0b0f03d..88cceec 100644
 --- a/render/src/vk/window.cpp
@@ -3471,7 +3595,7 @@ index 5980e74..554297c 100644
    src/maple/maple.cpp
    src/aica/arm7.cpp
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 9dff7cd..7a5e805 100644
+index 9dff7cd..15f1508 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -16,12 +16,33 @@
@@ -5429,8 +5553,14 @@ index 9dff7cd..7a5e805 100644
              static_cast<unsigned long long>(replay.skipped_interrupt),
              static_cast<unsigned long long>(replay.skipped_nonlocal),
              static_cast<unsigned long long>(replay.skipped_too_long), replay.divergences().size());
-@@ -2167,8 +3539,59 @@ int main(int argc, char** argv) {
+@@ -2165,10 +3537,65 @@ int main(int argc, char** argv) {
+             live->renderer.textures().decoded, live->renderer.textures().failed,
+             live->renderer.textures().overwritten,
              static_cast<unsigned long long>(live->palette_changes));
++        if (live->renderer.textures().revalidated)
++            std::printf(
++                "window: %u textures revalidated: their bytes changed without a reported write\n",
++                live->renderer.textures().revalidated);
          if (live->have_frame)
              std::printf("window: last shown %s\n", live->shown.describe().c_str());
 +        if (live->interpolation)
@@ -5489,7 +5619,7 @@ index 9dff7cd..7a5e805 100644
          live.reset();
      }
  #endif
-@@ -2237,7 +3660,8 @@ int main(int argc, char** argv) {
+@@ -2237,7 +3664,8 @@ int main(int argc, char** argv) {
          }
      }
      const std::string text = report_text(sys, bios, pvr, stop, host_s, bytes, cfg.link_address,
@@ -6633,7 +6763,7 @@ index e9b838e..7be215e 100644
          line_cycles_ /= 2;
      if (line_cycles_ == 0)
 diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
-index 7d292b7..3d5bc60 100644
+index 7d292b7..0c79f7d 100644
 --- a/runtime/src/sh4/abi_bare.cpp
 +++ b/runtime/src/sh4/abi_bare.cpp
 @@ -2,6 +2,7 @@
@@ -6702,7 +6832,17 @@ index 7d292b7..3d5bc60 100644
      if (GuestFn fn = find_function(target, &m)) {
          fn(c, m);
          return;
-@@ -352,9 +381,27 @@ void trapa(Ctx& c, ::dream::Memory& m, std::uint32_t imm) {
+@@ -323,7 +352,8 @@ void call_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target) {
+             c.pc = target;
+             // resume() dispatches on its own block starts and calls resume_miss for anything else,
+             // so a target that is inside the range but not a block start still faults honestly
+-            // rather than running from the wrong place.
++            // rather than running from the wrong place. resume_miss tries the other containing
++            // entries first, then the interpreter.
+             e->resume(c, m, target);
+             return;
+         }
+@@ -352,9 +382,27 @@ void trapa(Ctx& c, ::dream::Memory& m, std::uint32_t imm) {
                               " (no exception model in the bare harness)");
  }
  
@@ -6730,7 +6870,7 @@ index 7d292b7..3d5bc60 100644
          g_hooks->on_rte(c, m);
          return unwind;
      }
-@@ -364,7 +411,24 @@ bool rte(Ctx& c, ::dream::Memory& m) {
+@@ -364,7 +412,24 @@ bool rte(Ctx& c, ::dream::Memory& m) {
      return false;
  }
  

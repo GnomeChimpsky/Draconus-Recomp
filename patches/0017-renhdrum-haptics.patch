@@ -1,0 +1,2212 @@
+diff --git a/render/CMakeLists.txt b/render/CMakeLists.txt
+index 91740fa..e65c66f 100644
+--- a/render/CMakeLists.txt
++++ b/render/CMakeLists.txt
+@@ -17,6 +17,7 @@ add_library(dream_render STATIC
+   src/input_menu.cpp
+   src/present_rate.cpp
+   src/window_size.cpp
++  src/trigger_effect.cpp
+ )
+ target_include_directories(dream_render PUBLIC include)
+ target_link_libraries(dream_render PUBLIC dream::runtime)
+@@ -25,7 +26,7 @@ add_library(dream::render ALIAS dream_render)
+ 
+ # The device-independent half is tested on every runner, with or without a GPU.
+ if(DREAM_BUILD_TESTS)
+-  add_executable(dream_render_tests tests/test_display_list.cpp tests/test_texture.cpp tests/test_framebuffer.cpp tests/test_tsp.cpp tests/test_background.cpp tests/test_fog.cpp tests/test_overlay.cpp tests/test_input.cpp tests/test_input_menu.cpp tests/test_window_size.cpp tests/test_present_rate.cpp tests/test_interpolate.cpp ${DREAM_ROOT}/runtime/tests/test_main.cpp)
++  add_executable(dream_render_tests tests/test_display_list.cpp tests/test_texture.cpp tests/test_framebuffer.cpp tests/test_tsp.cpp tests/test_background.cpp tests/test_fog.cpp tests/test_overlay.cpp tests/test_input.cpp tests/test_input_menu.cpp tests/test_window_size.cpp tests/test_present_rate.cpp tests/test_interpolate.cpp tests/test_trigger_effect.cpp ${DREAM_ROOT}/runtime/tests/test_main.cpp)
+   target_link_libraries(dream_render_tests PRIVATE dream::render)
+   target_include_directories(dream_render_tests SYSTEM PRIVATE ${DREAM_ROOT}/third_party/doctest)
+   dream_target_defaults(dream_render_tests)
+@@ -82,9 +83,13 @@ add_library(dream_render_vk STATIC
+   src/vk/texture_cache.cpp
+   src/vk/offscreen.cpp
+   src/vk/present.cpp
++  # RenHDrum's host side (third_party/renhdrum, MIT): the DLL is loaded at run time, so this needs
++  # no import library and the game still runs when the file is absent.
++  src/haptics.cpp
+ )
+ add_dependencies(dream_render_vk dream_render_shaders)
+-target_include_directories(dream_render_vk PUBLIC include PRIVATE ${_spv_dir})
++target_include_directories(dream_render_vk PUBLIC include PRIVATE ${_spv_dir}
++                           ${DREAM_ROOT}/third_party/renhdrum/include)
+ target_link_libraries(dream_render_vk PUBLIC dream::render Vulkan::Vulkan SDL3::SDL3)
+ dream_target_defaults(dream_render_vk)
+ add_library(dream::render_vk ALIAS dream_render_vk)
+@@ -104,4 +109,11 @@ target_include_directories(dream_render_view PRIVATE ${_spv_dir})
+ target_link_libraries(dream_render_view PRIVATE dream::render_vk)
+ dream_target_defaults(dream_render_view)
+ 
++# A standalone check of the haptics path on this machine: claims the first pad through RenHDrum and
++# plays a scripted block / hit / rumble sequence. Not a test (it needs a controller and ears); run it
++# by hand with renhdrum.dll beside it.
++add_executable(dream_haptics_probe src/haptics_probe.cpp)
++target_link_libraries(dream_haptics_probe PRIVATE dream::render_vk)
++dream_target_defaults(dream_haptics_probe)
++
+ message(STATUS "dream::render: Vulkan backend enabled (glslc ${DREAM_GLSLC})")
+diff --git b/render/include/dream/render/haptics.h b/render/include/dream/render/haptics.h
+new file mode 100644
+index 0000000..0dbce0d
+--- /dev/null
++++ b/render/include/dream/render/haptics.h
+@@ -0,0 +1,96 @@
++// RenHDrum-backed haptics for the pads the plain SDL rumble cannot reach.
++//
++// SDL's rumble call turns a pad's two motors on for a number of milliseconds. That is all a Dreamcast
++// jump pack ever asked for, but a DualSense is not two motors: it has two voice-coil actuators driven
++// by its own 4-channel USB audio endpoint, two adaptive triggers that take an effect each, and a
++// speaker. RenHDrum (MIT, Three-Dola) is the engine that turns a two-band rumble sample into those
++// three things, and this class is the host side of it: load the DLL, claim the pads, feed it the
++// jump pack's effects, and turn the block and attack buttons into trigger feedback.
++//
++// Everything here degrades to the old behaviour: no DLL, a DLL from another version, a pad RenHDrum
++// does not know, or the feature switched off in the launcher all leave SDL's rumble in charge.
++#pragma once
++
++#include <cstdint>
++#include <memory>
++#include <string>
++
++#include "dream/render/trigger_effect.h"
++
++struct SDL_Gamepad;
++
++namespace dream::render {
++
++// What the launcher's Controller tab asked for.
++struct HapticsOptions {
++    // Drive claimed pads through RenHDrum instead of SDL's plain motors. A DualSense gets its
++    // voice-coil actuators over USB audio, a Pro Controller gets HD Rumble packets, an Xbox pad gets
++    // all four motors.
++    bool hd_rumble = false;
++    // The block and attack buttons pulse the trigger that made them, when the game reports an impact.
++    bool trigger_feedback = false;
++    // Holding the block button pushes back, so the guard has weight before anything hits it.
++    bool trigger_resistance = false;
++    // Audible taps out of the DualSense speaker, synthesised by RenHDrum from the rumble.
++    bool speaker = false;
++    // RenHDrum's final output gain, percent (10-100).
++    int strength = 100;
++
++    bool wants_any() const noexcept {
++        return hd_rumble || trigger_feedback || trigger_resistance || speaker;
++    }
++};
++
++// One jump pack effect as the Maple device decoded it; see maple::JumpPack::Effect.
++struct HapticsEffect {
++    float power = 0.0f;          // 0..1, seven steps from the pack's two drive fields
++    std::uint32_t duration_ms = 0;
++    std::uint8_t freq = 0;       // the pack's own 4..30 Hz motor rate
++    bool continuous = false;
++};
++
++class Haptics {
++public:
++    Haptics();
++    ~Haptics();
++    Haptics(const Haptics&) = delete;
++    Haptics& operator=(const Haptics&) = delete;
++
++    // Applies the options and loads renhdrum.dll beside the executable on first use. Safe to call
++    // more than once; a run with every option off never touches the DLL.
++    void configure(const HapticsOptions& options);
++    const HapticsOptions& options() const;
++
++    // Pads are opened and closed by the window, so they are claimed and released here. attach() is
++    // a no-op for a pad it cannot drive, which is what leaves that pad on the SDL path.
++    void attach(SDL_Gamepad* pad);
++    void detach(SDL_Gamepad* pad);
++
++    // True when RenHDrum drives this pad. The caller must skip SDL's own rumble for it or the effect
++    // plays twice.
++    bool claims(SDL_Gamepad* pad) const;
++
++    // A guest vibration effect. A zero effect stops everything immediately.
++    void pack(const HapticsEffect& effect);
++
++    // Once a frame, after the pads have been polled: the block button's travel (0..1) and whether
++    // the attack button is down.
++    void set_controls(float block_value, bool attack_held);
++
++    // Once a frame: retires finished effects, ticks the packet-paced backends, sends whatever the
++    // trigger planner changed.
++    void update();
++
++    // Releases the triggers and the speaker and drops every pad. Called when the window closes, and
++    // it must also be reachable from the launcher's exit path because ExitProcess skips destructors.
++    void stop();
++
++    // One line for the log: what was loaded and which pad it drives.
++    const std::string& status() const;
++
++private:
++    struct Impl;
++    std::unique_ptr<Impl> impl_;
++};
++
++}  // namespace dream::render
+diff --git b/render/include/dream/render/trigger_effect.h b/render/include/dream/render/trigger_effect.h
+new file mode 100644
+index 0000000..1a8085b
+--- /dev/null
++++ b/render/include/dream/render/trigger_effect.h
+@@ -0,0 +1,114 @@
++// DualSense adaptive-trigger effects and the block/attack trigger planner.
++//
++// The bytes in a TriggerEffect are the 11-byte "zone effect" block a DualSense takes for one trigger:
++// 10 zones over the travel, a 3-bit strength per zone, plus a mode byte. The encodings and the mode
++// numbers come from RenHDrum's documented DualSense support (MIT, Three-Dola), which itself credits
++// Nielk1's reverse engineering; the test vectors in tests/test_trigger_effect.cpp are the same ones
++// its own suite pins, so a byte that changes here is a byte that would stop a real controller.
++//
++// Nothing here touches SDL or the DLL: it is pure data and time, so the whole feel of the feature is
++// unit-tested without a controller or a GPU. The window owns a TriggerPlanner and asks it, once a
++// frame, which effects changed.
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++
++namespace dream::render {
++
++// One adaptive-trigger effect, exactly as it goes on the wire.
++struct TriggerEffect {
++    static constexpr std::size_t kSize = 11;
++    static constexpr int kZones = 10;
++    std::uint8_t bytes[kSize]{};
++
++    friend bool operator==(const TriggerEffect& a, const TriggerEffect& b) noexcept;
++    friend bool operator!=(const TriggerEffect& a, const TriggerEffect& b) noexcept {
++        return !(a == b);
++    }
++};
++
++// Free trigger, no resistance.
++TriggerEffect trigger_off();
++// Resistance from `start_zone` (0-9) to the end of the travel, strength 1-8. This is the "you are
++// pushing against something" effect: holding the button down feels like compressing a spring.
++TriggerEffect trigger_feedback(int start_zone, int strength);
++// Resistance between two zones that breaks when pulled past the end, like a gun trigger.
++TriggerEffect trigger_weapon(int start_zone, int end_zone, int strength);
++// Buzzing inside the trigger from `start_zone` on: amplitude 1-8, frequency in Hz (1-255).
++TriggerEffect trigger_vibration(int start_zone, int amplitude, int frequency);
++
++// Which trigger an effect is for. The left trigger blocks, the right one attacks.
++enum class TriggerSide { Left, Right };
++
++// What the player asked for on the launcher's Controller tab.
++struct TriggerFeel {
++    // Hold the left trigger and feel it resist, for as long as the block is held.
++    bool resistance = true;
++    int resistance_zone = 1;      // 0-9: where the resistance starts biting
++    int resistance_strength = 2;  // 1-8: how hard it pushes back
++};
++
++// Turns the block button, the attack button and the jump pack's effects into per-trigger feedback.
++//
++// The title is the only source of "something was hit": its Puru Puru effects fire on a block that
++// connects and on an attack that lands (measured on hardware), and nothing else in the game state is
++// visible to the host. So the plan is the same one a player would describe:
++//   * left trigger held               -> resistance, so the block has weight before anything happens
++//   * an effect while it is held      -> a sharp buzz in the left trigger: the block took a hit
++//   * right trigger pressed           -> a faint buzz: the swing itself
++//   * an effect within the swing window -> a hard buzz in the right trigger: the hit connected
++class TriggerPlanner {
++public:
++    // Re-arming is cheap and idempotent, so the caller may set the feel every frame.
++    void set_feel(const TriggerFeel& feel) noexcept { feel_ = feel; }
++    const TriggerFeel& feel() const noexcept { return feel_; }
++
++    // Edges, in seconds on a monotonic clock. Calling with the same value every frame is fine.
++    void set_block(bool held, double now) noexcept;
++    void set_attack(bool held, double now) noexcept;
++
++    // The jump pack fired: `power` is the decoded 0..1 strength. Returns true when it counted as an
++    // impact; a faint effect is the game's own ambience and must not punch the triggers.
++    bool impact(float power, double now) noexcept;
++
++    struct Side {
++        TriggerEffect effect{};
++        bool changed = false;
++    };
++    struct Output {
++        Side left;
++        Side right;
++    };
++    // The effects to send this frame. Only sides whose effect differs from the last one are marked
++    // changed, so a held block does not resend the same block sixty times a second.
++    Output update(double now);
++
++    void reset() noexcept;
++
++    // Thresholds, public so the tests and the diagnostics name the same numbers as the code.
++    static constexpr float kImpactPower = 0.20f;   // below this it is ambience, not a hit
++    static constexpr double kBlockPulse = 0.110;   // how long the block-hit buzz lasts
++    static constexpr double kHitPulse = 0.090;     // how long the landing-blow buzz lasts
++    static constexpr double kSwingPulse = 0.055;   // the swing itself, before anything lands
++    static constexpr double kSwingWindow = 0.400;  // an impact this soon after the press is our hit
++    static constexpr double kMinGap = 0.070;       // never machine-gun two pulses into one trigger
++
++private:
++    TriggerEffect desired(TriggerSide side, double now) const noexcept;
++
++    TriggerFeel feel_{};
++    bool block_held_ = false;
++    bool attack_held_ = false;
++    double block_pulse_until_ = -1.0;
++    double hit_pulse_until_ = -1.0;
++    double swing_pulse_until_ = -1.0;
++    double swing_window_until_ = -1.0;
++    double last_left_pulse_ = -1.0;
++    double last_right_pulse_ = -1.0;
++    TriggerEffect sent_left_{};
++    TriggerEffect sent_right_{};
++    bool primed_ = false;
++};
++
++}  // namespace dream::render
+diff --git a/render/include/dream/render/vk/window.h b/render/include/dream/render/vk/window.h
+index 5e957a5..241d3f8 100644
+--- a/render/include/dream/render/vk/window.h
++++ b/render/include/dream/render/vk/window.h
+@@ -6,6 +6,7 @@
+ #include <string>
+ #include <vector>
+ 
++#include "dream/render/haptics.h"
+ #include "dream/render/input.h"
+ #include "dream/render/vk/context.h"
+ #include "dream/render/vk/resources.h"
+@@ -140,7 +141,19 @@ public:
+     // motors. `power` is 0 to 1; zero stops immediately. Both motors get the same strength: the
+     // Dreamcast pack has one, and splitting the effect between a pad's two motors would make it
+     // depend on which motors a particular pad happens to have. A keyboard-only run does nothing.
+-    void rumble(float power, std::uint32_t duration_ms);
++    //
++    // With HD rumble on, a pad RenHDrum claims is driven by that instead (see set_haptics_options);
++    // the pads it does not claim keep the two-motor path above. `freq` is the pack's own 4-30 Hz
++    // motor rate, which colours the low band, and `continuous` says the title will keep repeating it.
++    void rumble(float power, std::uint32_t duration_ms, std::uint8_t freq = 0,
++                bool continuous = false);
++
++    // RenHDrum options, fixed for the run. With every option off this is inert and the pads keep the
++    // plain SDL rumble above.
++    void set_haptics_options(const HapticsOptions& options);
++    const HapticsOptions& haptics_options() const noexcept { return haptics_.options(); }
++    // One line for the log: whether the DLL loaded, and which pads it drives.
++    const std::string& haptics_status() const noexcept { return haptics_.status(); }
+ 
+     // Rebinding: the next physical input becomes a Binding rather than reaching the game. Escape
+     // cancels. While capturing, pad_held() reports nothing, so the key being bound cannot also be
+@@ -221,6 +234,9 @@ private:
+ 
+     std::vector<SDL_Gamepad*> pads_;
+     std::vector<std::string> devices_;
++    // RenHDrum's pads and trigger feedback. Declared beside the pads because it is claimed and
++    // released exactly when they are opened and closed.
++    Haptics haptics_;
+     // The XInput slot the fallback is reading, or -1 while SDL owns the pads. Kept so a rumble can
+     // reach the same slot the input came from.
+     int xinput_slot_ = -1;
+diff --git b/render/src/haptics.cpp b/render/src/haptics.cpp
+new file mode 100644
+index 0000000..452a321
+--- /dev/null
++++ b/render/src/haptics.cpp
+@@ -0,0 +1,756 @@
++// See haptics.h. The host half of RenHDrum: one slot per claimed controller, the DLL resolved at run
++// time (never linked), and a fall-back to SDL's rumble on every path that cannot be taken.
++//
++// Threading: the window calls configure/attach/detach/pack/set_controls/update/stop from the game
++// thread. SDL calls the DualSense audio callback on its own thread, so a DSP handle is only touched
++// under that pad's dsp lock, and the handle is detached from the slot *before* the stream that feeds
++// it is destroyed -- the other order is a use-after-free the moment a callback is already in flight.
++#include "dream/render/haptics.h"
++
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cmath>
++#include <cstddef>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <vector>
++
++#include <SDL3/SDL.h>
++
++#if defined(_WIN32)
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#endif
++
++#include "renhdrum.h"
++
++namespace dream::render {
++namespace {
++
++using Clock = std::chrono::steady_clock;
++
++constexpr int kAudioFrames = 256;
++constexpr int kChannels = 4;
++constexpr std::uint8_t kSpeakerPercent = RENHDRUM_HD_HAPTICS_SPEAKER_PERCENT;
++constexpr double kAudioRetrySeconds = 2.0;
++// The title sends one-shot effects and continuous ones, and a lost stop must still end. Half a second
++// of no repeat is long enough never to cut a real effect and short enough not to leave a motor on.
++constexpr double kIdleStopSeconds = 0.25;
++// The trigger is analogue; a pad that rests a little above zero must not read as "blocking".
++constexpr float kBlockThreshold = 0.25f;
++
++constexpr std::uint16_t kSonyVid = 0x054C;
++constexpr std::uint16_t kDualSensePid = 0x0CE6;
++constexpr std::uint16_t kDualSenseEdgePid = 0x0DF2;
++constexpr std::uint16_t kNintendoVid = 0x057E;
++constexpr std::uint16_t kProControllerPid = 0x2009;
++constexpr std::uint16_t kMicrosoftVid = 0x045E;
++
++// The Pro Controller's neutral 10-byte sub-command packet: both motors stopped, nothing else asked
++// for. Sent on release so a pad is never left buzzing after the window is gone.
++constexpr std::array<std::uint8_t, 10> kProNeutral{0x10, 0, 0x00, 0x01, 0x40,
++                                                   0x40, 0, 0x00, 0x01, 0x40};
++
++bool trace_enabled() {
++    static const bool on = std::getenv("DREAM_RENHDRUM_TRACE") != nullptr;
++    return on;
++}
++
++double seconds_now() {
++    static const auto origin = Clock::now();
++    return std::chrono::duration<double>(Clock::now() - origin).count();
++}
++
++std::int64_t microseconds_now() {
++    return std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch())
++        .count();
++}
++
++// The two-band sample the RenHDrum engines take. The pack's three-bit drive becomes amplitude; its
++// 4..30 Hz motor rate scales the low band, so a slow heavy effect sits near 60 Hz and a fast one
++// rises toward 120. The high band is the bite: stronger and higher on a short hit, so a blow reads as
++// sharp rather than soft.
++struct Sample {
++    float al = 0.0f, fl = 0.0f, ah = 0.0f, fh = 0.0f;
++};
++
++Sample sample_from(float power, std::uint8_t freq, std::uint32_t duration_ms) {
++    const float p = std::clamp(power, 0.0f, 1.0f);
++    const float rate = std::clamp((static_cast<float>(freq) - 4.0f) / 26.0f, 0.0f, 1.0f);
++    const bool short_hit = duration_ms > 0 && duration_ms <= 160;
++    Sample s;
++    s.al = p;
++    s.fl = 60.0f + 60.0f * rate;
++    s.ah = p * (short_hit ? 0.55f : 0.30f);
++    s.fh = short_hit ? 340.0f : 260.0f;
++    return s;
++}
++
++// The RenHDrum C ABI, resolved by name so the game runs with or without the DLL.
++struct Api {
++    bool tried = false;
++    bool ok = false;
++    std::string why;
++
++    std::uint32_t (*version)() = nullptr;
++
++    // Pro Controller
++    RenHdcEngine* (*engine_create)(bool, bool) = nullptr;
++    void (*engine_destroy)(RenHdcEngine*) = nullptr;
++    std::int32_t (*settings_default)(RenHdcSettings*) = nullptr;
++    std::int32_t (*engine_apply)(RenHdcEngine*, const RenHdcSettings*) = nullptr;
++    std::int32_t (*engine_push)(RenHdcEngine*, std::int64_t, bool, float, float, float, float) =
++        nullptr;
++    std::int32_t (*engine_tick)(RenHdcEngine*, std::int64_t, std::uint8_t*) = nullptr;
++
++    // DualSense
++    RenHdcDualSenseDsp* (*ds_create)(std::int32_t, bool) = nullptr;
++    void (*ds_destroy)(RenHdcDualSenseDsp*) = nullptr;
++    std::int32_t (*ds_set_half)(RenHdcDualSenseDsp*, bool, float, float, float, float) = nullptr;
++    std::int32_t (*ds_set_speaker)(RenHdcDualSenseDsp*, std::int32_t) = nullptr;
++    std::int32_t (*ds_fill)(RenHdcDualSenseDsp*, float*, std::size_t) = nullptr;
++    std::int32_t (*speaker_block)(std::int32_t, std::uint8_t*) = nullptr;
++    std::int32_t (*trigger_block)(std::int32_t, const std::uint8_t*, std::uint8_t*) = nullptr;
++
++    // Xbox
++    RenHdcXboxRumble* (*xbox_create)(bool) = nullptr;
++    void (*xbox_destroy)(RenHdcXboxRumble*) = nullptr;
++    std::int32_t (*xbox_push)(RenHdcXboxRumble*, std::int64_t, bool, float, float, float, float) =
++        nullptr;
++    std::int32_t (*xbox_tick)(RenHdcXboxRumble*, std::int64_t, std::uint16_t*) = nullptr;
++};
++
++template <typename T>
++void resolve(T& fn, HMODULE dll, const char* name) {
++    fn = reinterpret_cast<T>(reinterpret_cast<void*>(GetProcAddress(dll, name)));
++}
++
++// Loads renhdrum.dll from beside the game's own executable, never from the working directory or PATH:
++// a stray copy left by another title would otherwise be picked up and read as this one.
++bool load_api(Api& api) {
++    if (api.tried)
++        return api.ok;
++    api.tried = true;
++
++    if (const char* off = std::getenv("DREAM_RENHDRUM"); off && std::strcmp(off, "0") == 0) {
++        api.why = "switched off by DREAM_RENHDRUM=0";
++        return false;
++    }
++
++#if !defined(_WIN32)
++    api.why = "only supported on Windows";
++    return false;
++#else
++    wchar_t exe_path[MAX_PATH]{};
++    const DWORD len = GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
++    if (len == 0 || len >= MAX_PATH) {
++        api.why = "cannot find the game executable";
++        return false;
++    }
++    wchar_t* slash = std::wcsrchr(exe_path, L'\\');
++    if (!slash) {
++        api.why = "cannot find the game executable";
++        return false;
++    }
++    if (std::wcslen(exe_path) + 16 >= MAX_PATH) {
++        api.why = "the game's folder path is too long";
++        return false;
++    }
++    std::wmemcpy(slash + 1, L"renhdrum.dll", 13);
++
++    HMODULE dll = LoadLibraryExW(exe_path, nullptr,
++                                 LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
++    if (!dll) {
++        api.why = "renhdrum.dll not found beside the game";
++        return false;
++    }
++
++    resolve(api.version, dll, "renhdrum_version");
++    const std::uint32_t expected = static_cast<std::uint32_t>(RENHDRUM_VERSION) >> 8;
++    if (!api.version || ((api.version() >> 8) != expected)) {
++        FreeLibrary(dll);
++        api.version = nullptr;
++        api.why = "renhdrum.dll is a different version";
++        return false;
++    }
++
++    // Everything else is optional: a DLL missing one family's exports leaves only that family on
++    // SDL's rumble rather than failing the whole feature.
++    resolve(api.engine_create, dll, "renhdrum_engine_create");
++    resolve(api.engine_destroy, dll, "renhdrum_engine_destroy");
++    resolve(api.settings_default, dll, "renhdrum_settings_default");
++    resolve(api.engine_apply, dll, "renhdrum_engine_apply_settings");
++    resolve(api.engine_push, dll, "renhdrum_engine_push_half_sample");
++    resolve(api.engine_tick, dll, "renhdrum_engine_tick");
++
++    resolve(api.ds_create, dll, "renhdrum_dualsense_dsp_create");
++    resolve(api.ds_destroy, dll, "renhdrum_dualsense_dsp_destroy");
++    resolve(api.ds_set_half, dll, "renhdrum_dualsense_dsp_set_half_target");
++    resolve(api.ds_set_speaker, dll, "renhdrum_dualsense_dsp_set_speaker");
++    resolve(api.ds_fill, dll, "renhdrum_dualsense_dsp_fill_f32");
++    resolve(api.speaker_block, dll, "renhdrum_hd_haptics_speaker_block");
++    resolve(api.trigger_block, dll, "renhdrum_hd_haptics_trigger_block");
++
++    resolve(api.xbox_create, dll, "renhdrum_xbox_rumble_create");
++    resolve(api.xbox_destroy, dll, "renhdrum_xbox_rumble_destroy");
++    resolve(api.xbox_push, dll, "renhdrum_xbox_rumble_push_half_sample");
++    resolve(api.xbox_tick, dll, "renhdrum_xbox_rumble_tick");
++
++    api.ok = true;
++    return true;
++#endif
++}
++
++// The DualSense's own audio endpoint: the only way on Windows to reach its voice coils. Windows brings
++// the HID interface up long before the audio class one, hence the retry loop that calls this.
++SDL_AudioDeviceID find_dualsense_audio() {
++    SDL_AudioDeviceID found = 0;
++    int count = 0;
++    if (SDL_AudioDeviceID* ids = SDL_GetAudioPlaybackDevices(&count)) {
++        for (int i = 0; i < count && found == 0; ++i) {
++            const char* name = SDL_GetAudioDeviceName(ids[i]);
++            if (!name)
++                continue;
++            if (!std::strstr(name, "DualSense") && !std::strstr(name, "Wireless Controller"))
++                continue;
++            SDL_AudioSpec spec{};
++            if (SDL_GetAudioDeviceFormat(ids[i], &spec, nullptr) && spec.channels >= kChannels)
++                found = ids[i];
++        }
++        SDL_free(ids);
++    }
++    return found;
++}
++
++// One controller RenHDrum drives. Unique pointers keep these addresses stable, which matters because
++// the audio callback is handed the slot itself.
++struct Pad {
++    enum class Kind { DualSense, Xbox, Pro };
++
++    SDL_Gamepad* gamepad = nullptr;
++    SDL_Joystick* joystick = nullptr;
++    const Api* api = nullptr;
++    Kind kind = Kind::DualSense;
++    bool wireless = false;
++    // RenHDrum owns this pad's rumble, so the caller must not also play SDL's.
++    bool rumble = false;
++    // This pad takes adaptive-trigger effects.
++    bool triggers = false;
++    // The next update must send the current trigger effects even if they did not change: a pad that
++    // just appeared has never seen them.
++    bool triggers_fresh = false;
++    bool announced = false;
++
++    // Rumble envelope: the effect the guest asked for, and when it runs out.
++    bool live = false;
++    double until = 0.0;
++
++    // DualSense
++    std::mutex dsp_lock;
++    RenHdcDualSenseDsp* dsp = nullptr;
++    SDL_AudioStream* stream = nullptr;
++    SDL_AudioDeviceID device = 0;
++    double next_audio_try = 0.0;
++    bool speaker_on = false;
++    // A pad that refuses an output report is worth saying once, not sixty times a second.
++    bool effect_refused = false;
++
++    // Xbox
++    RenHdcXboxRumble* xbox = nullptr;
++    bool xbox_triggers = false;
++
++    // Pro Controller
++    RenHdcEngine* engine = nullptr;
++};
++
++}  // namespace
++
++struct Haptics::Impl {
++    HapticsOptions options;
++    Api api;
++    std::vector<std::unique_ptr<Pad>> pads;
++    TriggerPlanner planner;
++    float block_value = 0.0f;
++    bool attack_held = false;
++    std::string status = "haptics: off";
++
++    bool enabled() const noexcept { return options.wants_any() && api.ok; }
++    bool trigger_driving() const noexcept {
++        return api.ok && (options.trigger_feedback || options.trigger_resistance);
++    }
++
++    void refresh_status();
++    void attach_pad(SDL_Gamepad* gamepad);
++    void release_pad(Pad& p, bool quiet);
++    void release_all(bool quiet);
++    void push(Pad& p, bool right, const Sample& s);
++    void push_both(Pad& p, const Sample& s);
++    void tick(Pad& p, std::int64_t now_us);
++    void ds_try_audio(Pad& p, double now);
++    void ds_send(Pad& p, const std::uint8_t* block47);
++    void ds_set_speaker(Pad& p, bool on);
++    void send_trigger(Pad& p, bool right, const TriggerEffect& effect);
++    void silence_all();
++
++    static void SDLCALL audio_callback(void* userdata, SDL_AudioStream* stream,
++                                       int additional_amount, int total_amount);
++};
++
++void Haptics::Impl::refresh_status() {
++    if (!options.wants_any()) {
++        status = "haptics: off";
++        return;
++    }
++    if (!api.ok) {
++        status = "haptics: " + api.why;
++        return;
++    }
++    std::string line = "haptics: on";
++    int shown = 0;
++    for (const auto& p : pads) {
++        if (!p->rumble && !p->triggers)
++            continue;
++        line += shown == 0 ? " (" : ", ";
++        line += p->kind == Pad::Kind::DualSense  ? "DualSense"
++                : p->kind == Pad::Kind::Xbox     ? "Xbox"
++                                                 : "Pro Controller";
++        line += p->wireless ? " BT" : " USB";
++        if (p->triggers && trigger_driving())
++            line += ", triggers";
++        if (p->speaker_on)
++            line += ", speaker";
++        line += ")";
++        ++shown;
++    }
++    if (shown == 0)
++        line = "haptics: on, no supported pad yet";
++    status = line;
++}
++
++void Haptics::Impl::push(Pad& p, bool right, const Sample& s) {
++    switch (p.kind) {
++        case Pad::Kind::DualSense: {
++            if (!api.ds_set_half || !p.dsp)
++                return;
++            std::lock_guard<std::mutex> lock(p.dsp_lock);
++            api.ds_set_half(p.dsp, right, s.al, s.fl, s.ah, s.fh);
++            break;
++        }
++        case Pad::Kind::Xbox:
++            if (api.xbox_push && p.xbox)
++                api.xbox_push(p.xbox, microseconds_now(), right, s.al, s.fl, s.ah, s.fh);
++            break;
++        case Pad::Kind::Pro:
++            if (api.engine_push && p.engine)
++                api.engine_push(p.engine, microseconds_now(), right, s.al, s.fl, s.ah, s.fh);
++            break;
++    }
++}
++
++void Haptics::Impl::push_both(Pad& p, const Sample& s) {
++    push(p, false, s);
++    push(p, true, s);
++}
++
++// The two backends that pace their own packets: their tick says when the pad needs one.
++void Haptics::Impl::tick(Pad& p, std::int64_t now_us) {
++    if (p.kind == Pad::Kind::Xbox && p.xbox && api.xbox_tick && p.joystick) {
++        std::uint16_t motors[4]{};
++        if (api.xbox_tick(p.xbox, now_us, motors) == 1) {
++            // Short durations: a dropped packet must never leave a motor or a trigger stuck on.
++            SDL_RumbleJoystick(p.joystick, motors[0], motors[1], 2000);
++            if (p.xbox_triggers)
++                SDL_RumbleJoystickTriggers(p.joystick, motors[2], motors[3], 200);
++        }
++    } else if (p.kind == Pad::Kind::Pro && p.engine && api.engine_tick && p.joystick) {
++        std::uint8_t packet[10]{};
++        if (api.engine_tick(p.engine, now_us, packet) == 1)
++            SDL_SendJoystickEffect(p.joystick, packet, 10);
++    }
++}
++
++// One 47-byte DS5 effect state block, which SDL forwards to the pad's HID interface.
++void Haptics::Impl::ds_send(Pad& p, const std::uint8_t* block47) {
++    if (!p.joystick)
++        return;
++    if (SDL_SendJoystickEffect(p.joystick, block47, RENHDRUM_DS5_EFFECTS_SIZE) || p.effect_refused)
++        return;
++    p.effect_refused = true;
++    std::printf("renhdrum: this pad refused an output report; its triggers and speaker will do "
++                "nothing\n");
++}
++
++void Haptics::Impl::ds_set_speaker(Pad& p, bool on) {
++    if (!api.speaker_block || !api.ds_set_speaker || !p.dsp)
++        return;
++    std::uint8_t block[RENHDRUM_DS5_EFFECTS_SIZE]{};
++    if (api.speaker_block(on ? 1 : 0, block) != RENHDRUM_OK)
++        return;
++    ds_send(p, block);
++    {
++        std::lock_guard<std::mutex> lock(p.dsp_lock);
++        api.ds_set_speaker(p.dsp, on ? static_cast<std::int32_t>(kSpeakerPercent) : 0);
++    }
++    p.speaker_on = on;
++}
++
++void Haptics::Impl::send_trigger(Pad& p, bool right, const TriggerEffect& effect) {
++    if (!api.trigger_block || !p.triggers)
++        return;
++    std::uint8_t block[RENHDRUM_DS5_EFFECTS_SIZE]{};
++    if (api.trigger_block(right ? 1 : 0, effect.bytes, block) != RENHDRUM_OK)
++        return;
++    ds_send(p, block);
++}
++
++void Haptics::Impl::ds_try_audio(Pad& p, double now) {
++    // The endpoint is opened for the actuators and the speaker, never for the triggers alone: a pad
++    // whose rumble still comes from SDL must not be handed a silent stream as well.
++    if (!options.hd_rumble && !options.speaker)
++        return;
++    if (p.stream || !api.ds_create || !api.ds_fill || now < p.next_audio_try)
++        return;
++    p.next_audio_try = now + kAudioRetrySeconds;
++    if (!SDL_InitSubSystem(SDL_INIT_AUDIO))
++        return;
++    // A DualSense plugged in after the window opened is never registered without a pump.
++    SDL_PumpEvents();
++    const SDL_AudioDeviceID device = find_dualsense_audio();
++    if (device == 0)
++        return;
++
++    SDL_AudioSpec spec{};
++    spec.format = SDL_AUDIO_F32;
++    spec.channels = kChannels;
++    spec.freq = 48000;
++    SDL_AudioStream* stream =
++        SDL_OpenAudioDeviceStream(device, &spec, &Haptics::Impl::audio_callback, &p);
++    if (!stream)
++        return;
++    if (!SDL_ResumeAudioStreamDevice(stream)) {
++        SDL_DestroyAudioStream(stream);
++        return;
++    }
++    p.stream = stream;
++    p.device = device;
++    // The audio path is live, so this pad can be driven by haptics instead of SDL's motors.
++    p.rumble = options.hd_rumble && p.dsp != nullptr;
++    if (p.rumble && p.joystick)
++        SDL_RumbleJoystick(p.joystick, 0, 0, 0);  // stop SDL's motors competing with the actuators
++    if (options.speaker && options.hd_rumble)
++        ds_set_speaker(p, true);
++    if (trace_enabled())
++        std::printf("renhdrum: DualSense audio endpoint opened (device %u)\n",
++                    static_cast<unsigned>(device));
++    refresh_status();
++}
++
++// SDL calls this on its audio thread: it only ever touches the DSP under the slot's own lock, and the
++// slot clears that pointer before the stream is destroyed.
++void SDLCALL Haptics::Impl::audio_callback(void* userdata, SDL_AudioStream* stream,
++                                           int additional_amount, int total_amount) {
++    (void)total_amount;
++    auto* p = static_cast<Pad*>(userdata);
++    if (!p || !stream || additional_amount <= 0)
++        return;
++    const int bytes_per_frame = kChannels * static_cast<int>(sizeof(float));
++    int frames = additional_amount / bytes_per_frame;
++    if (frames <= 0)
++        return;
++    float chunk[kAudioFrames * kChannels];
++    while (frames > 0) {
++        const int n = std::min(frames, kAudioFrames);
++        {
++            std::lock_guard<std::mutex> lock(p->dsp_lock);
++            const auto fill = p->api ? p->api->ds_fill : nullptr;
++            if (!p->dsp || !fill || fill(p->dsp, chunk, static_cast<std::size_t>(n)) < 0)
++                std::fill(chunk, chunk + n * kChannels, 0.0f);
++        }
++        SDL_PutAudioStreamData(stream, chunk, n * bytes_per_frame);
++        frames -= n;
++    }
++}
++
++void Haptics::Impl::attach_pad(SDL_Gamepad* gamepad) {
++    if (!gamepad || !enabled())
++        return;
++    for (const auto& existing : pads)
++        if (existing->gamepad == gamepad)
++            return;
++
++    const std::uint16_t vid = SDL_GetGamepadVendor(gamepad);
++    const std::uint16_t pid = SDL_GetGamepadProduct(gamepad);
++    const SDL_JoystickConnectionState connection = SDL_GetGamepadConnectionState(gamepad);
++    const bool wireless = connection == SDL_JOYSTICK_CONNECTION_WIRELESS;
++    const bool want_rumble = options.hd_rumble;
++    const bool want_triggers = trigger_driving();
++
++    auto slot = std::make_unique<Pad>();
++    slot->api = &api;
++    slot->gamepad = gamepad;
++    slot->joystick = SDL_GetGamepadJoystick(gamepad);
++    slot->wireless = wireless;
++
++    if (vid == kSonyVid && (pid == kDualSensePid || pid == kDualSenseEdgePid)) {
++        // The 4-channel endpoint does not exist over Bluetooth, and the combined report that replaces
++        // it is not implemented here, so a wireless DualSense keeps SDL's own rumble.
++        if (wireless) {
++            if (trace_enabled())
++                std::printf("renhdrum: DualSense over Bluetooth: plain rumble\n");
++            return;
++        }
++        slot->kind = Pad::Kind::DualSense;
++        if (want_rumble && api.ds_create && api.ds_fill) {
++            slot->dsp = api.ds_create(static_cast<std::int32_t>(options.strength), true);
++            if (!slot->dsp)
++                return;
++        }
++        slot->triggers = want_triggers && api.trigger_block != nullptr;
++        slot->triggers_fresh = true;
++        pads.push_back(std::move(slot));
++        // Audio comes up after the HID interface; rumble is claimed only once it does, so a pad
++        // without it falls back instead of going silent.
++        ds_try_audio(*pads.back(), seconds_now());
++    } else if (vid == kNintendoVid && pid == kProControllerPid) {
++        if (!want_rumble || !api.engine_create || !api.engine_push || !api.engine_tick)
++            return;
++        slot->kind = Pad::Kind::Pro;
++        RenHdcEngine* engine = api.engine_create(wireless, true);
++        if (!engine)
++            return;
++        if (api.settings_default && api.engine_apply) {
++            RenHdcSettings settings{};
++            if (api.settings_default(&settings) == RENHDRUM_OK)
++                api.engine_apply(engine, &settings);
++        }
++        slot->engine = engine;
++        slot->rumble = true;
++        pads.push_back(std::move(slot));
++    } else if (SDL_GetGamepadType(gamepad) == SDL_GAMEPAD_TYPE_XBOXONE || vid == kMicrosoftVid) {
++        if (!want_rumble || !api.xbox_create || !api.xbox_push || !api.xbox_tick)
++            return;
++        slot->kind = Pad::Kind::Xbox;
++        RenHdcXboxRumble* xbox = api.xbox_create(wireless);
++        if (!xbox)
++            return;
++        slot->xbox = xbox;
++        slot->rumble = true;
++        // Trigger motors need the raw HID path; SDL says whether this pad has them.
++        if (SDL_Joystick* joystick = slot->joystick)
++            slot->xbox_triggers = SDL_GetBooleanProperty(SDL_GetJoystickProperties(joystick),
++                                                         "SDL.joystick.cap.trigger_rumble", false);
++        pads.push_back(std::move(slot));
++    } else {
++        return;
++    }
++
++    if (trace_enabled()) {
++        const char* name = SDL_GetGamepadName(gamepad);
++        std::printf("renhdrum: attached \"%s\" (%s)\n", name && *name ? name : "?",
++                    pads.back()->kind == Pad::Kind::DualSense  ? "DualSense"
++                    : pads.back()->kind == Pad::Kind::Xbox     ? "Xbox"
++                                                               : "Pro Controller");
++    }
++    pads.back()->announced = true;
++    refresh_status();
++}
++
++void Haptics::Impl::release_pad(Pad& p, bool quiet) {
++    if (!quiet) {
++        if (p.rumble)
++            push_both(p, Sample{});
++        if (p.triggers) {
++            send_trigger(p, false, trigger_off());
++            send_trigger(p, true, trigger_off());
++        }
++    }
++
++    switch (p.kind) {
++        case Pad::Kind::DualSense: {
++            if (p.speaker_on)
++                ds_set_speaker(p, false);
++            // Detach the handle first: a callback already in flight must see null, not freed memory.
++            RenHdcDualSenseDsp* dsp = nullptr;
++            {
++                std::lock_guard<std::mutex> lock(p.dsp_lock);
++                dsp = p.dsp;
++                p.dsp = nullptr;
++            }
++            SDL_AudioStream* stream = p.stream;
++            p.stream = nullptr;
++            if (stream)
++                SDL_DestroyAudioStream(stream);  // joins the callback
++            if (dsp && api.ds_destroy)
++                api.ds_destroy(dsp);
++            break;
++        }
++        case Pad::Kind::Xbox:
++            if (p.joystick) {
++                SDL_RumbleJoystick(p.joystick, 0, 0, 0);
++                if (p.xbox_triggers)
++                    SDL_RumbleJoystickTriggers(p.joystick, 0, 0, 0);
++            }
++            if (p.xbox && api.xbox_destroy)
++                api.xbox_destroy(p.xbox);
++            p.xbox = nullptr;
++            break;
++        case Pad::Kind::Pro:
++            if (p.joystick)
++                SDL_SendJoystickEffect(p.joystick, kProNeutral.data(),
++                                       static_cast<int>(kProNeutral.size()));
++            if (p.engine && api.engine_destroy)
++                api.engine_destroy(p.engine);
++            p.engine = nullptr;
++            break;
++    }
++    p.rumble = false;
++    p.triggers = false;
++    p.live = false;
++}
++
++void Haptics::Impl::release_all(bool quiet) {
++    for (auto& p : pads)
++        release_pad(*p, quiet);
++    pads.clear();
++    planner.reset();
++    refresh_status();
++}
++
++void Haptics::Impl::silence_all() {
++    for (auto& p : pads) {
++        if (p->rumble)
++            push_both(*p, Sample{});
++        p->live = false;
++    }
++}
++
++Haptics::Haptics() : impl_(std::make_unique<Impl>()) {}
++
++Haptics::~Haptics() {
++    stop();
++}
++
++void Haptics::configure(const HapticsOptions& options) {
++    impl_->options = options;
++    impl_->options.strength = std::clamp(options.strength, 10, 100);
++    // The speaker is part of the audio path, so it makes no sense without HD rumble feeding it.
++    if (!impl_->options.hd_rumble)
++        impl_->options.speaker = false;
++    if (!impl_->options.wants_any()) {
++        impl_->status = "haptics: off";
++        return;
++    }
++    if (!load_api(impl_->api)) {
++        impl_->status = "haptics: " + impl_->api.why;
++        return;
++    }
++    impl_->status = "haptics: on, no supported pad yet";
++    if (trace_enabled()) {
++        const std::uint32_t ver = impl_->api.version ? impl_->api.version() : 0;
++        std::printf("renhdrum: loaded version %u.%u.%u\n", (ver >> 16) & 0xFF, (ver >> 8) & 0xFF,
++                    ver & 0xFF);
++    }
++}
++
++const HapticsOptions& Haptics::options() const {
++    return impl_->options;
++}
++
++void Haptics::attach(SDL_Gamepad* gamepad) {
++    impl_->attach_pad(gamepad);
++}
++
++void Haptics::detach(SDL_Gamepad* gamepad) {
++    for (auto it = impl_->pads.begin(); it != impl_->pads.end(); ++it) {
++        if ((*it)->gamepad != gamepad)
++            continue;
++        impl_->release_pad(**it, false);
++        impl_->pads.erase(it);
++        impl_->refresh_status();
++        return;
++    }
++}
++
++bool Haptics::claims(SDL_Gamepad* gamepad) const {
++    for (const auto& p : impl_->pads)
++        if (p->gamepad == gamepad)
++            return p->rumble;
++    return false;
++}
++
++void Haptics::pack(const HapticsEffect& effect) {
++    if (!impl_->enabled())
++        return;
++    const double now = seconds_now();
++    if (effect.power <= 0.001f) {
++        impl_->silence_all();
++        return;
++    }
++    if (impl_->trigger_driving())
++        impl_->planner.impact(effect.power, now);
++
++    const Sample s = sample_from(effect.power, effect.freq, effect.duration_ms);
++    const double life = std::max(static_cast<double>(effect.duration_ms) / 1000.0, kIdleStopSeconds);
++    for (auto& p : impl_->pads) {
++        if (!p->rumble)
++            continue;
++        impl_->push_both(*p, s);
++        p->live = true;
++        p->until = now + life;
++    }
++}
++
++void Haptics::set_controls(float block_value, bool attack_held) {
++    impl_->block_value = std::clamp(block_value, 0.0f, 1.0f);
++    impl_->attack_held = attack_held;
++}
++
++void Haptics::update() {
++    if (!impl_->enabled())
++        return;
++    const double now = seconds_now();
++    const std::int64_t now_us = microseconds_now();
++
++    for (auto& p : impl_->pads) {
++        if (p->kind == Pad::Kind::DualSense)
++            impl_->ds_try_audio(*p, now);
++        if (p->rumble && p->live && now >= p->until) {
++            impl_->push_both(*p, Sample{});
++            p->live = false;
++        }
++        impl_->tick(*p, now_us);
++    }
++
++    if (!impl_->trigger_driving())
++        return;
++    impl_->planner.set_block(impl_->block_value > kBlockThreshold, now);
++    impl_->planner.set_attack(impl_->attack_held, now);
++    const TriggerPlanner::Output out = impl_->planner.update(now);
++    for (auto& p : impl_->pads) {
++        if (!p->triggers)
++            continue;
++        if (p->triggers_fresh || out.left.changed)
++            impl_->send_trigger(*p, false, out.left.effect);
++        if (p->triggers_fresh || out.right.changed)
++            impl_->send_trigger(*p, true, out.right.effect);
++        p->triggers_fresh = false;
++    }
++}
++
++void Haptics::stop() {
++    if (!impl_)
++        return;
++    impl_->release_all(false);
++    impl_->status = "haptics: off";
++}
++
++const std::string& Haptics::status() const {
++    return impl_->status;
++}
++
++}  // namespace dream::render
+diff --git b/render/src/haptics_probe.cpp b/render/src/haptics_probe.cpp
+new file mode 100644
+index 0000000..a63f09b
+--- /dev/null
++++ b/render/src/haptics_probe.cpp
+@@ -0,0 +1,137 @@
++// A hardware check for the Controller tab, with no game attached.
++//
++//   dream_haptics_probe [--speaker] [--seconds N]
++//
++// Opens the first pad, hands it to RenHDrum and plays a short scripted sequence: a held block that
++// resists, a block that takes a hit, a swing that lands, and a burst of plain rumble. It prints what
++// it claimed and what it played, so "haptics are on but nothing happens" can be told apart from "the
++// pad was never claimed" without starting a game and playing to the first fight.
++//
++// Exit codes: 0 the sequence ran, 2 no pad, 3 no renhdrum.dll.
++#include <SDL3/SDL.h>
++
++#include <chrono>
++#include <cstdio>
++#include <cstring>
++#include <string>
++#include <thread>
++
++#include "dream/render/haptics.h"
++
++namespace {
++
++using Clock = std::chrono::steady_clock;
++
++// The script, in seconds since start. One line per moment so the console reads like the sequence a
++// player would recognise.
++struct Step {
++    double at;
++    const char* what;
++};
++
++constexpr Step kScript[] = {
++    {0.60, "block down: the left trigger should resist from about a third of its travel"},
++    {1.80, "block takes a hit: a short buzz in the left trigger"},
++    {2.80, "block release: the trigger goes free"},
++    {3.60, "attack press: a faint buzz in the right trigger"},
++    {4.10, "attack lands: a harder buzz in the right trigger"},
++    {5.20, "plain rumble: the pad's actuators, both sides"},
++    {6.80, "stop"},
++};
++
++}  // namespace
++
++int main(int argc, char** argv) {
++    bool speaker = false;
++    double seconds = 8.0;
++    for (int i = 1; i < argc; ++i) {
++        if (std::strcmp(argv[i], "--speaker") == 0) {
++            speaker = true;
++        } else if (std::strcmp(argv[i], "--seconds") == 0 && i + 1 < argc) {
++            seconds = std::atof(argv[++i]);
++        } else if (std::strcmp(argv[i], "--help") == 0) {
++            std::printf("usage: %s [--speaker] [--seconds N]\n", argv[0]);
++            return 0;
++        }
++    }
++
++    if (!SDL_Init(SDL_INIT_GAMEPAD)) {
++        std::fprintf(stderr, "SDL_Init(gamepad): %s\n", SDL_GetError());
++        return 2;
++    }
++    SDL_InitSubSystem(SDL_INIT_AUDIO);
++
++    dream::render::HapticsOptions options;
++    options.hd_rumble = true;
++    options.trigger_feedback = true;
++    options.trigger_resistance = true;
++    options.speaker = speaker;
++
++    dream::render::Haptics haptics;
++    haptics.configure(options);
++    std::printf("%s\n", haptics.status().c_str());
++    if (haptics.status().find("renhdrum.dll") != std::string::npos) {
++        std::fprintf(stderr, "renhdrum.dll must sit beside this executable\n");
++        return 3;
++    }
++
++    // Match the window: every pad it could drive is opened, and only the first is scripted.
++    int count = 0;
++    SDL_JoystickID* ids = SDL_GetGamepads(&count);
++    SDL_Gamepad* pad = nullptr;
++    if (ids) {
++        for (int i = 0; i < count && !pad; ++i)
++            pad = SDL_OpenGamepad(ids[i]);
++        SDL_free(ids);
++    }
++    if (!pad) {
++        std::fprintf(stderr, "no gamepad found\n");
++        return 2;
++    }
++    const char* name = SDL_GetGamepadName(pad);
++    std::printf("pad: %s (vid %04X pid %04X)\n", name && *name ? name : "?",
++                SDL_GetGamepadVendor(pad), SDL_GetGamepadProduct(pad));
++    haptics.attach(pad);
++    std::printf("%s\n", haptics.status().c_str());
++    if (!haptics.claims(pad)) {
++        std::printf("this pad was not claimed for rumble: %s\n",
++                    "it keeps SDL's own rumble (a wireless DualSense, or an unknown pad)");
++    }
++
++    const auto start = Clock::now();
++    auto elapsed = [&start] {
++        return std::chrono::duration<double>(Clock::now() - start).count();
++    };
++    std::size_t next_step = 0;
++    while (true) {
++        const double t = elapsed();
++        while (next_step < std::size(kScript) && t >= kScript[next_step].at) {
++            std::printf("%5.2f  %s\n", kScript[next_step].at, kScript[next_step].what);
++            const double at = kScript[next_step].at;
++            if (at > 0.55 && at < 0.65) {
++                // The block is held from here to 2.8 s; the planner owns the resistance.
++            } else if (at > 1.75 && at < 1.85) {
++                haptics.pack(dream::render::HapticsEffect{1.0f, 120, 26, false});
++            } else if (at > 4.05 && at < 4.15) {
++                haptics.pack(dream::render::HapticsEffect{1.0f, 100, 26, false});
++            } else if (at > 5.15 && at < 5.25) {
++                haptics.pack(dream::render::HapticsEffect{0.7f, 900, 15, true});
++            }
++            ++next_step;
++        }
++        if (t > seconds)
++            break;
++
++        const bool block = t >= 0.60 && t < 2.80;
++        const bool attack = t >= 3.60 && t < 5.00;
++        haptics.set_controls(block ? 1.0f : 0.0f, attack);
++        haptics.update();
++        std::this_thread::sleep_for(std::chrono::milliseconds(5));
++    }
++
++    haptics.stop();
++    SDL_CloseGamepad(pad);
++    SDL_Quit();
++    std::printf("done\n");
++    return 0;
++}
+diff --git b/render/src/trigger_effect.cpp b/render/src/trigger_effect.cpp
+new file mode 100644
+index 0000000..c29353c
+--- /dev/null
++++ b/render/src/trigger_effect.cpp
+@@ -0,0 +1,180 @@
++// See trigger_effect.h. The byte layouts here are the DualSense zone effects: a mode byte, a 16-bit
++// map of which of the ten travel zones are active, and five 3-bit strengths packed into four bytes.
++#include "dream/render/trigger_effect.h"
++
++#include <algorithm>
++
++namespace dream::render {
++namespace {
++
++constexpr std::uint8_t kModeOff = 0x05;
++constexpr std::uint8_t kModeFeedback = 0x21;
++constexpr std::uint8_t kModeWeapon = 0x25;
++constexpr std::uint8_t kModeVibration = 0x26;
++
++int clamp_zone(int zone) {
++    return std::clamp(zone, 0, TriggerEffect::kZones - 1);
++}
++int clamp_strength(int strength) {
++    return std::clamp(strength, 1, 8);
++}
++
++// Packs per-zone strengths into the effect's active mask and strength words. A zone with a strength
++// of zero is simply not active, which is how a trigger stays free above or below the effect.
++void pack_zones(const int (&strengths)[TriggerEffect::kZones], TriggerEffect& out) {
++    std::uint16_t active = 0;
++    std::uint32_t values = 0;
++    for (int zone = 0; zone < TriggerEffect::kZones; ++zone) {
++        const int strength = strengths[zone];
++        if (strength <= 0)
++            continue;
++        active |= static_cast<std::uint16_t>(1u << zone);
++        values |= static_cast<std::uint32_t>((clamp_strength(strength) - 1) & 7) << (3 * zone);
++    }
++    out.bytes[1] = static_cast<std::uint8_t>(active & 0xFFu);
++    out.bytes[2] = static_cast<std::uint8_t>(active >> 8);
++    out.bytes[3] = static_cast<std::uint8_t>(values & 0xFFu);
++    out.bytes[4] = static_cast<std::uint8_t>((values >> 8) & 0xFFu);
++    out.bytes[5] = static_cast<std::uint8_t>((values >> 16) & 0xFFu);
++    out.bytes[6] = static_cast<std::uint8_t>((values >> 24) & 0xFFu);
++}
++
++}  // namespace
++
++bool operator==(const TriggerEffect& a, const TriggerEffect& b) noexcept {
++    for (std::size_t i = 0; i < TriggerEffect::kSize; ++i)
++        if (a.bytes[i] != b.bytes[i])
++            return false;
++    return true;
++}
++
++TriggerEffect trigger_off() {
++    TriggerEffect e{};
++    e.bytes[0] = kModeOff;
++    return e;
++}
++
++TriggerEffect trigger_feedback(int start_zone, int strength) {
++    int strengths[TriggerEffect::kZones]{};
++    for (int zone = clamp_zone(start_zone); zone < TriggerEffect::kZones; ++zone)
++        strengths[zone] = clamp_strength(strength);
++    TriggerEffect e{};
++    e.bytes[0] = kModeFeedback;
++    pack_zones(strengths, e);
++    return e;
++}
++
++TriggerEffect trigger_weapon(int start_zone, int end_zone, int strength) {
++    const int start = std::clamp(start_zone, 2, 7);
++    const int end = std::clamp(end_zone, start + 1, 8);
++    const auto zones = static_cast<std::uint16_t>((1u << start) | (1u << end));
++    TriggerEffect e{};
++    e.bytes[0] = kModeWeapon;
++    e.bytes[1] = static_cast<std::uint8_t>(zones & 0xFFu);
++    e.bytes[2] = static_cast<std::uint8_t>(zones >> 8);
++    e.bytes[3] = static_cast<std::uint8_t>(clamp_strength(strength) - 1);
++    return e;
++}
++
++TriggerEffect trigger_vibration(int start_zone, int amplitude, int frequency) {
++    int strengths[TriggerEffect::kZones]{};
++    for (int zone = clamp_zone(start_zone); zone < TriggerEffect::kZones; ++zone)
++        strengths[zone] = clamp_strength(amplitude);
++    TriggerEffect e{};
++    e.bytes[0] = kModeVibration;
++    pack_zones(strengths, e);
++    e.bytes[9] = static_cast<std::uint8_t>(std::clamp(frequency, 1, 255));
++    return e;
++}
++
++// ---- planner ------------------------------------------------------------------------------------
++
++void TriggerPlanner::set_block(bool held, double now) noexcept {
++    (void)now;
++    if (held == block_held_)
++        return;
++    block_held_ = held;
++    // Letting go ends the block-hit buzz with the block: a pulse that outlives the guard has nothing
++    // left to mean.
++    if (!held)
++        block_pulse_until_ = -1.0;
++}
++
++void TriggerPlanner::set_attack(bool held, double now) noexcept {
++    if (held == attack_held_)
++        return;
++    attack_held_ = held;
++    if (!held)
++        return;
++    // Every press swings. The faint buzz is the swing itself, and it also opens the window in which
++    // an incoming effect is read as *our* hit rather than as the game's ambience.
++    swing_window_until_ = now + kSwingWindow;
++    if (now - last_right_pulse_ >= kMinGap) {
++        swing_pulse_until_ = now + kSwingPulse;
++        last_right_pulse_ = now;
++    }
++}
++
++bool TriggerPlanner::impact(float power, double now) noexcept {
++    if (power < kImpactPower)
++        return false;
++    bool counted = false;
++    if (block_held_ && now - last_left_pulse_ >= kMinGap) {
++        block_pulse_until_ = now + kBlockPulse;
++        last_left_pulse_ = now;
++        counted = true;
++    }
++    if (now <= swing_window_until_ && now - last_right_pulse_ >= kMinGap) {
++        hit_pulse_until_ = now + kHitPulse;
++        last_right_pulse_ = now;
++        // One hit per swing: the burst that follows a landed blow is the same impact, not a second one.
++        swing_window_until_ = now;
++        counted = true;
++    }
++    return counted;
++}
++
++TriggerEffect TriggerPlanner::desired(TriggerSide side, double now) const noexcept {
++    if (side == TriggerSide::Left) {
++        if (now < block_pulse_until_)
++            return trigger_vibration(0, 8, 45);
++        if (block_held_ && feel_.resistance)
++            return trigger_feedback(feel_.resistance_zone, feel_.resistance_strength);
++        return trigger_off();
++    }
++    if (now < hit_pulse_until_)
++        return trigger_vibration(0, 8, 60);
++    if (now < swing_pulse_until_)
++        return trigger_vibration(0, 3, 30);
++    return trigger_off();
++}
++
++TriggerPlanner::Output TriggerPlanner::update(double now) {
++    Output out;
++    const TriggerEffect left = desired(TriggerSide::Left, now);
++    const TriggerEffect right = desired(TriggerSide::Right, now);
++    out.left.effect = left;
++    out.right.effect = right;
++    out.left.changed = !primed_ || left != sent_left_;
++    out.right.changed = !primed_ || right != sent_right_;
++    sent_left_ = left;
++    sent_right_ = right;
++    primed_ = true;
++    return out;
++}
++
++void TriggerPlanner::reset() noexcept {
++    block_held_ = false;
++    attack_held_ = false;
++    block_pulse_until_ = -1.0;
++    hit_pulse_until_ = -1.0;
++    swing_pulse_until_ = -1.0;
++    swing_window_until_ = -1.0;
++    last_left_pulse_ = -1.0;
++    last_right_pulse_ = -1.0;
++    sent_left_ = trigger_off();
++    sent_right_ = trigger_off();
++    primed_ = false;
++}
++
++}  // namespace dream::render
+diff --git a/render/src/vk/window.cpp b/render/src/vk/window.cpp
+index 49861bc..ac04185 100644
+--- a/render/src/vk/window.cpp
++++ b/render/src/vk/window.cpp
+@@ -650,6 +650,11 @@ void Window::refresh_devices() {
+     // before enumerating makes the list the same whether the pad was there at start or not.
+     map_unrecognised_pads();
+     SDL_PumpEvents();
++    // Release the haptics handles before the gamepads they belong to, or a claimed pad would be left
++    // buzzing (and on a DualSense, with its speaker and triggers still open).
++    for (SDL_Gamepad* g : pads_)
++        if (g)
++            haptics_.detach(g);
+     for (SDL_Gamepad* g : pads_)
+         if (g)
+             SDL_CloseGamepad(g);
+@@ -662,6 +667,7 @@ void Window::refresh_devices() {
+         for (int i = 0; i < count; ++i) {
+             if (SDL_Gamepad* g = SDL_OpenGamepad(ids[i])) {
+                 pads_.push_back(g);
++                haptics_.attach(g);
+                 const char* name = SDL_GetGamepadName(g);
+                 devices_.push_back(name && *name ? name : "GAMEPAD");
+             }
+@@ -1021,6 +1027,15 @@ const float dead = static_cast<float>(bindings_.deadzone_percent) / 100.0f;
+         pad_pressed_[i] = pad_held_[i] && !was;
+         pad_value_[i] = value;
+     }
++
++    // Trigger feedback is driven from the same resolved values the guest gets, so the block button
++    // and the swing button mean here exactly what they mean in the game. A pad RenHDrum did not
++    // claim simply has no triggers to feel this on.
++    if (haptics_options().wants_any()) {
++        haptics_.set_controls(pad_value(PadControl::LeftTrigger),
++                              pad_held(PadControl::RightTrigger));
++        haptics_.update();
++    }
+     return running_;
+ }
+ 
+@@ -1036,17 +1051,30 @@ float Window::pad_value(PadControl c) const noexcept {
+     return pad_value_[static_cast<unsigned>(c)];
+ }
+ 
+-void Window::rumble(float power, std::uint32_t duration_ms) {
++void Window::rumble(float power, std::uint32_t duration_ms, std::uint8_t freq, bool continuous) {
+     power = std::clamp(power, 0.0f, 1.0f);
+     const auto strength = static_cast<std::uint16_t>(std::lround(power * 65535.0f));
+     // A stop is immediate; a real effect lasts as long as the pack would have.
+     const std::uint32_t ms = power > 0.0f ? duration_ms : 0u;
+     if (std::getenv("DREAM_RUMBLE_TRACE"))
+         std::printf("rumble: power %.2f, %u ms, %zu SDL pad(s)\n", power, ms, pads_.size());
++    // A claimed pad is driven through RenHDrum, which is what makes a DualSense's actuators, its
++    // adaptive triggers and the Pro Controller's HD packets reachable at all. It also counts as
++    // played, so the XInput fallback below cannot fire a second time on the same pad.
+     bool played = false;
+-    for (SDL_Gamepad* g : pads_)
+-        if (g)
+-            played = SDL_RumbleGamepad(g, strength, strength, ms) || played;
++    // The effect is handed over whenever any haptics option is on: a pad RenHDrum only uses for its
++    // triggers is not claimed for rumble, and its two-motor fallback below still plays this.
++    if (haptics_options().wants_any()) {
++        haptics_.pack(HapticsEffect{power, duration_ms, freq, continuous});
++        for (SDL_Gamepad* g : pads_)
++            if (g && haptics_.claims(g))
++                played = true;
++    }
++    for (SDL_Gamepad* g : pads_) {
++        if (!g || haptics_.claims(g))
++            continue;
++        played = SDL_RumbleGamepad(g, strength, strength, ms) || played;
++    }
+ #if defined(_WIN32)
+     // SDL found no pad, or found one whose driver has no rumble, so try the XInput route as well.
+     // If no slot has been seen yet, look for one now rather than dropping the effect that arrived
+@@ -1073,6 +1101,15 @@ bool Window::held(Control c) const noexcept {
+     return held_[static_cast<unsigned>(c)];
+ }
+ 
++void Window::set_haptics_options(const HapticsOptions& options) {
++    haptics_.configure(options);
++    // The pads were opened by create(), before the launcher's options reached the window, so they
++    // have to be offered to RenHDrum after the fact or nothing would ever be claimed.
++    for (SDL_Gamepad* g : pads_)
++        if (g)
++            haptics_.attach(g);
++}
++
+ bool Window::pressed(Control c) const noexcept {
+     return pressed_[static_cast<unsigned>(c)];
+ }
+@@ -1218,7 +1255,10 @@ void Window::destroy() {
+     }
+     ctx_.destroy();
+     // A vibration still running when the window goes away would outlive the pack that asked for it
+-    // on a pad driver that keeps its last state, so stop every route explicitly.
++    // on a pad driver that keeps its last state, so stop every route explicitly. RenHDrum goes first:
++    // it has a speaker and two triggers of its own to release, and it must do that while the pads are
++    // still open.
++    haptics_.stop();
+     for (SDL_Gamepad* g : pads_)
+         if (g)
+             SDL_RumbleGamepad(g, 0, 0, 0);
+diff --git b/render/tests/test_trigger_effect.cpp b/render/tests/test_trigger_effect.cpp
+new file mode 100644
+index 0000000..988e7e3
+--- /dev/null
++++ b/render/tests/test_trigger_effect.cpp
+@@ -0,0 +1,182 @@
++// The DualSense trigger effects and the block/attack planner. These are the bytes a controller acts
++// on, so they are pinned against the same vectors RenHDrum's own suite pins (MIT, Three-Dola): if one
++// of these changes, a block or a hit stops feeling like anything on real hardware.
++#include "dream/render/trigger_effect.h"
++
++#include "doctest.h"
++
++#include <initializer_list>
++
++using namespace dream::render;
++
++namespace {
++
++TriggerEffect make(std::initializer_list<std::uint8_t> bytes) {
++    TriggerEffect e{};
++    std::size_t i = 0;
++    for (std::uint8_t b : bytes)
++        if (i < TriggerEffect::kSize)
++            e.bytes[i++] = b;
++    return e;
++}
++
++}  // namespace
++
++TEST_CASE("the trigger effects are the bytes a controller takes") {
++    CHECK(trigger_off() == make({0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}));
++
++    // Resistance from zone 2, strength 2: the shape a held block uses.
++    CHECK(trigger_feedback(2, 2) == make({0x21, 0xFC, 0x03, 0x40, 0x92, 0x24, 0x09, 0, 0, 0, 0}));
++    CHECK(trigger_feedback(0, 8) == make({0x21, 0xFF, 0x03, 0xFF, 0xFF, 0xFF, 0x3F, 0, 0, 0, 0}));
++    CHECK(trigger_feedback(9, 1) == make({0x21, 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0}));
++
++    CHECK(trigger_weapon(2, 5, 8) == make({0x25, 0x24, 0x00, 0x07, 0, 0, 0, 0, 0, 0, 0}));
++    CHECK(trigger_weapon(4, 8, 3) == make({0x25, 0x10, 0x01, 0x02, 0, 0, 0, 0, 0, 0, 0}));
++
++    // A buzz from the top of the travel: the block-hit and landing-blow pulses.
++    CHECK(trigger_vibration(0, 8, 35) ==
++          make({0x26, 0xFF, 0x03, 0xFF, 0xFF, 0xFF, 0x3F, 0, 0, 0x23, 0x00}));
++    CHECK(trigger_vibration(0, 3, 25) ==
++          make({0x26, 0xFF, 0x03, 0x92, 0x24, 0x49, 0x12, 0, 0, 0x19, 0x00}));
++    CHECK(trigger_vibration(3, 5, 200) ==
++          make({0x26, 0xF8, 0x03, 0x00, 0x48, 0x92, 0x24, 0, 0, 0xC8, 0x00}));
++}
++
++TEST_CASE("an out-of-range zone or strength is clamped, not wrapped") {
++    // A value that wrapped would buzz the trigger at full strength in the wrong place, which reads
++    // as a broken controller rather than as a bad argument.
++    CHECK(trigger_feedback(-4, 2) == trigger_feedback(0, 2));
++    CHECK(trigger_feedback(40, 2) == trigger_feedback(9, 2));
++    CHECK(trigger_feedback(0, 0) == trigger_feedback(0, 1));
++    CHECK(trigger_feedback(0, 99) == trigger_feedback(0, 8));
++    CHECK(trigger_weapon(0, 20, 1) == trigger_weapon(2, 8, 1));
++    CHECK(trigger_vibration(0, 8, 0) == trigger_vibration(0, 8, 1));
++}
++
++TEST_CASE("a held block resists, and says so only once") {
++    TriggerPlanner planner;
++    TriggerFeel feel;
++    feel.resistance = true;
++    feel.resistance_zone = 2;
++    feel.resistance_strength = 3;
++    planner.set_feel(feel);
++
++    planner.set_block(true, 0.0);
++    auto out = planner.update(0.0);
++    CHECK(out.left.changed);
++    CHECK(out.left.effect == trigger_feedback(2, 3));
++    CHECK(out.right.effect == trigger_off());
++
++    // Every later frame with the same state must not resend: a block is held for seconds.
++    out = planner.update(0.1);
++    CHECK_FALSE(out.left.changed);
++    CHECK_FALSE(out.right.changed);
++}
++
++TEST_CASE("a block that takes a hit buzzes, then goes back to resisting") {
++    TriggerPlanner planner;
++    planner.set_block(true, 0.0);
++    planner.update(0.0);
++
++    CHECK(planner.impact(1.0f, 0.2));
++    auto out = planner.update(0.25);
++    CHECK(out.left.changed);
++    CHECK(out.left.effect == trigger_vibration(0, 8, 45));
++
++    // The pulse has a life of its own and the resistance outlives it.
++    out = planner.update(0.5);
++    CHECK(out.left.changed);
++    CHECK(out.left.effect == trigger_feedback(1, 2));
++}
++
++TEST_CASE("letting go frees the trigger and ends the block-hit buzz") {
++    TriggerPlanner planner;
++    planner.set_block(true, 0.0);
++    planner.update(0.0);
++    REQUIRE(planner.impact(1.0f, 0.1));
++    planner.set_block(false, 0.12);
++    auto out = planner.update(0.13);
++    CHECK(out.left.changed);
++    CHECK(out.left.effect == trigger_off());
++}
++
++TEST_CASE("a faint effect is the game's ambience, not a hit") {
++    TriggerPlanner planner;
++    planner.set_block(true, 0.0);
++    planner.update(0.0);
++    // The pack has seven power steps; anything under the impact threshold is a light rumble.
++    CHECK_FALSE(planner.impact(0.14f, 0.1));
++    CHECK_FALSE(planner.impact(0.19f, 0.2));
++    const auto out = planner.update(0.3);
++    CHECK_FALSE(out.left.changed);
++    CHECK(out.left.effect == trigger_feedback(1, 2));
++}
++
++TEST_CASE("a swing buzzes on the press and a landing blow punches harder") {
++    TriggerPlanner planner;
++    planner.set_attack(true, 1.0);
++    auto out = planner.update(1.01);
++    CHECK(out.right.changed);
++    CHECK(out.right.effect == trigger_vibration(0, 3, 30));
++
++    CHECK(planner.impact(1.0f, 1.1));
++    out = planner.update(1.15);
++    CHECK(out.right.changed);
++    CHECK(out.right.effect == trigger_vibration(0, 8, 60));
++
++    out = planner.update(1.3);
++    CHECK(out.right.changed);
++    CHECK(out.right.effect == trigger_off());
++}
++
++TEST_CASE("an impact outside the swing window leaves the right trigger alone") {
++    TriggerPlanner planner;
++    planner.set_attack(true, 1.0);
++    auto out = planner.update(1.0);
++    // The swing buzz is over well before the window closes, so the trigger is already free again.
++    out = planner.update(1.2);
++    CHECK(out.right.effect == trigger_off());
++    // 400 ms after the press the blow has long landed; this effect is the world, not the hit.
++    CHECK_FALSE(planner.impact(1.0f, 1.5));
++    out = planner.update(1.6);
++    CHECK_FALSE(out.right.changed);
++    CHECK(out.right.effect == trigger_off());
++}
++
++TEST_CASE("one hit per swing, however long the rumble lasts") {
++    TriggerPlanner planner;
++    planner.set_attack(true, 1.0);
++    planner.update(1.0);
++    CHECK(planner.impact(1.0f, 1.1));
++    // The same impact arriving as a second effect must not re-punch the trigger.
++    CHECK_FALSE(planner.impact(1.0f, 1.2));
++}
++
++TEST_CASE("resistance can be switched off and the block keeps its hit feedback") {
++    TriggerPlanner planner;
++    TriggerFeel feel;
++    feel.resistance = false;
++    planner.set_feel(feel);
++
++    planner.set_block(true, 0.0);
++    auto out = planner.update(0.0);
++    CHECK(out.left.effect == trigger_off());
++
++    REQUIRE(planner.impact(1.0f, 0.1));
++    out = planner.update(0.12);
++    CHECK(out.left.effect == trigger_vibration(0, 8, 45));
++    out = planner.update(0.3);
++    CHECK(out.left.effect == trigger_off());
++}
++
++TEST_CASE("reset re-sends the free trigger") {
++    TriggerPlanner planner;
++    planner.set_block(true, 0.0);
++    planner.update(0.0);
++    planner.reset();
++    const auto out = planner.update(0.1);
++    CHECK(out.left.changed);
++    CHECK(out.right.changed);
++    CHECK(out.left.effect == trigger_off());
++    CHECK(out.right.effect == trigger_off());
++}
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index 94d3ec8..c1316a7 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -2505,6 +2505,17 @@ void usage(const char* argv0, std::FILE* out) {
+         "  --bindings FILE        controller bindings; the default is one file per user, shared\n"
+         "                         by every title. F1 (or a pad's select button) opens the screen\n"
+         "                         that edits them, and writes them back here.\n"
++        "  --haptics              drive the pads through renhdrum.dll (shipped beside the game):\n"
++        "                         a DualSense's voice-coil actuators over USB audio, a Pro\n"
++        "                         Controller's HD Rumble, an Xbox pad's four motors. Without the\n"
++        "                         file, or without this flag, SDL's own rumble is used.\n"
++        "  --trigger-feedback     pulse the trigger that made an impact: the block that took a\n"
++        "                         hit, the swing that landed. Wired DualSense; needs no --haptics.\n"
++        "  --trigger-resistance   hold LT and feel it resist while the block is up.\n"
++        "  --haptics-speaker      audible taps from the DualSense speaker, synthesised from the\n"
++        "                         same rumble. Off by default: the pack's own signal is coarse.\n"
++        "  --haptics-strength N   how hard the actuators are driven, 10-100 (default 100). The\n"
++        "                         trigger effects keep the strengths they ask for.\n"
+         "  --bios FILE            a 2 MB boot ROM image. Titles draw system text with its font;\n"
+         "                         without it that text is blank. The BIOS calls stay native\n"
+         "  --vmu FILE             a 128 KB memory-card image; writes are saved back to it.\n"
+@@ -2620,6 +2631,14 @@ int run(int argc, char** argv) {
+     // --controls modern: layer the twin-stick preset over the player's gamepad bindings. The base
+     // layout is untouched, so F1 still edits it and Classic restores it exactly.
+     bool modern_controls = false;
++    // --haptics and its friends: per-pad RenHDrum output and the adaptive-trigger feedback the
++    // launcher's Controller tab turns on. Plain flags here, because only a build with a window has
++    // pads to feel them on; the window block turns them into the option struct.
++    bool haptics_rumble = false;
++    bool haptics_feedback = false;
++    bool haptics_resistance = false;
++    bool haptics_speaker = false;
++    int haptics_strength = 100;
+     std::string flash_dump;           // --dump-flash FILE: write the flash out at the stop, so a
+                                       // synthesised one can be compared against a reference.
+     std::string bios_image;           // --bios FILE: the owner's 2 MB boot ROM. Only its data is
+@@ -2864,6 +2883,16 @@ int run(int argc, char** argv) {
+                 std::fprintf(stderr, "--controls: expected classic or modern, got \"%s\"\n", mode);
+                 return 2;
+             }
++        } else if (!std::strcmp(argv[i], "--haptics")) {
++            haptics_rumble = true;
++        } else if (!std::strcmp(argv[i], "--trigger-feedback")) {
++            haptics_feedback = true;
++        } else if (!std::strcmp(argv[i], "--trigger-resistance")) {
++            haptics_resistance = true;
++        } else if (!std::strcmp(argv[i], "--haptics-speaker")) {
++            haptics_speaker = true;
++        } else if (!std::strcmp(argv[i], "--haptics-strength") && i + 1 < argc) {
++            haptics_strength = std::clamp(std::atoi(argv[++i]), 10, 100);
+         } else if (!std::strcmp(argv[i], "--bios") && i + 1 < argc) {
+             bios_image = argv[++i];
+         } else if (!std::strcmp(argv[i], "--flash") && i + 1 < argc) {
+@@ -3471,9 +3500,14 @@ int run(int argc, char** argv) {
+         live->load_bindings();
+         // A windowed run has pads to feel it through. Headless runs leave the handler empty, so
+         // tracing and parity are unaffected by whether the host can rumble.
++        live->window.set_haptics_options(dream::render::HapticsOptions{
++            haptics_rumble, haptics_feedback, haptics_resistance, haptics_speaker,
++            haptics_strength});
++        if (haptics_rumble || haptics_feedback || haptics_resistance || haptics_speaker)
++            std::printf("%s\n", live->window.haptics_status().c_str());
+         jump_ptr->on_effect = [&live](const dream::maple::JumpPack::Effect& e) {
+             if (live)
+-                live->window.rumble(e.power, e.duration_ms);
++                live->window.rumble(e.power, e.duration_ms, e.frequency_hz, e.continuous);
+         };
+         std::printf("F1 (or a pad's select button) opens the controller bindings\n");
+         auto previous_render = std::move(pvr.on_render);
+diff --git b/third_party/renhdrum/include/renhdrum.h b/third_party/renhdrum/include/renhdrum.h
+new file mode 100644
+index 0000000..b9724b5
+--- /dev/null
++++ b/third_party/renhdrum/include/renhdrum.h
+@@ -0,0 +1,441 @@
++#ifndef RENHDRUM_H
++#define RENHDRUM_H
++
++#include <stdint.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define RENHDRUM_VERSION 0x000500
++
++#define RENHDRUM_OK 0
++#define RENHDRUM_ERR_NULL_PTR -1
++#define RENHDRUM_ERR_INVALID_ARG -2
++#define RENHDRUM_ERR_DECODE_FAILED -3
++
++typedef struct RenHdcSettings {
++    bool enabled;
++    int32_t usb_interval_ms;
++    int32_t bluetooth_level; /* 1-4, 4 = Compatible (default) */
++    bool usb_auto_slow;
++    bool sync_to_input;
++    bool click_pulse;
++    bool sync_bluetooth;
++    bool usb_no_queue;
++    int32_t usb_pause_ms;
++    bool envelope_5ms;
++    bool frequency_in_packet;
++    bool frequency_both_bands;
++    bool bt_after_input;
++    bool crisp_notes;
++    bool bt_crisp_notes;
++    bool bt_fast;
++} RenHdcSettings;
++
++typedef struct RenHdcConfig {
++    bool enable_hd_rumble;
++    int32_t hd_rumble_usb_interval_ms;
++    int32_t hd_rumble_bluetooth_level;
++    bool hd_rumble_usb_auto_slow;
++    bool hd_rumble_experimental_usb_no_queue;
++    bool hd_rumble_experimental_envelope_5ms;
++    bool hd_rumble_experimental_frequency_in_packet;
++    bool hd_rumble_experimental_frequency_both_bands;
++    bool hd_rumble_experimental_bt_after_input;
++    bool hd_rumble_experimental_bt_fast;
++    bool hd_rumble_experimental_crisp_notes;
++    bool hd_rumble_experimental_bt_crisp_notes;
++    bool hd_rumble_experimental_sync_to_input;
++    bool hd_rumble_experimental_click_pulse;
++    bool hd_rumble_experimental_sync_bluetooth;
++    bool hd_rumble_sync_auto_slow;
++    float strong_rumble;
++    float weak_rumble;
++    bool enable_rumble;
++    bool enable_adaptive_triggers;
++    bool enable_dualsense_haptics;
++    int32_t dualsense_haptics_volume;
++    bool dualsense_crisp_notes;
++    bool dualsense_bt_crisp_notes;
++    bool dualsense_hd_haptics_off; /* false = HD Haptics on (default): DualSense USB speaker + trigger kick */
++} RenHdcConfig;
++
++typedef struct RenHdSideSample {
++    float amp_low;
++    float freq_low;
++    float amp_high;
++    float freq_high;
++} RenHdSideSample;
++
++typedef struct RenHdClickSide {
++    int32_t kind; /* 0 = DualResonance3Pulse, 1 = SingleWaveResonance */
++    int32_t res_high_code;
++    int32_t res_low_code;
++    int32_t pulse1_code;
++    int32_t pulse2_code;
++    bool res_high_off;
++    bool res_low_off;
++    bool pulse1_off;
++    bool pulse2_off;
++    int32_t amp7;
++    int32_t freq7;
++    bool freq_is_high;
++} RenHdClickSide;
++
++uint32_t renhdrum_version(void);
++
++int32_t renhdrum_settings_default(RenHdcSettings *out_settings);
++int32_t renhdrum_settings_resolve(const RenHdcConfig *config, RenHdcSettings *out_settings);
++/* Use this when the host is not Brontide: reads no IPC and no flag files, only `config`. */
++/* NULL config gives the same result as renhdrum_settings_default. */
++int32_t renhdrum_settings_resolve_pure(const RenHdcConfig *config, RenHdcSettings *out_settings);
++
++int32_t renhdrum_preset_apply(int32_t kind, RenHdcConfig *config);
++int32_t renhdrum_preset_detect(const RenHdcConfig *config, int32_t *out_kind);
++
++/* Settings table + value store (see docs/integration/c-abi-reference.md "Settings table"). */
++typedef struct RenHdcOption {
++    const char *key;      /* never changes after release */
++    const char *label;    /* EN */
++    const char *help;     /* EN, may be empty */
++    const char *choices;  /* CHOICE kind: "Detailed (5 ms)|Compatible"; else empty */
++    int32_t kind;         /* 0 BOOL, 1 PERCENT/INT, 2 CHOICE (value = index) */
++    int32_t min, max, step, def;
++    uint32_t devices;     /* bit: 1 Switch, 2 DualSense, 4 Xbox, 8 Steam */
++    int32_t tier;         /* 0 Basic, 1 Advanced */
++    int32_t link;         /* 0 any, 1 USB only, 2 Bluetooth only */
++    int32_t requires_row; /* (not "requires": C++20 keyword) row index that must be non-zero for this row to matter, -1 = none */
++} RenHdcOption;
++const RenHdcOption *renhdrum_options(int32_t *out_count, int32_t *out_stride);
++
++typedef struct RenHdcStore RenHdcStore; /* values; host-owned, not thread-safe */
++RenHdcStore *renhdrum_store_create(void); /* recommended defaults */
++void renhdrum_store_destroy(RenHdcStore *s);
++int32_t renhdrum_store_get(const RenHdcStore *s, const char *key, int32_t *out);
++int32_t renhdrum_store_set(RenHdcStore *s, const char *key, int32_t value); /* clamped to [min,max]; unknown key = RENHDRUM_ERR_INVALID_ARG */
++int32_t renhdrum_store_reset(RenHdcStore *s);
++int32_t renhdrum_store_is_recommended(const RenHdcStore *s, bool *out);
++int32_t renhdrum_store_to_config(const RenHdcStore *s, RenHdcConfig *out);
++/* Intensity (`gain`) + weak-rumble lift (`low_boost`) of the store applied to one amplitude 0..1. */
++float renhdrum_store_shape_amplitude(const RenHdcStore *s, float amplitude);
++
++/* Xbox "Direct" mode (store key xbox_mode = 1). Returns a mask: bit 0 = send grips out_motors4[0..2]
++   (SDL_RumbleJoystick, 2000 ms), bit 1 = send triggers out_motors4[2..4] (SDL_RumbleJoystickTriggers,
++   2000 ms), 0 = nothing to send, <0 = error. Pass raw game amplitudes; gain / low_boost / xbox_* come
++   from the store. `triggers`: the pad has trigger motors the host drives. */
++typedef struct RenHdcXboxDirect RenHdcXboxDirect;
++RenHdcXboxDirect *renhdrum_xbox_direct_create(void);
++void renhdrum_xbox_direct_destroy(RenHdcXboxDirect *d);
++int32_t renhdrum_xbox_direct_push(
++    RenHdcXboxDirect *d,
++    const RenHdcStore *s,
++    int64_t now_us,
++    bool is_right,
++    float low_amp,
++    float high_amp,
++    bool triggers,
++    uint16_t *out_motors4
++);
++/* Host timer: when a burst ends, returns the settled motor values (same mask). */
++int32_t renhdrum_xbox_direct_tick(RenHdcXboxDirect *d, int64_t now_us, bool triggers, uint16_t *out_motors4);
++
++int32_t renhdrum_encode_standard_side(
++    float low_freq,
++    float low_amp,
++    float high_freq,
++    float high_amp,
++    uint8_t *out_bytes4
++);
++
++int32_t renhdrum_encode_standard_packet(
++    float left_lf,
++    float left_la,
++    float left_hf,
++    float left_ha,
++    float right_lf,
++    float right_la,
++    float right_hf,
++    float right_ha,
++    uint8_t *out_bytes8
++);
++
++int32_t renhdrum_amfm_game_amplitude(int32_t code, float *out_amp);
++int32_t renhdrum_amfm_code(float game_amp);
++int32_t renhdrum_amfm_freq7(int32_t high, float freq);
++int32_t renhdrum_amfm_amp7(float game_amplitude);
++int32_t renhdrum_amfm_preset_code(int32_t high, int32_t freq7);
++
++int32_t renhdrum_amfm_pack_three(
++    int32_t lo0,
++    int32_t hi0,
++    int32_t lo1,
++    int32_t hi1,
++    int32_t lo2,
++    int32_t hi2,
++    uint32_t *out_val
++);
++
++int32_t renhdrum_amfm_pack_three_7bit(
++    int32_t high,
++    int32_t is_fm,
++    int32_t value7,
++    int32_t lo1,
++    int32_t hi1,
++    int32_t lo2,
++    int32_t hi2,
++    uint32_t *out_val
++);
++
++int32_t renhdrum_amfm_pack_two_14bit(
++    int32_t high,
++    int32_t freq7,
++    int32_t amp7,
++    int32_t other0,
++    int32_t lo1,
++    int32_t hi1,
++    uint32_t *out_val
++);
++
++int32_t renhdrum_amfm_pack_two_14bit_level(
++    int32_t high,
++    int32_t freq7,
++    float game_amplitude,
++    int32_t other0,
++    int32_t lo1,
++    int32_t hi1,
++    uint32_t *out_val
++);
++
++int32_t renhdrum_amfm_pack_two_14bit_reach(
++    int32_t high,
++    int32_t freq7,
++    float game_amplitude,
++    int32_t reach_code,
++    float other_amplitude,
++    int32_t lo1,
++    int32_t hi1,
++    uint32_t *out_val
++);
++
++int32_t renhdrum_amfm_is_three_sample_side(const uint8_t *in_bytes4);
++
++int32_t renhdrum_click_amp4(float amplitude);
++int32_t renhdrum_click_amp7(float amplitude);
++int32_t renhdrum_click_build_packet(float amp_l, float amp_r, uint8_t *out_packet10);
++
++int32_t renhdrum_click_encode_side(const RenHdClickSide *side, uint8_t *out_bytes4);
++int32_t renhdrum_click_decode_side(const uint8_t *in_bytes4, RenHdClickSide *out_side);
++int32_t renhdrum_click_is_dual_wave_side(const uint8_t *in_bytes4);
++int32_t renhdrum_click_is_click_packet(const uint8_t *in_bytes10);
++
++float renhdrum_crisp_slot_gain(int32_t slots_since_onset);
++int32_t renhdrum_crisp_apply(
++    const RenHdSideSample *s,
++    float gain,
++    RenHdSideSample *out_sample,
++    int32_t *out_capped
++);
++int32_t renhdrum_crisp_shape_slot(
++    int32_t *slots_since_onset,
++    const RenHdSideSample *s,
++    RenHdSideSample *out_sample,
++    int32_t *out_onset,
++    int32_t *out_capped
++);
++
++/* Opaque pointer types for stateful engines */
++typedef struct RenHdcEngine RenHdcEngine;
++typedef struct RenHdcDualSenseDsp RenHdcDualSenseDsp;
++typedef struct RenHdcXboxRumble RenHdcXboxRumble;
++
++/* Thread safety: never call a handle's destroy in parallel with any other call on the same handle. */
++RenHdcEngine *renhdrum_engine_create(bool is_bluetooth, bool is_pro_controller);
++void renhdrum_engine_destroy(RenHdcEngine *engine);
++int32_t renhdrum_engine_apply_settings(RenHdcEngine *engine, const RenHdcSettings *settings);
++int32_t renhdrum_engine_push_sample(
++    RenHdcEngine *engine,
++    int64_t now_us,
++    float left_al,
++    float left_fl,
++    float left_ah,
++    float left_fh,
++    float right_al,
++    float right_fl,
++    float right_ah,
++    float right_fh
++);
++int32_t renhdrum_engine_push_half_sample(
++    RenHdcEngine *engine,
++    int64_t now_us,
++    bool is_right,
++    float al,
++    float fl,
++    float ah,
++    float fh
++);
++int32_t renhdrum_engine_tick(RenHdcEngine *engine, int64_t now_us, uint8_t *out_packet10);
++
++// volume_percent (clamped 10..100) is the final output gain; the core already applies it.
++// The host must NOT scale samples again before pushing them. The core exports no volume
++// setter yet: to change it, destroy and re-create the DSP object (no need to reopen the
++// audio stream). If the Brontide-App config is present in shared memory, it overrides both arguments.
++RenHdcDualSenseDsp *renhdrum_dualsense_dsp_create(int32_t volume_percent, bool crisp_notes);
++void renhdrum_dualsense_dsp_destroy(RenHdcDualSenseDsp *dsp);
++int32_t renhdrum_dualsense_dsp_set_target(
++    RenHdcDualSenseDsp *dsp,
++    float left_al,
++    float left_fl,
++    float left_ah,
++    float left_fh,
++    float right_al,
++    float right_fl,
++    float right_ah,
++    float right_fh
++);
++int32_t renhdrum_dualsense_dsp_set_half_target(
++    RenHdcDualSenseDsp *dsp,
++    bool is_right,
++    float al,
++    float fl,
++    float ah,
++    float fh
++);
++/* Speaker channel (channel 1, USB) level 0..100 percent; 0 = off (default). */
++#define RENHDRUM_HD_HAPTICS_SPEAKER_PERCENT 60
++int32_t renhdrum_dualsense_dsp_set_speaker(RenHdcDualSenseDsp *dsp, int32_t percent);
++/* out_interleaved_4ch must hold frame_count * 4 floats. */
++int32_t renhdrum_dualsense_dsp_fill_f32(
++    RenHdcDualSenseDsp *dsp,
++    float *out_interleaved_4ch,
++    size_t frame_count
++);
++/* DualSense over Bluetooth: one HID output report 0x32 every RENHDRUM_DS5_BT_PERIOD_NS.
++   Report layout from SAxense by egormanga (https://apps.sdore.me/SAxense). */
++#define RENHDRUM_DS5_BT_REPORT_SIZE 142
++#define RENHDRUM_DS5_BT_PERIOD_NS 10666666ULL
++#define RENHDRUM_DS5_BT_BUFFER_LENGTH_DEFAULT 0xFF
++/* out_report142 must be a buffer of at least 142 bytes (RENHDRUM_DS5_BT_REPORT_SIZE). */
++int32_t renhdrum_dualsense_dsp_build_bt_report(
++    RenHdcDualSenseDsp *dsp,
++    uint8_t buffer_length,
++    uint8_t *out_report142
++);
++/* DualSense over Bluetooth, combined report 0x36 (rumble + adaptive triggers + speaker), one per
++   RENHDRUM_DS5_BT_PERIOD_NS. The speaker is one Opus frame (200 bytes) per report, on while HD Haptics is on
++   (the core turns it on by itself if the host never called renhdrum_dualsense_dsp_set_speaker; hosts should
++   call it on Bluetooth too). Layout after Enhanced-PS5-DualSense-Haptics-Bridge (MIT, ragnarok179).
++   state47_or_null: 47-byte block (byte 0 bits 0x04 R2 / 0x08 L2, R2 effect [10..21], L2 [21..32]);
++   NULL = triggers untouched. seq is reserved/unused. out_report398 needs 398 bytes.
++   Returns 1 = send out_report398, 0 = nothing to send (rumble + triggers idle over 2 s), < 0 on error. */
++#define RENHDRUM_DS5_BT36_REPORT_SIZE 398
++int32_t renhdrum_dualsense_dsp_build_bt36_report(
++    RenHdcDualSenseDsp *dsp,
++    const uint8_t *state47_or_null,
++    uint8_t seq,
++    uint8_t *out_report398
++);
++/* Experimental: Steam Controller (2026) grips, report 0x88, built from iafx's measurements (RenHDrum#5).
++   Create with renhdrum_valve_grip_dsp_create[_ex], then use renhdrum_dualsense_dsp_set_half_target and
++   renhdrum_dualsense_dsp_destroy on the handle. One report every RENHDRUM_VALVE_GRIP_PERIOD_NS_*.
++   build_report returns 1 when vibrating, 0 when silent, 2 (RENHDRUM_VALVE_GRIP_SKIP) when 40 ppm drift
++   compensation skips this packet (only if created with drift_compensation = true; do not send, phase
++   unchanged), < 0 on error (unknown format -> RENHDRUM_ERR_INVALID_ARG). out_report64: 64 bytes.
++   mode_tick evaluates the 0x86 PCM mode keep-alive (on at first vibration, refresh every 3 s or on
++   stalled=true, off after 100 ms silence) and writes 0 or 2 reports (4 bytes each) into out_reports8.
++   mode_off writes 2 off reports (channels 2 and 5) into out_reports8 for detach/exit paths. */
++#define RENHDRUM_VALVE_GRIP_REPORT_SIZE 64
++#define RENHDRUM_VALVE_GRIP_FORMAT_MULAW_8K 8
++#define RENHDRUM_VALVE_GRIP_FORMAT_MULAW_4K 9
++#define RENHDRUM_VALVE_GRIP_PERIOD_NS_8K 3875000ULL
++#define RENHDRUM_VALVE_GRIP_PERIOD_NS_4K 7750000ULL
++#define RENHDRUM_VALVE_GRIP_SKIP 2
++#define RENHDRUM_VALVE_GRIP_MODE_REPORT_SIZE 4
++#define RENHDRUM_VALVE_GRIP_MODE_REPORT_COUNT 2
++#define RENHDRUM_VALVE_GRIP_MODE_REPORTS_SIZE 8
++RenHdcDualSenseDsp *renhdrum_valve_grip_dsp_create(int32_t volume_percent, bool crisp_notes);
++RenHdcDualSenseDsp *renhdrum_valve_grip_dsp_create_ex(
++    int32_t volume_percent,
++    bool crisp_notes,
++    bool drift_compensation
++);
++int32_t renhdrum_valve_grip_build_report(
++    RenHdcDualSenseDsp *dsp,
++    uint8_t format,
++    uint8_t *out_report64
++);
++int32_t renhdrum_valve_grip_mode_tick(
++    RenHdcDualSenseDsp *dsp,
++    uint8_t format,
++    uint64_t now_ns,
++    bool stalled,
++    uint8_t *out_reports8
++);
++int32_t renhdrum_valve_grip_mode_off(
++    uint8_t format,
++    uint8_t *out_reports8
++);
++/* Vibration-reactive trigger (one handle per trigger). update: 1 = changed (11 bytes written to
++   out11, pack with the DS5 effects state), 0 = unchanged, <0 = error. */
++typedef struct RenHdcTriTrigger RenHdcTriTrigger;
++RenHdcTriTrigger *renhdrum_tri_trigger_create(void);
++void renhdrum_tri_trigger_destroy(RenHdcTriTrigger *h);
++int32_t renhdrum_tri_trigger_update(
++    RenHdcTriTrigger *h,
++    uint32_t now_ms,
++    uint8_t depth,
++    float amp_low,
++    float freq_low,
++    float amp_high,
++    float freq_high,
++    bool fresh,
++    uint8_t *out11
++);
++/* Player is pressing another button (call every tick while held, before update, same clock):
++   a streak started strictly before this trigger was held counts as a posture and does not mute;
++   a streak started with or after trigger hold (gap > 30 ms starts a new streak) mutes new pulses
++   while held and for 500 ms after the last call. */
++void renhdrum_tri_trigger_note_action(RenHdcTriTrigger *h, uint32_t now_ms);
++/* 47-byte DS5EffectsState_t USB blocks for HD Haptics (speaker open/release, single-trigger update/off).
++   Returns 0 on success, -1 (RENHDRUM_ERR_NULL_PTR) if out47 is NULL. */
++#define RENHDRUM_DS5_EFFECTS_SIZE 47
++int32_t renhdrum_hd_haptics_speaker_block(int32_t on, uint8_t *out47);
++int32_t renhdrum_hd_haptics_trigger_block(
++    int32_t is_right,
++    const uint8_t *effect11_or_null,
++    uint8_t *out47
++);
++int32_t renhdrum_dualsense_evaluate_triggers(
++    uint64_t title_id,
++    bool zl_held,
++    bool zr_held,
++    bool rumble_on,
++    int64_t rumble_on_ms,
++    int64_t pulse_age_ms,
++    uint8_t *out_ds5_effects47
++);
++
++RenHdcXboxRumble *renhdrum_xbox_rumble_create(bool is_bluetooth);
++void renhdrum_xbox_rumble_destroy(RenHdcXboxRumble *rumble);
++int32_t renhdrum_xbox_rumble_push_half_sample(
++    RenHdcXboxRumble *rumble,
++    int64_t now_us,
++    bool is_right,
++    float low_amp,
++    float low_freq,
++    float high_amp,
++    float high_freq
++);
++/* out_motors4: left grip, right grip, left trigger, right trigger. Returns 1 when they must be sent now. */
++int32_t renhdrum_xbox_rumble_tick(RenHdcXboxRumble *rumble, int64_t now_us, uint16_t *out_motors4);
++int32_t renhdrum_xbox_rumble_resend(RenHdcXboxRumble *rumble);
++
++/* Switch 2 rumble mode: 0 = Switch 1 default / untouched, 2 = Switch 2 Mode 2 translation */
++void renhdrum_set_nx2_mode(int32_t mode);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* RENHDRUM_H */

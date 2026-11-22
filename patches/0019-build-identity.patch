@@ -1,0 +1,137 @@
+diff --git a/runtime/boot/crash_log.cpp b/runtime/boot/crash_log.cpp
+index 79ab73b..0b7e74a 100644
+--- a/runtime/boot/crash_log.cpp
++++ b/runtime/boot/crash_log.cpp
+@@ -1,4 +1,5 @@
+ #include "crash_log.h"
++#include "dream/runtime/hash/sha1.h"
+ 
+ #include <algorithm>
+ #include <csignal>
+@@ -8,6 +9,7 @@
+ #include <cstdlib>
+ #include <ctime>
+ #include <exception>
++#include <fstream>
+ #include <iterator>
+ #include <system_error>
+ #include <vector>
+@@ -35,6 +37,8 @@ namespace {
+ std::FILE* g_file = nullptr;
+ std::string g_path;
+ std::string g_context;
++std::string g_build;
++std::string g_exe_sha1;
+ dream::crashlog::Snapshot g_snapshot = nullptr;
+ bool g_writing = false;
+ std::time_t g_started = 0;
+@@ -125,6 +129,61 @@ std::string exe_path() {
+ #endif
+ }
+ 
++std::string trimmed(std::string text) {
++    const std::size_t first = text.find_first_not_of(" \t\r\n");
++    if (first == std::string::npos)
++        return {};
++    const std::size_t last = text.find_last_not_of(" \t\r\n");
++    return text.substr(first, last - first + 1);
++}
++
++// BUILD-INFO.txt beside the executable names the build whose map resolves the report. A source-tree
++// build has no such file, and says so rather than guessing.
++std::string build_info(const std::filesystem::path& exe) {
++    std::ifstream in(exe.parent_path() / "BUILD-INFO.txt", std::ios::binary);
++    if (!in)
++        return {};
++    std::string line, version, commit, built;
++    while (std::getline(in, line)) {
++        line = trimmed(line);
++        if (line.rfind("version:", 0) == 0)
++            version = trimmed(line.substr(8));
++        else if (line.rfind("commit:", 0) == 0)
++            commit = trimmed(line.substr(7));
++        else if (line.rfind("built:", 0) == 0)
++            built = trimmed(line.substr(6));
++    }
++    std::string text;
++    if (!version.empty())
++        text = "version " + version;
++    if (!commit.empty())
++        text += (text.empty() ? "" : ", ") + std::string("commit ") + commit;
++    if (!built.empty())
++        text += (text.empty() ? "" : ", ") + std::string("built ") + built;
++    return text;
++}
++
++// The executable's own hash, so a report and the symbols artifact for its build can be matched
++// exactly. One 37 MB read, and only while logging is on.
++std::string exe_sha1(const std::filesystem::path& path) {
++    std::ifstream in(path, std::ios::binary | std::ios::ate);
++    if (!in)
++        return {};
++    const std::streamoff size = in.tellg();
++    if (size <= 0 || size > (256LL << 20))
++        return {};
++    in.seekg(0);
++    std::vector<char> bytes;
++    try {
++        bytes.resize(static_cast<std::size_t>(size));
++    } catch (...) {
++        return {};  // no hash is better than failing to start when logging was asked for
++    }
++    if (!in.read(bytes.data(), static_cast<std::streamsize>(size)))
++        return {};
++    return dream::hash::sha1_hex(bytes.data(), bytes.size());
++}
++
+ std::string os_description() {
+ #if defined(_WIN32)
+     // RtlGetVersion reports the machine's real build. GetVersionEx is manifest-dependent and can
+@@ -291,6 +350,10 @@ void write_crash(const char* what, void* pointers) {
+     crash_stamp(stamp, sizeof stamp);
+     out("\n=== crash %s ===\n", stamp);
+     out("%s\n", what ? what : "fatal condition");
++    if (!g_build.empty())
++        out("build: %s\n", g_build.c_str());
++    if (!g_exe_sha1.empty())
++        out("exe sha1: %s\n", g_exe_sha1.c_str());
+ 
+ #if defined(_WIN32)
+     out("thread: %lu\n", static_cast<unsigned long>(GetCurrentThreadId()));
+@@ -478,9 +541,18 @@ bool enable(const std::filesystem::path& dir, const std::string& command_line,
+ 
+     std::error_code cwd_error;
+     const std::string cwd = narrow(std::filesystem::current_path(cwd_error));
++    const std::string exe = exe_path();
++    if (!exe.empty()) {
++        const std::filesystem::path exe_file = std::filesystem::u8path(exe);
++        g_build = build_info(exe_file);
++        g_exe_sha1 = exe_sha1(exe_file);
++    }
+     out("Draconus-Recomp session log\n");
+     out("started:  %s\n", local_stamp(false).c_str());
+-    out("exe:      %s\n", exe_path().c_str());
++    out("exe:      %s\n", exe.c_str());
++    out("build:    %s\n",
++        g_build.empty() ? "(no BUILD-INFO.txt beside the executable)" : g_build.c_str());
++    out("exe sha1: %s\n", g_exe_sha1.empty() ? "(not read)" : g_exe_sha1.c_str());
+     out("cwd:      %s\n", cwd_error ? "(unknown)" : cwd.c_str());
+     out("host:     %s\n", os_description().c_str());
+     out("log:      %s\n", g_path.c_str());
+diff --git a/runtime/boot/crash_log.h b/runtime/boot/crash_log.h
+index 1baaf06..2587a6e 100644
+--- a/runtime/boot/crash_log.h
++++ b/runtime/boot/crash_log.h
+@@ -10,8 +10,10 @@
+ // The file receives everything the run would have printed to stdout and stderr -- the boot lines,
+ // warnings and the end-of-run report -- and, if the process dies without unwinding, a crash block
+ // with the exception, the host stack as module-relative addresses and the guest state at that
+-// moment. On Windows the block comes from an unhandled-exception filter, a terminate handler and
+-// an abort handler; elsewhere from the terminate handler.
++// moment. The header also records the build named by BUILD-INFO.txt beside the executable and the
++// executable's SHA-1, so a report can be matched to the symbols for its exact build. On Windows the
++// block comes from an unhandled-exception filter, a terminate handler and an abort handler; elsewhere
++// from the terminate handler.
+ //
+ // Nothing happens unless enable() is called: no file is opened, no handler installed and the
+ // console keeps its output. The report is best effort -- the handler uses plain writes and is

@@ -274,12 +274,27 @@ stick (or the d-pad) moves menu cursors; and because the left trigger is now blo
 both-triggers **User Mode** chord is not available as it was. Modern is a layer over the player's
 bindings, not a separate file: `F1` still edits the base layout, and **Classic** restores it exactly.
 
+**HD rumble and trigger feedback.** The Controller tab (or `play-draconus.ps1 -Haptics`) hands the
+jump pack's effects to [RenHDrum](https://github.com/trzz1214/RenHDrum) instead of the pad's two
+motors. A DualSense then plays them on its voice-coil actuators through its own USB audio endpoint, a
+Switch Pro Controller gets real HD Rumble packets, and an Xbox pad gets all four motors. The game
+rumbles when a block takes a hit and when a swing lands, so two more options turn those moments into
+the trigger that made them: **Trigger feedback on hits** buzzes the left trigger for a block and the
+right one for a landed blow, and **Trigger resistance while blocking** gives the left trigger a light
+resistance for as long as the block is held. Both are DualSense-only and need it **wired** — over
+Bluetooth the pad keeps the plain rumble — and a pad RenHDrum does not claim always falls back to it.
+`renhdrum.dll` ships in the release folder and is loaded from beside the executable; a source tree
+gets it from `third_party\renhdrum\`. With it missing, or with the option off, nothing changes from
+the paragraph above. `DREAM_RENHDRUM_TRACE=1` prints which pad was claimed and
+`DREAM_RENHDRUM=0` switches the whole path off for a comparison. What each option does, and what to
+check when a pad does nothing, is in [docs/19-CONTROLLER-HAPTICS.md](docs/19-CONTROLLER-HAPTICS.md).
+
 ## Launcher
 
 Release players run `DraconusLauncher.exe` from the release folder and need no Python. From a source
 tree, `tools\launcher.bat` (or `python tools\launcher.py`) opens the same window: the project's
-emblem, the author credit and a link to the repository on the left, and Game, Graphics and Audio
-tabs on the right.
+emblem, the author credit and a link to the repository on the left, and Game, Controller, Graphics
+and Audio tabs on the right.
 
 Pick your `.gdi` or `.chd` with **Browse...**; it is verified as soon as it is selected and the path
 is saved when the config is writable. **Check disc** re-checks the current selection, and Play stays
@@ -311,7 +326,8 @@ python tools\launcher.py --selftest
   full-scale output regardless of the playback volume.
 * **Game** -- **Controls** (Classic Dreamcast pad, or Modern: left stick strafe, right stick
   turn, LT block, RT attack), **Brightness / gamma** (50-200%; 100% is the original),
-  translated or interpreter engine path, and the game disc. The gamma is a
+  translated or interpreter engine path, **Crash log** (off by default; see below) and the game
+  disc. The gamma is a
   display curve on the finished picture: above 100% lifts dark and mid tones, below 100% deepens
   them. It is applied when the picture is presented, so F11 and F12 still capture the game's own
   framebuffer; `--screenshot-presented` shows the adjusted screen when comparing.
@@ -330,6 +346,32 @@ python tools\launcher.py --selftest
   instead, because its files come from git; a read-only release folder is also refused, with the
   manual route named. `--check-updates` prints the same comparison without opening the window, and
   `--version` prints the current version.
+
+* **Crash log** (Game tab, off by default) -- turned on, the engine writes the run's console output
+  to `%APPDATA%\dream-recomp\logs\draconus-YYYYMMDD-HHMMSS.log` and, if the game dies, appends a
+  crash report: the build from `BUILD-INFO.txt`, the executable's SHA-1, the exception and its
+  address, the host stack as module-relative addresses, and the guest frame, pc, pr and registers at
+  that moment. A run that ends normally leaves the same file with its console output and the
+  end-of-run report, which is often enough to describe a problem on its own. The newest ten logs are
+  kept. Nothing is written and no handler is installed while the setting is off; `--crash-log` is the
+  flag the setting passes, and the game's console window is empty while it is on because its output
+  goes to the file. A release also publishes `DraconusRecomp-<version>-symbols.zip` beside the game
+  download: the matching linker map and `tools/symbolize.py`, which turn the stack's `module+offset`
+  lines into function names. The log's `exe sha1:` line and the bundle's `BUILD-INFO.txt` are what
+  pair a report with the right map.
+
+**If the game stops.** The launcher watches the process it started and says how it ended: an access
+violation, an uncaught C++ exception, a setup error, or a plain exit code. With **Crash log** on it
+names the newest report and offers the logs folder; **Open logs folder** in the bottom bar opens it
+at any time. Turn the setting on, reproduce the problem, and attach that file — with the release's
+symbols zip the addresses become function names:
+
+```powershell
+python tools\symbolize.py crash.log draconus_boot.map --exe DraconusRecomp.exe
+```
+
+`--exe` refuses a map and a report from different builds (the `exe sha1:` line must match), which is
+why each release bundle carries the hash it was built from.
 
 The tabs are described by one table in the script (`TABS`) plus their keys in `DEFAULTS`, so adding
 an option is a few lines rather than new layout code. Settings persist under

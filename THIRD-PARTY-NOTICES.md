@@ -16,6 +16,7 @@ texts, which ship with the upstream projects and are available at the links.
 | LZMA SDK 26.02 | Public domain | Bundled by libchdr |
 | toml++ | MIT | <https://github.com/marzer/tomlplusplus> |
 | SDL3 | zlib | <https://github.com/libsdl-org/SDL>; `SDL3.dll` ships beside the game |
+| RenHDrum (`renhdrum.dll`) | MIT | <https://github.com/trzz1214/RenHDrum>; the HD rumble, DualSense trigger and speaker engine behind the Controller tab. Bundled from the pinned `v0.5.0` tag — see `third_party/renhdrum/SOURCE.md` for the commit, the SHA-256 and why MIT was elected from its `MIT OR Apache-2.0` dual license. Its upstream `NOTICE` credits Ryujinx, the HD Rumble reverse-engineering community and libopus, which is statically linked inside it; both files ship in `licenses/` |
 | Vulkan loader | Apache-2.0 / MIT | Supplied by the player's GPU driver as `vulkan-1.dll`; not bundled |
 
 ## The frozen launcher

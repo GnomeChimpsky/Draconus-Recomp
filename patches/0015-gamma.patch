@@ -136,7 +136,7 @@ index 55eea52..a60d41c 100644
          push.scale[0] = shown_aspect / target_aspect;
      } else {
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 4b2cccb..94d3ec8 100644
+index 45bc646..82100dd 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -629,6 +629,7 @@ struct Live {
@@ -203,7 +203,7 @@ index 4b2cccb..94d3ec8 100644
      std::unique_ptr<dream::gdrom::Disc> disc;
      if (cfg.disc_image) {
          disc = dream::gdrom::open_disc(*cfg.disc_image, err);
-@@ -3427,6 +3449,8 @@ int run(int argc, char** argv) {
+@@ -3410,6 +3432,8 @@ int run(int argc, char** argv) {
              display = dream::render::vk::DisplayMode::Borderless;
          else if (display_mode == "exclusive")
              display = dream::render::vk::DisplayMode::Exclusive;

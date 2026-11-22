@@ -1,4 +1,5 @@
 diff --git a/render/CMakeLists.txt b/render/CMakeLists.txt
+index e036c31..91740fa 100644
 --- a/render/CMakeLists.txt
 +++ b/render/CMakeLists.txt
 @@ -54,7 +54,8 @@ endif()
@@ -11,8 +12,8 @@ diff --git a/render/CMakeLists.txt b/render/CMakeLists.txt
    string(REPLACE "." "_" _sym ${_shader})
    set(_out ${_spv_dir}/${_sym}.h)
    # glslc -mfmt=c emits a bare initialiser list; wrap it in a declaration so the header can just
-
 diff --git a/render/include/dream/render/interpolate.h b/render/include/dream/render/interpolate.h
+index b2463d3..40a6e43 100644
 --- a/render/include/dream/render/interpolate.h
 +++ b/render/include/dream/render/interpolate.h
 @@ -8,11 +8,27 @@
@@ -66,8 +67,8 @@ diff --git a/render/include/dream/render/interpolate.h b/render/include/dream/re
  };
  
  // Whether two consecutive frames carry exactly the same geometry structure, so that vertex i of
-
 diff --git a/render/include/dream/render/overlay.h b/render/include/dream/render/overlay.h
+index 4fc7b1a..8411e66 100644
 --- a/render/include/dream/render/overlay.h
 +++ b/render/include/dream/render/overlay.h
 @@ -12,6 +12,7 @@
@@ -96,8 +97,8 @@ diff --git a/render/include/dream/render/overlay.h b/render/include/dream/render
  // `under` is the picture the overlay is being drawn over: the same geometry as `rgba`, in ordinary
  // cached memory. When it is given, every write goes to `rgba` and the destination side of the blend
  // comes from `under`, so `rgba` is never read.
-
 diff --git a/render/include/dream/render/vk/present.h b/render/include/dream/render/vk/present.h
+index e1a4b64..6efd601 100644
 --- a/render/include/dream/render/vk/present.h
 +++ b/render/include/dream/render/vk/present.h
 @@ -14,6 +14,7 @@
@@ -159,9 +160,9 @@ diff --git a/render/include/dream/render/vk/present.h b/render/include/dream/ren
      VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
      VkDescriptorPool pool_ = VK_NULL_HANDLE;
      VkDescriptorSet set_ = VK_NULL_HANDLE;
-
-diff --git a/render/shaders/overlay.frag b/render/shaders/overlay.frag
+diff --git b/render/shaders/overlay.frag b/render/shaders/overlay.frag
 new file mode 100644
+index 0000000..b3cf187
 --- /dev/null
 +++ b/render/shaders/overlay.frag
 @@ -0,0 +1,17 @@
@@ -182,9 +183,9 @@ new file mode 100644
 +void main() {
 +    out_colour = v_colour;
 +}
-
-diff --git a/render/shaders/overlay.vert b/render/shaders/overlay.vert
+diff --git b/render/shaders/overlay.vert b/render/shaders/overlay.vert
 new file mode 100644
+index 0000000..fe3e8b7
 --- /dev/null
 +++ b/render/shaders/overlay.vert
 @@ -0,0 +1,27 @@
@@ -215,8 +216,8 @@ new file mode 100644
 +    gl_Position = vec4((uv * 2.0 - 1.0) * push.scale + push.offset, 0.0, 1.0);
 +    v_colour = in_colour;
 +}
-
 diff --git a/render/src/interpolate.cpp b/render/src/interpolate.cpp
+index 663d4cd..b6611f9 100644
 --- a/render/src/interpolate.cpp
 +++ b/render/src/interpolate.cpp
 @@ -4,6 +4,7 @@
@@ -734,8 +735,8 @@ diff --git a/render/src/interpolate.cpp b/render/src/interpolate.cpp
      // The renderer derives its projection from the frame's depth range, so it has to describe the
      // interpolated corners, not either source frame's.
      float min_z = 0, max_z = 0;
-
 diff --git a/render/src/overlay.cpp b/render/src/overlay.cpp
+index 1f2053d..37456d6 100644
 --- a/render/src/overlay.cpp
 +++ b/render/src/overlay.cpp
 @@ -128,16 +128,15 @@ void fill_rect(u32* rgba, unsigned pitch, unsigned width, unsigned height, int x
@@ -786,8 +787,8 @@ diff --git a/render/src/overlay.cpp b/render/src/overlay.cpp
 +}
 +
  }  // namespace dream::render
-
 diff --git a/render/src/vk/present.cpp b/render/src/vk/present.cpp
+index ea3b0e9..55eea52 100644
 --- a/render/src/vk/present.cpp
 +++ b/render/src/vk/present.cpp
 @@ -1,8 +1,11 @@
@@ -960,8 +961,8 @@ diff --git a/render/src/vk/present.cpp b/render/src/vk/present.cpp
      return true;
  }
  
-
 diff --git a/render/tests/test_interpolate.cpp b/render/tests/test_interpolate.cpp
+index 7c0d3f6..ccdf2d0 100644
 --- a/render/tests/test_interpolate.cpp
 +++ b/render/tests/test_interpolate.cpp
 @@ -38,6 +38,27 @@ Frame strip(float x0, float x1, float z0, float z1) {
@@ -1085,8 +1086,8 @@ diff --git a/render/tests/test_interpolate.cpp b/render/tests/test_interpolate.c
 +    REQUIRE(interpolate_frames(a, moving, 0.5f, out, &stats));
 +    CHECK(stats.motion > 1.0f);
 +}
-
 diff --git a/render/tests/test_overlay.cpp b/render/tests/test_overlay.cpp
+index beec426..d3a2123 100644
 --- a/render/tests/test_overlay.cpp
 +++ b/render/tests/test_overlay.cpp
 @@ -161,3 +161,35 @@ TEST_CASE("drawing over `under` is pixel-identical to drawing over the frame its
@@ -1125,8 +1126,8 @@ diff --git a/render/tests/test_overlay.cpp b/render/tests/test_overlay.cpp
 +    text_rects(0, 0, "A", TextStyle{kWhite, 0, 0}, rects);
 +    CHECK(rects.empty());
 +}
-
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index c66f387..75a7aa3 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -919,6 +919,7 @@ struct Live {
@@ -1561,7 +1562,7 @@ diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
      std::uint64_t interpolated = 0, interp_fallbacks = 0, interp_partial = 0, interp_failures = 0;
  
  private:
-@@ -3591,8 +3801,9 @@ int main(int argc, char** argv) {
+@@ -3574,8 +3784,9 @@ int main(int argc, char** argv) {
              std::printf("window: last shown %s\n", live->shown.describe().c_str());
          if (live->interpolation)
              std::printf(
@@ -1573,7 +1574,7 @@ diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
                  static_cast<unsigned long long>(live->interpolated),
                  static_cast<unsigned long long>(live->interp_fallbacks),
                  static_cast<unsigned long long>(live->interp_partial),
-@@ -3637,6 +3848,23 @@ int main(int argc, char** argv) {
+@@ -3620,6 +3831,23 @@ int main(int argc, char** argv) {
                          static_cast<unsigned long long>(live->pacing_repeats),
                          100.0 * static_cast<double>(live->pacing_repeats) /
                              static_cast<double>(live->pacing_intervals));

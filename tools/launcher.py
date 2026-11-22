@@ -100,6 +100,9 @@ LEGACY_SETTINGS = os.path.join(
 # settings: the player never edits them, and they must not be copied between machines.
 UPDATE_STATE = os.path.join(USER_DIR, "updates.json")
 UPDATE_LOG = os.path.join(USER_DIR, "update.log")
+# The game's opt-in crash logs. The launcher only points at this folder; the engine writes it, and
+# only when the Game tab's Crash log setting is on.
+LOGS_DIR = os.path.join(USER_DIR, "logs")
 
 IMAGE_RE = re.compile(r'^\s*image\s*=\s*"(.*)"', re.MULTILINE)
 
@@ -130,7 +133,15 @@ DEFAULTS = {
     "audio_buffer": 0,
     "path": "translated",
     "controls": "classic",
+    # RenHDrum's per-pad output and the DualSense trigger feedback. Off by default: the plain rumble
+    # is what the original pad did, and this needs renhdrum.dll beside the game.
+    "haptics": False,
+    "haptics_triggers": False,
+    "haptics_resistance": False,
+    "haptics_speaker": False,
+    "haptics_strength": 100,
     "gamma": 100,
+    "crash_log": False,
     "check_updates": True,
 }
 
@@ -960,6 +971,21 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
         cmd += ["--interpret"]
     if s.get("controls", "classic") == "modern":
         cmd += ["--controls", "modern"]
+    # Haptics are one switch with sub-choices: without --haptics the engine never loads the DLL, so
+    # the sub-flags would be dead weight on the command line.
+    if s.get("haptics"):
+        cmd += ["--haptics"]
+        if s.get("haptics_triggers"):
+            cmd += ["--trigger-feedback"]
+        if s.get("haptics_resistance"):
+            cmd += ["--trigger-resistance"]
+        if s.get("haptics_speaker"):
+            cmd += ["--haptics-speaker"]
+        strength = max(10, min(100, int(s.get("haptics_strength") or 100)))
+        if strength != 100:
+            cmd += ["--haptics-strength", str(strength)]
+    if s.get("crash_log"):
+        cmd += ["--crash-log"]
     gamma = int(s.get("gamma") or 100)
     if gamma != 100:
         cmd += ["--gamma", "%.2f" % (gamma / 100.0)]
@@ -978,6 +1004,48 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
     return cmd + (extra or [])
 
 
+# --- how the launcher explains an exit ----------------------------------------------------------
+#
+# Windows puts an NTSTATUS in the exit code when a process dies of a fault (0xC0000005 for an access
+# violation), and Python may hand it back as a signed int. The launcher turns that into a sentence,
+# finds the newest crash log, and names the build, so a vanished game is a report rather than a
+# mystery. 0 is the ordinary quit and has no sentence.
+EXIT_NAMES = {
+    0xC0000005: "an access violation",
+    0xC000001D: "an illegal instruction",
+    0xC0000094: "an integer divide by zero",
+    0xC00000FD: "a stack overflow",
+    0xC0000135: "a missing DLL",
+    0xC0000142: "a DLL that failed to start",
+    0xC0000374: "heap corruption",
+    0xC0000409: "a stack buffer overrun",
+    0xC000013A: "the console being closed",
+    0xE06D7363: "an uncaught C++ exception",
+    0x80000003: "a breakpoint",
+}
+
+
+def describe_exit(code: int | None) -> str:
+    """One sentence for how the game ended; empty for the ordinary exit 0."""
+    if code is None:
+        return ""
+    raw = code & 0xFFFFFFFF if code < 0 else code
+    if raw == 0:
+        return ""
+    if raw == 1:
+        return "the run ended with a fault (exit 1)"
+    if raw == 2:
+        return "the game could not start (exit 2: a setup error)"
+    if raw == 0xC000013A:
+        return "the console was closed"
+    name = EXIT_NAMES.get(raw)
+    if name:
+        return "the game crashed with %s (0x%08X)" % (name, raw)
+    if raw >= 0xC0000000:
+        return "the game crashed (0x%08X)" % raw
+    return "the game exited with code %d" % raw
+
+
 # ----------------------------------------------------------------------------- the tabs
 #
 # Each control: kind, key, label, optional help text, and kind-specific fields.
@@ -987,6 +1055,36 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
 #   disc    (the disc row, handled specially)
 
 TABS = [
+    ("Controller", [
+        {"kind": "check", "key": "haptics", "label": "HD rumble (RenHDrum)",
+         "help": "Off, the jump pack drives the pad's two motors, exactly as a Dreamcast wheel "
+                 "does. On, the pads go through RenHDrum: a DualSense's voice-coil actuators over "
+                 "its own USB audio, a Pro Controller's HD Rumble packets, an Xbox pad's four "
+                 "motors. A pad it does not recognise keeps the plain rumble, and so does the whole "
+                 "feature if the file is missing, so nothing here can leave a player without "
+                 "feedback."},
+        {"kind": "check", "key": "haptics_triggers", "label": "Trigger feedback on hits",
+         "depends": ("haptics", True),
+         "help": "The game's own rumble fires when a block takes a hit and when a swing lands. "
+                 "This turns those moments into a pulse in the trigger that made them: a short "
+                 "buzz in the left trigger for the block, a harder one in the right for the hit. "
+                 "Needs a DualSense, wired; over Bluetooth the pad keeps plain rumble."},
+        {"kind": "check", "key": "haptics_resistance", "label": "Trigger resistance while blocking",
+         "depends": ("haptics", True),
+         "help": "Holding the left trigger to block gives a light resistance, so the guard has "
+                 "weight before anything hits it. It stops the moment you let go, and a block that "
+                 "takes a hit buzzes through it."},
+        {"kind": "check", "key": "haptics_speaker", "label": "Controller speaker taps",
+         "depends": ("haptics", True),
+         "help": "RenHDrum turns the rumble into audible taps from the DualSense's own speaker, "
+                 "so footsteps and blows make a small sound in your hands. Off by default: the "
+                 "pack's signal is coarse, and this is a taste rather than an improvement."},
+        {"kind": "slider", "key": "haptics_strength", "label": "Haptic strength",
+         "min": 10, "max": 100, "suffix": "%", "depends": ("haptics", True),
+         "help": "How hard the pad's actuators are driven. 100% is the engine's own level; lower is "
+                 "for a pad that feels too strong next to the picture. The triggers keep the "
+                 "strengths their effects ask for, so this does not soften them."},
+    ]),
     ("Graphics", [
         {"kind": "combo", "key": "sh4_clock", "label": "CPU clock",
          "values": [("200 MHz (default)", 200), ("250 MHz", 250), ("300 MHz (1.5x)", 300),
@@ -1080,6 +1178,11 @@ TABS = [
                     ("Interpreter - reference, slow", "interpreter")],
          "help": "The translated path is the real thing. The interpreter is the reference the "
                  "translation is checked against."},
+        {"kind": "check", "key": "crash_log", "label": "Crash log",
+         "help": "Writes this run's console output and, if the game dies, a crash report to "
+                 "%APPDATA%\\dream-recomp\\logs. Off by default: turn it on to make a bug report, "
+                 "play until the problem happens, then attach the newest file. The game's console "
+                 "window stays empty while it is on, because its output goes to the log."},
         {"kind": "check", "key": "check_updates", "label": "Check for updates on start",
          "help": "Asks GitHub once a day whether a newer release exists and offers to install it "
                  "from the button at the bottom of the window. An update keeps your settings, "
@@ -1089,7 +1192,7 @@ TABS = [
 ]
 
 # The Game tab is first: the disc and the engine path are what a player acts on before playing.
-TABS.sort(key=lambda tab: ("Game", "Graphics", "Audio").index(tab[0]))
+TABS.sort(key=lambda tab: ("Game", "Controller", "Graphics", "Audio").index(tab[0]))
 
 
 # ----------------------------------------------------------------------------- UI
@@ -1137,6 +1240,10 @@ class Launcher(tk.Tk):
         self._update_label_fg = self.DIM
         self._status_before_check = "Ready."
         self._closing = False
+        # The game the Play button started, while it runs. The launcher keeps the handle and polls
+        # it so a crash can be explained; it never waits, so the window stays responsive.
+        self._game: subprocess.Popen | None = None
+        self._game_started = 0.0
         # The saved aspect decides the pixel counts the resolution rows show.
         self._refresh_resolution()
         self._build()
@@ -1234,6 +1341,10 @@ class Launcher(tk.Tk):
                    command=lambda: self.open_folder(SAVES_DIR)).pack(side="left")
         ttk.Button(bar, text="Open settings folder",
                    command=lambda: self.open_folder(SETTINGS_DIR)).pack(side="left", padx=(8, 0))
+        # Crash logs are opt-in (Crash log, Game tab); this is where they land when they exist and
+        # where a player can look after a report. open_folder creates it on demand.
+        ttk.Button(bar, text="Open logs folder",
+                   command=lambda: self.open_folder(LOGS_DIR)).pack(side="left", padx=(8, 0))
         # The update button changes its label and action when a newer release is known: "Check for
         # updates", then "Update to 1.1" (or "Download 1.1" when this build cannot install it).
         self.update_button = ttk.Button(bar, text="Check for updates",
@@ -1342,7 +1453,10 @@ class Launcher(tk.Tk):
         if kind == "check":
             var = tk.BooleanVar(value=bool(self.settings.get(key, False)))
             self.vars[key] = var
-            box = ttk.Checkbutton(tab, variable=var)
+            # Taking the value as it is ticked, not only when Play collects it, is what lets a row
+            # depend on a checkbox: the Controller tab's trigger options are under HD rumble.
+            box = ttk.Checkbutton(tab, variable=var,
+                                  command=lambda k=key: self._check_changed(k))
             if c.get("depends"):
                 self._dependent.append((c["depends"][0], c["depends"][1], box))
             return box
@@ -1389,6 +1503,10 @@ class Launcher(tk.Tk):
                         if text == label:
                             return value
         return self.settings.get(key)
+
+    def _check_changed(self, key: str) -> None:
+        self.settings[key] = self.vars[key].get()
+        self._sync_depends()
 
     def _sync_depends(self) -> None:
         for dep_key, dep_value, widget in self._dependent:
@@ -1462,6 +1580,10 @@ class Launcher(tk.Tk):
         self.combos.clear()
         self._dependent.clear()
         self._build()
+        # Rebuilding the window makes a fresh Play button, which must still be disabled while the
+        # game Reset was pressed against is running.
+        if self._game is not None:
+            self.play_button.state(["disabled"])
         self._sync_depends()
         # The rebuilt button starts unlabelled by an earlier check; a check already in flight will
         # still land on it when it finishes.
@@ -1842,6 +1964,8 @@ class Launcher(tk.Tk):
         self.after(50, self.check_disc)
 
     def play(self) -> None:
+        if self._game is not None:
+            return
         if not self.disc_ok:
             messagebox.showerror(
                 "Disc",
@@ -1860,10 +1984,11 @@ class Launcher(tk.Tk):
         self.status.set("Launching...")
         self.update_idletasks()
         try:
-            subprocess.Popen(cmd, cwd=ROOT)
+            self._game = subprocess.Popen(cmd, cwd=ROOT)
         except OSError as exc:
             messagebox.showerror("Launch", str(exc))
             return
+        self._game_started = time.time()
         bits = []
         if int(s["scale"]) != 1:
             bits.append("%dx resolution" % int(s["scale"]))
@@ -1880,6 +2005,64 @@ class Launcher(tk.Tk):
         if s["path"] == "interpreter":
             bits.append("interpreter")
         self.status.set("Running" + ((" - " + ", ".join(bits)) if bits else "") + ".")
+        self.play_button.state(["disabled"])
+        self.after(500, self._poll_game)
+
+    def _poll_game(self) -> None:
+        """Notice when the game ends, without blocking the Tk thread waiting for it."""
+        game = self._game
+        if game is None or self._closing:
+            return
+        code = game.poll()
+        if code is None:
+            try:
+                self.after(500, self._poll_game)
+            except tk.TclError:
+                pass
+            return
+        self._game = None
+        self.play_button.state(["!disabled"])
+        summary = describe_exit(code)
+        raw = code & 0xFFFFFFFF if code is not None and code < 0 else code
+        if not summary:
+            self.status.set("The game exited.")
+            return
+        if raw == 0xC000013A:
+            # The player closed the game's console window to quit; that is an exit, not a crash.
+            self.status.set("The console was closed.")
+            return
+        self.status.set("The game stopped: " + summary)
+        self._report_game_exit(summary)
+
+    def _report_game_exit(self, summary: str) -> None:
+        logging_on = bool(self.settings.get("crash_log"))
+        log = self._newest_log(self._game_started) if logging_on else ""
+        lines = ["The game stopped.", "", summary[0].upper() + summary[1:] + "."]
+        if logging_on:
+            if log:
+                lines += ["", "Crash log:", log]
+            else:
+                lines += ["", "The Crash log setting was on, but no log was written for this run."]
+        else:
+            lines += ["", "Crash log is off. Turn it on in the Game tab, then reproduce the "
+                          "problem to collect a report."]
+        message = "\n".join(lines)
+        if logging_on:
+            if messagebox.askyesno("Draconus stopped", message + "\n\nOpen the logs folder?",
+                                   icon="error"):
+                self.open_folder(LOGS_DIR)
+        else:
+            messagebox.showerror("Draconus stopped", message)
+
+    @staticmethod
+    def _newest_log(since: float = 0.0) -> str:
+        try:
+            logs = [os.path.join(LOGS_DIR, name) for name in os.listdir(LOGS_DIR)
+                    if name.startswith("draconus-") and name.endswith(".log")
+                    and os.path.getmtime(os.path.join(LOGS_DIR, name)) >= since - 1.0]
+            return max(logs, key=os.path.getmtime) if logs else ""
+        except OSError:
+            return ""
 
     def _close(self) -> None:
         try:
@@ -1907,7 +2090,8 @@ def selftest() -> int:
     image = "C:/fixtures/draconus.gdi"
 
     cmd = build_command(image, base)
-    if "--scale" in cmd or "--aspect" in cmd or "--interpret" in cmd:
+    if ("--scale" in cmd or "--aspect" in cmd or "--interpret" in cmd or "--crash-log" in cmd
+            or "--haptics" in cmd):
         failures.append("defaults: unexpected flags")
     # The image must reach the engine as --disc, not only through the writable TOML: a read-only
     # release folder has to remain playable.
@@ -1943,6 +2127,44 @@ def selftest() -> int:
 
     cmd = build_command(image, dict(base, vsync=False, fps=True))
     expect("toggles", cmd, ["--present-mode", "immediate", "--fps"])
+
+    # Crash logging is opt-in: the default command line must not carry it, and turning the setting
+    # on must produce the flag. A stale settings file without the key reads as off through .get().
+    if "--crash-log" in build_command(image, dict(base)):
+        failures.append("crash log: off still passed --crash-log")
+    cmd = build_command(image, dict(base, crash_log=True))
+    expect("crash log", cmd, ["--crash-log"])
+
+    # How an abnormal exit is described, which is what turns a vanished game into a report. Windows
+    # codes arrive signed or unsigned depending on the API that produced them; both must read right.
+    for code, needle in ((0, ""), (1, "fault"), (2, "could not start"),
+                         (-1073741819, "access violation"), (3221225477, "access violation"),
+                         (-529697949, "uncaught C++ exception"), (0xC00000FD, "stack overflow")):
+        text = describe_exit(code)
+        if needle and needle not in text:
+            failures.append("exit %r: %r" % (code, text))
+        if not needle and text:
+            failures.append("exit 0: %r" % text)
+
+    # Haptics: one master switch, and the sub-choices only reach the command line under it. A stale
+    # settings file without these keys reads as off through .get(), which is what `base` is.
+    for flag in ("--haptics", "--trigger-feedback", "--trigger-resistance", "--haptics-speaker"):
+        if flag in build_command(image, dict(base)):
+            failures.append("haptics: off still passed %s" % flag)
+    cmd = build_command(image, dict(base, haptics=True, haptics_triggers=True,
+                                    haptics_resistance=True, haptics_speaker=True))
+    expect("haptics", cmd, ["--haptics", "--trigger-feedback", "--trigger-resistance",
+                            "--haptics-speaker"])
+    # Without the master switch the engine never loads the DLL, so the sub-flags would only make the
+    # command line describe a run that is not happening.
+    cmd = build_command(image, dict(base, haptics_triggers=True, haptics_resistance=True))
+    if "--haptics" in cmd or "--trigger-feedback" in cmd or "--trigger-resistance" in cmd:
+        failures.append("haptics: sub-choices passed without the master switch")
+    # The strength only travels when it is not the default, like every other defaulted slider.
+    if "--haptics-strength" in build_command(image, dict(base, haptics=True)):
+        failures.append("haptics: the default strength was passed explicitly")
+    cmd = build_command(image, dict(base, haptics=True, haptics_strength=60))
+    expect("haptics strength", cmd, ["--haptics-strength", "60"])
 
     cmd = build_command(image, dict(base, audio=False))
     expect("audio", cmd, ["--no-audio"])
@@ -2265,10 +2487,37 @@ def check_ui(app: Launcher) -> list[str]:
     if "--audio-volume" in cmd:
         failures.append("100%% volume kept --audio-volume: %s" % " ".join(cmd))
 
-    # The tabs that remain, and their order: Game first, because the disc comes before settings.
+    # The tabs that remain, and their order: Game first, because the disc comes before settings, and
+    # Controller before graphics because the pad is what the player plugs in next.
     names = [app.notebook.tab(i, "text") for i in range(len(app.notebook.tabs()))]
-    if names != ["Game", "Graphics", "Audio"]:
+    if names != ["Game", "Controller", "Graphics", "Audio"]:
         failures.append("tabs: %r" % names)
+
+    # The Controller tab's trigger options hang off the HD rumble switch. Ticking it has to enable
+    # them there and then: the rows are the only way a player learns they exist, and a row that
+    # stays greyed until Play is a row nobody finds.
+    haptics_was = bool(app.vars["haptics"].get())
+
+    def dependent_states() -> list:
+        return [str(w.cget("state")) for k, _v, w in app._dependent if k == "haptics"]
+
+    app.vars["haptics"].set(False)
+    app._check_changed("haptics")
+    app.update()
+    off_states = dependent_states()
+    if not off_states:
+        failures.append("no Controller row depends on HD rumble")
+    elif any(s != "disabled" for s in off_states):
+        failures.append("HD rumble off left its rows enabled: %r" % (off_states,))
+    app.vars["haptics"].set(True)
+    app._check_changed("haptics")
+    app.update()
+    on_states = dependent_states()
+    if any(s == "disabled" for s in on_states):
+        failures.append("HD rumble on left its rows disabled: %r" % (on_states,))
+    app.vars["haptics"].set(haptics_was)
+    app._check_changed("haptics")
+    app.update()
 
     # Clamping and centring are unit-tested; this is the real window, so a regression in the
     # wiring still shows. The window must fit the work area (the screen above the taskbar).
@@ -2319,7 +2568,7 @@ def check_ui(app: Launcher) -> list[str]:
         return found
 
     labels = texts(app)
-    for label in ("Open saves folder", "Open settings folder"):
+    for label in ("Open saves folder", "Open settings folder", "Open logs folder"):
         if label not in labels:
             failures.append("bottom bar: %r button missing" % label)
     for label in ("by GnomeChimpsky", "Github repository"):

@@ -5,6 +5,34 @@ Draconus-Recomp is a native Windows x64 static recompilation of *Draconus: Cult 
 disc and ships no game data. The [README](README.md) is the manual; the
 [quick start](README.md#quick-start) is the shortest way in.
 
+## Unreleased
+
+* **HD rumble and trigger feedback.** A new **Controller** tab turns on RenHDrum, the haptics engine
+  that reaches the parts of a modern pad the Dreamcast's own rumble pack never could: a DualSense's
+  voice-coil actuators over its USB audio endpoint, a Switch Pro Controller's HD Rumble packets, and
+  an Xbox pad's four motors. The game already rumbles when a block takes a hit and when a swing
+  lands, so **Trigger feedback on hits** turns those moments into a pulse in the trigger that made
+  them — left for the block, right for the landed blow — and **Trigger resistance while blocking**
+  gives the left trigger a light resistance for as long as the block is held. Both are DualSense
+  features and need it wired; **Controller speaker taps** is there too, off by default. Everything
+  degrades to the old two-motor rumble: a pad RenHDrum does not claim, a missing `renhdrum.dll`, or
+  the option switched off all behave exactly as before. The DLL ships in the release folder under
+  the MIT license (see `licenses/`), so there is nothing to download or install.
+* **Opt-in crash logging.** The launcher's Game tab has a **Crash log** setting, off by default.
+  Turned on, the run's console output is written to
+  `%APPDATA%\dream-recomp\logs\draconus-<timestamp>.log`, and a crash appends a report with the
+  exception, the host stack as module-relative addresses and the guest frame, pc, pr and registers.
+  A run that ends normally leaves the same file with its console output and the end-of-run report,
+  which is often enough to describe a problem on its own. The newest ten logs are kept, and
+  `--crash-log` is the engine flag the setting passes; with the setting off nothing is written and
+  no handler is installed. The report names the build from `BUILD-INFO.txt` and the executable's
+  SHA-1, and each release publishes a separate `DraconusRecomp-<version>-symbols.zip` with the
+  matching linker map and `tools/symbolize.py`, so its `module+offset` stack becomes function names.
+* **The launcher notices how the game ended.** It keeps the process handle and says "crashed with
+  an access violation (0xC0000005)", "an uncaught C++ exception", "could not start", or the plain
+  exit code, instead of leaving "Running" on screen. With Crash log on it names the newest report
+  and offers the logs folder; a new **Open logs folder** button opens it at any time.
+
 ## 1.1.0 — 2026-11-18
 
 The first update. Windows x64; the requirements and install steps are the same as 1.0, and the

@@ -3127,6 +3127,154 @@ env-gated and does nothing unless the variable is set; it adds no work to an ord
 Carried by `patches/0016-lod-trace.patch`, which touches `runtime/boot/boot_main.cpp` and applies
 after 0015.
 
+## Patch 050: RenHDrum haptics, and the block and attack buttons reach the triggers (2026-11-21)
+
+The jump pack has one motor with three drive bits. A DualSense has two voice-coil actuators driven by
+its own 4-channel USB audio endpoint, two adaptive triggers that take an 11-byte effect each, and a
+speaker; a Switch Pro Controller takes HD Rumble packets and an Xbox pad has four motors. SDL's
+`SDL_RumbleGamepad` reaches none of that, so `--haptics` hands the pack's effects to
+[RenHDrum](https://github.com/trzz1214/RenHDrum) (MIT, Three-Dola) instead.
+
+`render/haptics.{h,cpp}` is the host half: it loads `renhdrum.dll` from beside the executable with
+`LoadLibraryExW` and the DLL-directory search flag (never the working directory or `PATH`, where
+another title's copy could be picked up), checks the `0.5.0` branch and resolves every function by
+name, so a missing file, an old file or a missing export leaves the pad on the plain SDL path instead
+of failing.
+
+- **Which pad it claims.** DualSense `054C:0CE6`/`0DF2` **wired only**: its actuators are audio
+  channels 2-3 of the pad's own endpoint, which Windows does not expose over Bluetooth, and the
+  combined HID report that replaces it is not implemented here — a wireless DualSense keeps SDL's
+  rumble, and says so once. Pro Controller `057E:2009` gets `RenHdcEngine` packets through
+  `SDL_SendJoystickEffect`, Xbox (`SDL_GAMEPAD_TYPE_XBOXONE` or `045E`) gets four motors through
+  `RenHdcXboxRumble` plus `SDL_RumbleJoystickTriggers`. A claimed pad is skipped by
+  `Window::rumble`'s SDL loop, and its claim also suppresses the XInput fallback so one effect cannot
+  play twice.
+- **When it claims.** A DualSense is claimed for rumble only once its audio endpoint opens, because
+  claiming earlier would silence a pad whose endpoint never appears. The endpoint is retried every
+  two seconds and a device plugged in after the window opened is found (`SDL_PumpEvents` first):
+  Windows registers the HID interface long before the audio class one.
+- **The effect.** The pack's seven power steps become amplitude, and its 4-30 Hz motor rate scales
+  the low band (60-120 Hz) so a slow heavy effect stays a thump and a fast one rises; a short hit
+  (`duration_ms` <= 160) gets a stronger, higher band at 340 Hz so a blow reads sharp. A one-shot is
+  retired after its own duration, a continuous one 250 ms after the last repeat, so a lost stop
+  cannot leave a motor running.
+- **The triggers.** `render/trigger_effect.{h,cpp}` builds the DualSense zone effects (mode,
+  10-zone strength map, `feedback`/`weapon`/`vibration`) and `TriggerPlanner` decides which one each
+  trigger gets: left holds a light `feedback` resistance while the block is held; an effect with
+  power >= 0.20 arriving while it is held turns into a 110 ms buzz in the left trigger (the block
+  took a hit); a right-trigger press opens a 400 ms window with a faint 55 ms buzz for the swing, and
+  an impact inside the window turns into a 90 ms hard buzz (the blow landed) and closes the window so
+  the burst behind a hit is not read as a second one. Only changes are sent, through
+  `renhdrum_hd_haptics_trigger_block` and `SDL_SendJoystickEffect`, from one thread.
+- **The speaker** is off unless asked for (`--haptics-speaker`), because it is RenHDrum's synthesis of
+  a coarse signal rather than game audio; when on it opens the pad's speaker route with the 47-byte
+  effects block and closes it on release.
+- **Release.** `Window::destroy` stops the haptics before the pads close (the pad's speaker and
+  triggers must be released while the pad is still open), and a hot-plug detaches the slot before
+  `SDL_CloseGamepad`.
+
+Flags: `--haptics`, `--trigger-feedback`, `--trigger-resistance`, `--haptics-speaker`,
+`--haptics-strength N` (10-100). `DREAM_RENHDRUM=0` disables the whole path, `DREAM_RENHDRUM_TRACE=1`
+prints the load, each claim and the audio endpoint.
+
+The header is vendored at `third_party/renhdrum/include/renhdrum.h`; the DLL it must match is the
+repository's pinned `third_party/renhdrum/renhdrum.dll` (see its `SOURCE.md`). The trigger bytes are
+pinned by `render/tests/test_trigger_effect.cpp` against the same vectors RenHDrum's own suite uses,
+so a change that would stop a real controller feeling anything fails the suite instead.
+
+**Verified.** `dream_render_tests` passes (125 cases, 5,188 assertions) with eleven new cases for the
+effect encodings, the clamping, the resistance, the block-hit and landing-blow pulses, the swing
+window, one hit per swing, resistance switched off, and reset. On a wired DualSense, a scripted run of
+the game with `--haptics --trigger-feedback --trigger-resistance` prints `haptics: on (DualSense USB,
+triggers)`, opens the pad's audio endpoint and stays clean; `dream_haptics_probe` plays the whole
+sequence — resistance, block hit, release, swing, landing blow, rumble — so a pad can be checked
+without playing to the first fight.
+
+**Packaging.** The DLL is loaded from beside the executable, so a release carries it: the repository's
+`third_party/renhdrum/` holds the pinned `v0.5.0` binary, its MIT license and upstream `NOTICE`, and
+`tools/build-renhdrum.ps1` rebuilds or verifies it. MIT was elected from the dual license because this
+project is GPL-2.0-only, which Apache-2.0 is not compatible with.
+
+## Patch 051: opt-in crash logging (2026-11-22)
+
+A crash used to leave nothing behind: the release is a console-subsystem binary whose output goes to
+a console window that closes with the process, the unhandled-exception filter existed only under
+`DREAM_FAULT_TRACE=1`, and the launcher starts the game with its exit code unread. The opt-in
+`--crash-log` — the launcher's **Crash log** setting, off by default — closes that gap for a bug
+report.
+
+`runtime/boot/crash_log.{h,cpp}` starts one session file under `<per-user data>/logs` (at most ten
+are kept), redirects stdout and stderr into it unbuffered, and installs an unhandled-exception
+filter, a `terminate` handler and a `SIGABRT` handler. On a fault it appends the exception code and
+address, the access a violation attempted, the host stack as module+offset (the module list is
+re-read once the window and graphics driver have loaded) and the guest frame, pc, pr, r15 and sr
+from a snapshot the boot registers before `run_guest`. A clean return ends the log with the exit code
+and duration; a crash never reaches that line, so the report is the last thing in the file. The
+handler writes through the already-open log stream and is wrapped in `__try`/`__except`, so a fault
+inside it cannot recurse.
+
+The flag is parsed with the other reporting options, and the boot builds the directory from
+`host_data_dir()`, so it is `%APPDATA%\dream-recomp\logs` on Windows. Without the flag nothing is
+opened and no handler is installed: the console keeps the output it always had. Carried by
+`patches/0018-crash-log.patch`, which also adds `runtime/boot/crash_log.cpp` to each game target in
+`cmake/DreamAddGame.cmake`; it applies after 0017.
+
+**Verified.** A scratch harness (`crash_log.cpp` compiled on its own) produced a report for an access
+violation (`0xC0000005`, "write of 0x0"), an uncaught C++ exception and `abort()`; the game's own
+headless run with `--crash-log` wrote the session header, the boot lines, the end-of-run report and
+`clean exit (exit 0)`, and a missing config wrote its error and `exit 2`. Without the flag no log
+directory was created, and the launcher's self-test checks that the setting passes `--crash-log` only
+when it is on.
+
+## Patch 052: a crash report names its build (2026-11-22)
+
+`--crash-log` wrote a report that could not be tied to the symbols needed to read it. The release
+build has no PDB, so its stack is `module+offset`, and the linker map that names those offsets
+belongs to one exact link: a rebuilt exe and an older map slip past each other with nothing to catch
+it.
+
+The header now reads `BUILD-INFO.txt` beside the executable (version, commit, build time) and records
+the executable's SHA-1, computed with the existing `sha1_hex` over one 37 MB read while logging is
+on. The crash block repeats both lines, so a report copied on its own still names the build. The
+release script writes the same SHA-1 into `BUILD-INFO.txt` and assembles a separate
+`DraconusRecomp-<version>-symbols.zip` (linker map, `tools/symbolize.py`, `BUILD-INFO.txt`, README);
+that bundle is never in the player package. `tools/symbolize.py` rewrites the stack's
+`module+offset` entries with the nearest symbol, and `--exe` checks the log's hash against the
+executable before doing so.
+
+Carried by `patches/0019-build-identity.patch`, which touches `runtime/boot/crash_log.{h,cpp}` and
+applies after 0018.
+
+**Verified.** A release-shaped copy with a hand-written `BUILD-INFO.txt` logged
+`version 9.9.9-test, commit deadbee` and the exact file SHA-1; the assembled test release's
+`BUILD-INFO.txt`, symbols zip and player exe all carried the same hash; a mapped crash harness
+symbolized `crash.exe+0x20DF` to `main+0x23F` and `guarded_crash+0x9`.
+
+## Patch 053: the texture cache's fingerprint joins the patch set (2026-11-22)
+
+The cumulative 0001 patch carries the texture cache's `source_digest` member and its call sites: a
+texture replaced in video memory through a path that reported no write is decoded again instead of
+being served stale from the cache. The function those call sites use, `texture_digest()`, was never
+in the patch set — it existed only in the working tree, so a fresh clone built an engine whose
+`texture_cache.cpp` referenced a function that did not exist. The chain refresh found it: with the
+base patch regenerated from the pinned tree to the unwound working state, every other source file
+matched, and this was the one gap.
+
+`texture_digest()` samples 256 words spread across the decoded region with FNV-1a, returns 0 when the
+texture lies outside video memory or has no known size, and is pinned by a test that checks a
+replaced image changes the fingerprint while writes outside it do not. Carried by
+`patches/0020-texture-digest.patch`, which touches `render/{include,src,tests}/…/texture.*` and
+applies after 0019.
+
+The pass also regenerated the base `0001` from the pinned tree to the unwound working state: it no
+longer reversed against the working engine, and that stale base was why `0003` would not apply to a
+fresh clone. With the new base, 0002–0019 apply in order and `0013` was regenerated against the
+chain rather than the working tree, so the engine-doc blank line no longer blocks it.
+
+**Verified.** The full chain (0001–0020) applies to the pinned commit in order and reproduces the
+working engine on every source file; the only remaining differences are the engine's own
+`docs/progress.md` and `docs/runtime-maple.md`, which are local notes and not build inputs.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`

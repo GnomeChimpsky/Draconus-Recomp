@@ -1,0 +1,760 @@
+diff --git a/cmake/DreamAddGame.cmake b/cmake/DreamAddGame.cmake
+index 57da442..4e760f4 100644
+--- a/cmake/DreamAddGame.cmake
++++ b/cmake/DreamAddGame.cmake
+@@ -93,7 +93,12 @@ function(dream_add_game id)
+     COMMENT "Translating ${ARG_TITLE}"
+     VERBATIM)
+ 
+-  add_executable(${id}_boot ${DREAM_ROOT}/runtime/boot/boot_main.cpp ${_units})
++  # crash_log.cpp is the boots' opt-in --crash-log: the same host-side file for every title, so a
++  # crash report reads the same whichever game produced it.
++  add_executable(${id}_boot
++    ${DREAM_ROOT}/runtime/boot/boot_main.cpp
++    ${DREAM_ROOT}/runtime/boot/crash_log.cpp
++    ${_units})
+   target_link_libraries(${id}_boot PRIVATE dream::runtime dream::translator)
+   # A title translated with discovery closed is one enormous generated unit: 9,000 functions is more
+   # than MSVC's default object-file section limit, and a --replay-hooks build crosses it even
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index c1316a7..7ea5936 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -83,6 +83,7 @@ extern "C" __declspec(dllimport) unsigned int __stdcall timeEndPeriod(unsigned i
+ #include "dream/render/vk/window.h"
+ #include "dream/render/window_size.h"
+ #endif
++#include "crash_log.h"
+ 
+ namespace {
+ 
+@@ -566,6 +567,22 @@ void print_guest_backtrace() {
+ #endif
+ }
+ 
++// What the opt-in crash log reports about the guest. The handler runs while the process is dying,
++// so this only reads integers out of the running system; the pointer is cleared when the run ends
++// so a crash during teardown cannot report a stale frame.
++dream::System* g_crash_system = nullptr;
++
++void crash_guest_snapshot(char* out, std::size_t size) {
++    if (!g_crash_system) {
++        std::snprintf(out, size, "(the guest had not started)");
++        return;
++    }
++    const dream::sh4::Ctx& c = g_crash_system->ctx;
++    std::snprintf(out, size, "frame %llu, pc 0x%08x, pr 0x%08x, r15 0x%08x, sr 0x%08x",
++                  static_cast<unsigned long long>(g_crash_system->spg.frames()), c.pc, c.pr,
++                  c.r[15], dream::sh4::read_sr(c));
++}
++
+ #ifdef DREAM_WITH_RENDERER
+ // The windowed mode (WP2.3 step 6). Nothing here is constructed without --window, so the default
+ // run stays exactly as headless as it was, which is what CI builds and what the emitter's
+@@ -2556,6 +2573,9 @@ void usage(const char* argv0, std::FILE* out) {
+         "\n"
+         "Reporting what happened:\n"
+         "  --report FILE          write the end-of-run report to a file as well as stdout\n"
++        "  --crash-log            keep this run's console output in a file and write a crash\n"
++        "                         report if it dies: %%APPDATA%%\\dream-recomp\\logs. Off by\n"
++        "                         default; the launcher's Crash log setting passes this.\n"
+         "  --suggest-config FILE  write the TOML this run earned: the call targets discovery\n"
+         "                         never reached, and the regions the program copied and ran\n"
+         "                         elsewhere. Paste into the game's config and rebuild.\n"
+@@ -2671,6 +2691,10 @@ int run(int argc, char** argv) {
+     // --scale N draws the geometry at N times the guest's resolution; the frame is resampled back
+     // into the guest's framebuffer, so the guest never learns its screen changed size.
+     bool window_mode = false, validation = false, unthrottled = false, writeback = false;
++    // --crash-log: opt-in, and off unless the launcher's Crash log setting passes it. The run's
++    // console output goes to a file in the per-user data directory and a crash writes a report
++    // there; without the flag nothing is opened and the handlers are never installed.
++    bool crash_log = false;
+     // --display MODE: windowed, borderless (desktop fullscreen at the display's own size) or
+     // exclusive (one of the display's fullscreen modes, which is the one that can change the
+     // panel's refresh timing). --fullscreen is the old name for borderless. Either implies
+@@ -2761,6 +2785,8 @@ int run(int argc, char** argv) {
+             disc_override = argv[++i];
+         else if (!std::strcmp(argv[i], "--report") && i + 1 < argc)
+             report = argv[++i];
++        else if (!std::strcmp(argv[i], "--crash-log"))
++            crash_log = true;
+         else if (!std::strcmp(argv[i], "--stop-on-ta"))
+             stop_on_ta = true;
+         else if (!std::strcmp(argv[i], "--max-frames") && i + 1 < argc)
+@@ -3028,6 +3054,27 @@ int run(int argc, char** argv) {
+     (void)unthrottled;
+     (void)writeback;
+ #endif
++    // --crash-log: enabled before the title config is read, so a bad config or disc is in the log
++    // too. The redirect happens here rather than at the top of run() because setvbuf has to come
++    // before the first write to stdout, and argument errors are not worth a log file.
++    if (crash_log) {
++        std::string command_line;
++        for (int i = 0; i < argc; ++i) {
++            if (i)
++                command_line += ' ';
++            command_line += argv[i];
++        }
++        std::string log_error;
++        const std::filesystem::path root = host_data_dir();
++        if (root.empty()) {
++            std::fprintf(stderr, "crash log: no per-user data directory on this host; logging is "
++                                 "off\n");
++        } else if (!dream::crashlog::enable(root / "logs", command_line, &log_error)) {
++            std::fprintf(stderr, "crash log: %s; logging is off\n", log_error.c_str());
++        } else {
++            dream::crashlog::set_snapshot(crash_guest_snapshot);
++        }
++    }
+     dream::translator::GameConfig cfg;
+     std::string err;
+     if (!dream::translator::load_game_config(utf8_path(config), cfg, err)) {
+@@ -3036,6 +3083,12 @@ int run(int argc, char** argv) {
+     }
+     if (!disc_override.empty())
+         cfg.disc_image = utf8_path(disc_override);
++    if (crash_log) {
++        std::string context = "game: " + cfg.id + "\nconfig: " + config;
++        if (cfg.disc_image)
++            context += "\ndisc: " + path_to_utf8(*cfg.disc_image);
++        dream::crashlog::set_context(context);
++    }
+     // A windowed run gets the per-user card for this title unless --vmu names one. Without a card
+     // most titles cannot save at all, and a first-time player has no reason to know the flag
+     // exists; with it, saving works on the first run. Headless runs stay card-less: a card answers
+@@ -3919,6 +3972,10 @@ int run(int argc, char** argv) {
+     HostSampler profiler;
+     if (const char* ms = std::getenv("DREAM_PROFILE"))
+         profiler.start(std::atoi(ms));
++    // The guest is about to run, and the window and graphics driver have loaded by now: this is
++    // the moment the crash report's guest state and module list become meaningful.
++    g_crash_system = &sys;
++    dream::crashlog::refresh_modules();
+     const auto t0 = std::chrono::steady_clock::now();
+     try {
+ #ifdef DREAM_DEV_INTERPRETER
+@@ -4273,6 +4330,10 @@ int run(int argc, char** argv) {
+     }
+     if (stop_on_ta && !reached_ta && rc == 0)
+         rc = 1;
++    // A crash never reaches this line; its report is the last thing in the log instead. The log is
++    // closed in main(), after run() has returned, so an early setup error's exit code is recorded
++    // too. Clearing the pointer here covers a crash during the report itself, which is not one.
++    g_crash_system = nullptr;
+     return rc;
+ }
+ 
+@@ -4295,8 +4356,14 @@ int wmain(int argc, wchar_t** wargv) {
+     argv.reserve(args.size());
+     for (auto& arg : args)
+         argv.push_back(arg.data());
+-    return run(static_cast<int>(argv.size()), argv.data());
++    const int rc = run(static_cast<int>(argv.size()), argv.data());
++    dream::crashlog::finish(rc, rc != 0);
++    return rc;
+ }
+ #else
+-int main(int argc, char** argv) { return run(argc, argv); }
++int main(int argc, char** argv) {
++    const int rc = run(argc, argv);
++    dream::crashlog::finish(rc, rc != 0);
++    return rc;
++}
+ #endif
+diff --git b/runtime/boot/crash_log.cpp b/runtime/boot/crash_log.cpp
+new file mode 100644
+index 0000000..79ab73b
+--- /dev/null
++++ b/runtime/boot/crash_log.cpp
+@@ -0,0 +1,531 @@
++#include "crash_log.h"
++
++#include <algorithm>
++#include <csignal>
++#include <cstdarg>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <ctime>
++#include <exception>
++#include <iterator>
++#include <system_error>
++#include <vector>
++
++#if defined(_WIN32)
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <io.h>
++#include <windows.h>
++#include <tlhelp32.h>
++#else
++#include <unistd.h>
++#if defined(__linux__) || defined(__APPLE__)
++#include <execinfo.h>
++#include <sys/utsname.h>
++#endif
++#endif
++
++namespace {
++
++std::FILE* g_file = nullptr;
++std::string g_path;
++std::string g_context;
++dream::crashlog::Snapshot g_snapshot = nullptr;
++bool g_writing = false;
++std::time_t g_started = 0;
++
++#if defined(_WIN32)
++struct Module {
++    std::uintptr_t base;
++    std::uintptr_t size;
++    char name[64];
++};
++Module g_modules[64];
++unsigned g_module_count = 0;
++#endif
++
++// --- small helpers ---------------------------------------------------------------------------
++
++std::string narrow(const std::filesystem::path& path) {
++#if defined(_WIN32)
++    const std::wstring wide = path.wstring();
++    if (wide.empty())
++        return {};
++    const int size = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
++    if (size <= 0)
++        return {};
++    std::string text(static_cast<std::size_t>(size - 1), '\0');
++    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, text.data(), size, nullptr, nullptr);
++    return text;
++#else
++    return path.string();
++#endif
++}
++
++std::string local_stamp(bool for_file_name) {
++    const std::time_t now = std::time(nullptr);
++    std::tm parts{};
++#if defined(_WIN32)
++    localtime_s(&parts, &now);
++#else
++    localtime_r(&now, &parts);
++#endif
++    char text[32] = {};
++    std::strftime(text, sizeof text, for_file_name ? "%Y%m%d-%H%M%S" : "%Y-%m-%d %H:%M:%S",
++                  &parts);
++    return text;
++}
++
++// Only used from the crash handler, where the CRT's time functions could be the thing that broke.
++void crash_stamp(char* out, std::size_t size) {
++#if defined(_WIN32)
++    SYSTEMTIME now{};
++    GetLocalTime(&now);
++    std::snprintf(out, size, "%04u-%02u-%02u %02u:%02u:%02u", now.wYear, now.wMonth, now.wDay,
++                  now.wHour, now.wMinute, now.wSecond);
++#else
++    std::time_t now = std::time(nullptr);
++    std::tm parts{};
++    localtime_r(&now, &parts);
++    std::strftime(out, size, "%Y-%m-%d %H:%M:%S", &parts);
++#endif
++}
++
++void out(const char* format, ...) {
++    std::va_list args;
++    va_start(args, format);
++    std::vfprintf(stderr, format, args);
++    va_end(args);
++}
++
++std::FILE* open_log_file(const std::filesystem::path& path) {
++#if defined(_WIN32)
++    return _wfopen(path.c_str(), L"w");
++#else
++    return std::fopen(path.c_str(), "w");
++#endif
++}
++
++std::string exe_path() {
++#if defined(_WIN32)
++    wchar_t buffer[1024] = {};
++    const DWORD size = GetModuleFileNameW(nullptr, buffer, 1024);
++    if (size == 0)
++        return {};
++    return narrow(std::filesystem::path(std::wstring(buffer, size)));
++#else
++    char buffer[1024] = {};
++    const ssize_t size = readlink("/proc/self/exe", buffer, sizeof buffer - 1);
++    return size > 0 ? std::string(buffer, static_cast<std::size_t>(size)) : std::string();
++#endif
++}
++
++std::string os_description() {
++#if defined(_WIN32)
++    // RtlGetVersion reports the machine's real build. GetVersionEx is manifest-dependent and can
++    // claim Windows 8 on a machine that is not, which is worse than no version at all in a report.
++    OSVERSIONINFOW version{};
++    version.dwOSVersionInfoSize = sizeof version;
++    bool known = false;
++    if (const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll")) {
++        using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
++        const auto rtl_get_version = reinterpret_cast<RtlGetVersionFn>(
++            reinterpret_cast<void*>(GetProcAddress(ntdll, "RtlGetVersion")));
++        known = rtl_get_version && rtl_get_version(&version) == 0;
++    }
++    char windows[64] = "Windows";
++    if (known)
++        std::snprintf(windows, sizeof windows, "Windows %lu.%lu.%lu",
++                      static_cast<unsigned long>(version.dwMajorVersion),
++                      static_cast<unsigned long>(version.dwMinorVersion),
++                      static_cast<unsigned long>(version.dwBuildNumber));
++    SYSTEM_INFO info{};
++    GetNativeSystemInfo(&info);
++    const char* arch = "unknown";
++    switch (info.wProcessorArchitecture) {
++        case PROCESSOR_ARCHITECTURE_AMD64:
++            arch = "x64";
++            break;
++        case PROCESSOR_ARCHITECTURE_INTEL:
++            arch = "x86";
++            break;
++        case PROCESSOR_ARCHITECTURE_ARM:
++            arch = "arm";
++            break;
++#ifdef PROCESSOR_ARCHITECTURE_ARM64
++        case PROCESSOR_ARCHITECTURE_ARM64:
++            arch = "arm64";
++            break;
++#endif
++        default:
++            break;
++    }
++    char text[160] = {};
++    std::snprintf(text, sizeof text, "%s (%s), %lu logical CPUs", windows, arch,
++                  static_cast<unsigned long>(info.dwNumberOfProcessors));
++    return text;
++#elif defined(__linux__) || defined(__APPLE__)
++    struct utsname info {};
++    if (uname(&info) == 0)
++        return std::string(info.sysname) + " " + info.release + " " + info.machine;
++    return "unknown host";
++#else
++    return "unknown host";
++#endif
++}
++
++// Newest `keep` session logs survive; a player who leaves the setting on should not accumulate
++// files forever, and the newest is the one a report wants anyway.
++void prune(const std::filesystem::path& dir, std::size_t keep) {
++    std::vector<std::filesystem::path> logs;
++    std::error_code ec;
++    for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
++        std::error_code entry_error;
++        if (!it->is_regular_file(entry_error))
++            continue;
++        const std::string name = it->path().filename().string();
++        if (name.rfind("draconus-", 0) == 0 && it->path().extension() == ".log")
++            logs.push_back(it->path());
++    }
++    if (logs.size() <= keep)
++        return;
++    const auto stamp = [](const std::filesystem::path& path) {
++        std::error_code error;
++        const auto time = std::filesystem::last_write_time(path, error);
++        return error ? std::filesystem::file_time_type::min() : time;
++    };
++    std::sort(logs.begin(), logs.end(),
++              [&](const std::filesystem::path& a, const std::filesystem::path& b) {
++                  return stamp(a) < stamp(b);
++              });
++    for (std::size_t i = 0; i + keep < logs.size(); ++i)
++        std::filesystem::remove(logs[i], ec);
++}
++
++bool redirect_into(std::FILE* file) {
++#if defined(_WIN32)
++    const int fd = _fileno(file);
++    return fd >= 0 && _dup2(fd, _fileno(stdout)) == 0 && _dup2(fd, _fileno(stderr)) == 0;
++#else
++    const int fd = fileno(file);
++    return fd >= 0 && dup2(fd, fileno(stdout)) >= 0 && dup2(fd, fileno(stderr)) >= 0;
++#endif
++}
++
++#if defined(_WIN32)
++void collect_modules() {
++    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
++    if (snapshot == INVALID_HANDLE_VALUE)
++        return;
++    MODULEENTRY32W entry{};
++    entry.dwSize = sizeof entry;
++    if (Module32FirstW(snapshot, &entry)) {
++        do {
++            if (g_module_count == static_cast<unsigned>(std::size(g_modules)))
++                break;
++            Module& module = g_modules[g_module_count];
++            module.base = reinterpret_cast<std::uintptr_t>(entry.modBaseAddr);
++            module.size = entry.modBaseSize;
++            WideCharToMultiByte(CP_UTF8, 0, entry.szModule, -1, module.name,
++                                static_cast<int>(sizeof module.name), nullptr, nullptr);
++            ++g_module_count;
++        } while (Module32NextW(snapshot, &entry));
++    }
++    CloseHandle(snapshot);
++}
++
++// Module plus offset, so the build's link map (or PDB) names the frame without guessing which DLL
++// the address belongs to.
++void format_address(std::uintptr_t address, char* out, std::size_t size) {
++    for (unsigned i = 0; i < g_module_count; ++i) {
++        const Module& module = g_modules[i];
++        if (address >= module.base && address < module.base + module.size) {
++            std::snprintf(out, size, "%s+0x%llx", module.name,
++                          static_cast<unsigned long long>(address - module.base));
++            return;
++        }
++    }
++    std::snprintf(out, size, "0x%llx", static_cast<unsigned long long>(address));
++}
++#endif
++
++#if defined(_WIN32)
++const char* exception_name(unsigned long code) {
++    switch (code) {
++        case 0xC0000005:  // EXCEPTION_ACCESS_VIOLATION
++            return "access violation";
++        case 0xC000001D:  // EXCEPTION_ILLEGAL_INSTRUCTION
++            return "illegal instruction";
++        case 0xC0000094:  // EXCEPTION_INT_DIVIDE_BY_ZERO
++            return "integer divide by zero";
++        case 0xC0000096:  // EXCEPTION_PRIV_INSTRUCTION
++            return "privileged instruction";
++        case 0xC00000FD:  // EXCEPTION_STACK_OVERFLOW
++            return "stack overflow";
++        case 0xC0000374:  // STATUS_HEAP_CORRUPTION
++            return "heap corruption";
++        case 0xC0000409:  // STATUS_STACK_BUFFER_OVERRUN
++            return "stack buffer overrun";
++        case 0x80000003:  // EXCEPTION_BREAKPOINT
++            return "breakpoint";
++        case 0xE06D7363:  // Visual C++ exception object
++            return "unhandled C++ exception";
++        default:
++            return "exception";
++    }
++}
++#endif
++
++// Kept free of C++ objects with destructors: guarded_crash() wraps it in __try, which MSVC (C2712)
++// refuses in a function that needs unwinding. Out of memory at this point must not stop the report.
++void write_crash(const char* what, void* pointers) {
++    if (g_writing)
++        return;
++    g_writing = true;
++    char stamp[40] = {};
++    crash_stamp(stamp, sizeof stamp);
++    out("\n=== crash %s ===\n", stamp);
++    out("%s\n", what ? what : "fatal condition");
++
++#if defined(_WIN32)
++    out("thread: %lu\n", static_cast<unsigned long>(GetCurrentThreadId()));
++    const auto* info = static_cast<EXCEPTION_POINTERS*>(pointers);
++    if (info && info->ExceptionRecord) {
++        const EXCEPTION_RECORD& record = *info->ExceptionRecord;
++        char where[160] = {};
++        format_address(reinterpret_cast<std::uintptr_t>(record.ExceptionAddress), where,
++                       sizeof where);
++        out("exception: 0x%08lx (%s) at %s\n",
++            static_cast<unsigned long>(record.ExceptionCode),
++            exception_name(static_cast<unsigned long>(record.ExceptionCode)), where);
++        if (record.ExceptionCode == 0xC0000005 && record.NumberParameters >= 2) {
++            const char* access = "other";
++            if (record.ExceptionInformation[0] == 0)
++                access = "read";
++            else if (record.ExceptionInformation[0] == 1)
++                access = "write";
++            else if (record.ExceptionInformation[0] == 8)
++                access = "execute";
++            char target[160] = {};
++            format_address(static_cast<std::uintptr_t>(record.ExceptionInformation[1]), target,
++                           sizeof target);
++            out("access: %s of %s\n", access, target);
++        }
++        if (info->ContextRecord) {
++#if defined(_M_X64)
++            out("registers: rip 0x%llx rsp 0x%llx rbp 0x%llx\n",
++                static_cast<unsigned long long>(info->ContextRecord->Rip),
++                static_cast<unsigned long long>(info->ContextRecord->Rsp),
++                static_cast<unsigned long long>(info->ContextRecord->Rbp));
++#elif defined(_M_IX86)
++            out("registers: eip 0x%08lx esp 0x%08lx ebp 0x%08lx\n",
++                static_cast<unsigned long>(info->ContextRecord->Eip),
++                static_cast<unsigned long>(info->ContextRecord->Esp),
++                static_cast<unsigned long>(info->ContextRecord->Ebp));
++#endif
++        }
++    }
++    out("host stack (module+offset, innermost first):\n");
++    void* frames[48] = {};
++    const unsigned short count = RtlCaptureStackBackTrace(1, 48, frames, nullptr);
++    for (unsigned short i = 0; i < count && i < 32; ++i) {
++        char where[160] = {};
++        format_address(reinterpret_cast<std::uintptr_t>(frames[i]), where, sizeof where);
++        out("  %02u  %s\n", static_cast<unsigned>(i), where);
++    }
++#elif defined(__linux__) || defined(__APPLE__)
++    void* frames[48] = {};
++    const int count = ::backtrace(frames, 48);
++    char** names = count > 0 ? ::backtrace_symbols(frames, count) : nullptr;
++    out("host stack (innermost first):\n");
++    for (int i = 1; i < count && i < 32; ++i)
++        out("  %02d  %s\n", i, names ? names[i] : "?");
++    std::free(names);
++    (void)pointers;
++#else
++    (void)pointers;
++#endif
++
++    char guest[512] = {};
++    if (g_snapshot)
++        g_snapshot(guest, sizeof guest);
++    else
++        std::snprintf(guest, sizeof guest, "(no guest state)");
++    out("guest: %s\n", guest);
++
++    if (!g_context.empty()) {
++        out("context:\n");
++        out("%s\n", g_context.c_str());
++    }
++    out("\nAddresses are relative to the module named beside them; the build's link map\n"
++        "(draconus_boot.map) or PDB names them. The lines above this block are the run's own\n"
++        "console output. Attach this file, with the launcher version, to a bug report.\n");
++    out("=== end of crash report: %s ===\n", g_path.c_str());
++    std::fflush(stderr);
++    g_writing = false;
++}
++
++#if defined(_WIN32)
++void guarded_crash(const char* what, void* pointers) {
++    __try {
++        write_crash(what, pointers);
++    } __except (EXCEPTION_EXECUTE_HANDLER) {
++        // The handler itself faulted; the process is already going down, and the log keeps
++        // whatever the run wrote before this point.
++    }
++}
++#else
++void guarded_crash(const char* what, void* pointers) {
++    write_crash(what, pointers);
++}
++#endif
++
++#if defined(_WIN32)
++LONG WINAPI on_unhandled_exception(EXCEPTION_POINTERS* pointers) {
++    guarded_crash("unhandled exception: the process would have been terminated", pointers);
++    // The report is in the file; suppress the WER dialog that would only offer the same nothing.
++    return EXCEPTION_EXECUTE_HANDLER;
++}
++#endif
++
++[[noreturn]] void on_terminate() {
++    static char message[320] = "terminate: an uncaught C++ exception reached the runtime";
++    if (const std::exception_ptr failure = std::current_exception()) {
++        try {
++            std::rethrow_exception(failure);
++        } catch (const std::exception& error) {
++            std::snprintf(message, sizeof message,
++                          "terminate: an uncaught C++ exception reached the runtime: %s",
++                          error.what() ? error.what() : "(no message)");
++        } catch (...) {
++            std::snprintf(message, sizeof message,
++                          "terminate: an uncaught non-standard exception reached the runtime");
++        }
++    }
++    guarded_crash(message, nullptr);
++    std::fflush(nullptr);
++    std::_Exit(3);
++}
++
++void on_abort(int) {
++    guarded_crash("abort: the C runtime aborted the process (a failed check or a failed assertion)",
++                  nullptr);
++    std::fflush(nullptr);
++    std::_Exit(3);
++}
++
++void at_exit_close() {
++    if (!g_file)
++        return;
++    out("\n[session ended at exit]\n");
++    std::fflush(nullptr);
++    std::fclose(g_file);
++    g_file = nullptr;
++}
++
++}  // namespace
++
++namespace dream::crashlog {
++
++bool enable(const std::filesystem::path& dir, const std::string& command_line,
++            std::string* error) {
++    if (g_file)
++        return true;  // one session per process
++    std::error_code ec;
++    std::filesystem::create_directories(dir, ec);
++    if (ec) {
++        if (error)
++            *error = "cannot create " + narrow(dir);
++        return false;
++    }
++    // One slot is this run's file, so nine of the previous ten survive the prune and the new one
++    // makes ten. Pruning first also means a failed open never has to delete anything.
++    prune(dir, 9);
++    const std::string stamp = local_stamp(true);
++    std::filesystem::path path = dir / ("draconus-" + stamp + ".log");
++    std::error_code exists_error;
++    for (unsigned n = 2; n < 100 && std::filesystem::exists(path, exists_error); ++n)
++        path = dir / ("draconus-" + stamp + "-" + std::to_string(n) + ".log");
++    std::FILE* file = open_log_file(path);
++    if (!file) {
++        if (error)
++            *error = "cannot create " + narrow(path);
++        return false;
++    }
++    std::setvbuf(file, nullptr, _IONBF, 0);
++    g_path = narrow(path);
++    g_started = std::time(nullptr);
++
++    // Both streams have to be unbuffered before the redirection, or a crash loses the lines still
++    // sitting in their buffers. setvbuf is legal here: nothing has been written to them yet.
++    std::setvbuf(stdout, nullptr, _IONBF, 0);
++    std::setvbuf(stderr, nullptr, _IONBF, 0);
++    std::printf("crash log: writing to %s\n", g_path.c_str());
++    std::fflush(stdout);
++    if (!redirect_into(file)) {
++        std::fclose(file);
++        g_path.clear();
++        if (error)
++            *error = "cannot redirect stdout/stderr into " + narrow(path);
++        return false;
++    }
++    g_file = file;
++
++    std::error_code cwd_error;
++    const std::string cwd = narrow(std::filesystem::current_path(cwd_error));
++    out("Draconus-Recomp session log\n");
++    out("started:  %s\n", local_stamp(false).c_str());
++    out("exe:      %s\n", exe_path().c_str());
++    out("cwd:      %s\n", cwd_error ? "(unknown)" : cwd.c_str());
++    out("host:     %s\n", os_description().c_str());
++    out("log:      %s\n", g_path.c_str());
++    if (!command_line.empty())
++        out("command:  %s\n", command_line.c_str());
++    out("\n");
++
++    std::set_terminate(on_terminate);
++    std::signal(SIGABRT, on_abort);
++#if defined(_WIN32)
++    collect_modules();
++    SetUnhandledExceptionFilter(on_unhandled_exception);
++#endif
++    std::atexit(at_exit_close);
++    return true;
++}
++
++void set_context(const std::string& text) {
++    g_context = text;
++}
++
++void refresh_modules() {
++#if defined(_WIN32)
++    g_module_count = 0;
++    collect_modules();
++#endif
++}
++
++void set_snapshot(Snapshot snapshot) {
++    g_snapshot = snapshot;
++}
++
++const std::string& session_path() {
++    return g_path;
++}
++
++void finish(int exit_code, bool faulted) {
++    if (!g_file)
++        return;
++    const double seconds = std::difftime(std::time(nullptr), g_started);
++    out("\nsession ended: %s (exit %d, %.1f s)\n",
++        faulted ? "the run did not finish cleanly" : "clean exit", exit_code, seconds);
++    std::fflush(nullptr);
++    std::fclose(g_file);
++    g_file = nullptr;
++}
++
++}  // namespace dream::crashlog
+diff --git b/runtime/boot/crash_log.h b/runtime/boot/crash_log.h
+new file mode 100644
+index 0000000..1baaf06
+--- /dev/null
++++ b/runtime/boot/crash_log.h
+@@ -0,0 +1,54 @@
++#pragma once
++
++// Opt-in crash logging (`--crash-log`; the release launcher exposes it as a checkbox that is off by
++// default).
++//
++// One file per run is written under the per-user data directory:
++//
++//   %APPDATA%\dream-recomp\logs\draconus-YYYYMMDD-HHMMSS.log
++//
++// The file receives everything the run would have printed to stdout and stderr -- the boot lines,
++// warnings and the end-of-run report -- and, if the process dies without unwinding, a crash block
++// with the exception, the host stack as module-relative addresses and the guest state at that
++// moment. On Windows the block comes from an unhandled-exception filter, a terminate handler and
++// an abort handler; elsewhere from the terminate handler.
++//
++// Nothing happens unless enable() is called: no file is opened, no handler installed and the
++// console keeps its output. The report is best effort -- the handler uses plain writes and is
++// wrapped so that a fault inside it still lets the process die -- but it is what a bug report
++// needs, and a clean run's log is a record of the same session.
++
++#include <cstddef>
++#include <filesystem>
++#include <string>
++
++namespace dream::crashlog {
++
++// Guest numbers for the crash block, rendered by the host. Called from inside the crash handler, so
++// it must only read plain integers: no allocation, no locking and no I/O.
++using Snapshot = void (*)(char* out, std::size_t size);
++
++// Creates `dir`, starts a session file and redirects stdout/stderr into it. `command_line` is
++// recorded in the header. Returns false with `error` set when the directory or the file cannot be
++// made, and the caller then continues without logging. Prints one line naming the file to the
++// console before the redirection.
++bool enable(const std::filesystem::path& dir, const std::string& command_line, std::string* error);
++
++// Facts only known once the title is loaded: the game id, the config and the disc image.
++void set_context(const std::string& text);
++
++// Re-reads the loaded module list for the crash block. The window and the graphics driver load
++// after enable(), so the list taken there is out of date by the time the guest runs.
++void refresh_modules();
++
++// Guest state for the crash block, set once the System exists and cleared when the run ends.
++void set_snapshot(Snapshot snapshot);
++
++// The session file, empty while logging is off.
++const std::string& session_path();
++
++// Writes the closing line and closes the file. `faulted` marks a run that ended in a caught fault.
++// A no-op when logging is off or already finished.
++void finish(int exit_code, bool faulted);
++
++}  // namespace dream::crashlog

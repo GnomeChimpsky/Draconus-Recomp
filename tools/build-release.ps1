@@ -3,6 +3,7 @@
 #   tools\build-release.ps1                    # work\release
 #   tools\build-release.ps1 -Out D:\out        # elsewhere
 #   tools\build-release.ps1 -SkipLauncher      # assemble everything but the frozen launcher
+#   tools\build-release.ps1 -SkipSymbols       # no symbols bundle beside the release
 #
 # The release is deliberately a small, explicit set of files: the game executable, the frozen
 # launcher, the title TOML, SDL3, the Visual C++ runtime DLLs, and the legal/notice files. The
@@ -12,12 +13,18 @@
 # reads the boot program from the player's own disc (patches/0005), so a release must not contain
 # an extracted 1ST_READ.BIN.
 #
+# Beside it, unless -SkipSymbols, a `<release>-symbols` folder gets the linker map, tools\symbolize.py
+# and BUILD-INFO for the exact executable: the crash log names that executable's SHA-1, so the log
+# and the symbols always pair. It is a separate download, never part of the player package.
+#
 # The Visual C++ runtime is copied from the installed Visual Studio redistributable because the
 # game is linked against the dynamic CRT and a clean Windows install does not necessarily have it.
 param(
     [string]$Out = "",
     [string]$BuildDir = "",
+    [string]$SymbolsOut = "",
     [switch]$SkipLauncher,
+    [switch]$SkipSymbols,
     [switch]$Force
 )
 
@@ -26,6 +33,12 @@ $root = Split-Path -Parent $PSScriptRoot
 if (-not $BuildDir) { $BuildDir = Join-Path $root "engine\build-render" }
 if (-not $Out) { $Out = Join-Path $root "work\release" }
 $Out = [IO.Path]::GetFullPath($Out)
+# The symbols live beside the release, never inside it: a player package must stay small and the map
+# is only for reading a crash report. The default follows -Out, so two release trees do not collide.
+if (-not $SymbolsOut) {
+    $SymbolsOut = Join-Path (Split-Path -Parent $Out) ((Split-Path -Leaf $Out) + "-symbols")
+}
+$SymbolsOut = [IO.Path]::GetFullPath($SymbolsOut)
 
 function Find-VisualStudio {
     $programFilesX86 = ${env:ProgramFiles(x86)}
@@ -86,6 +99,25 @@ New-Item -ItemType Directory -Force $Out | Out-Null
 
 Copy-Item -LiteralPath $gameExe -Destination (Join-Path $Out "DraconusRecomp.exe")
 Copy-Item -LiteralPath $sdl -Destination (Join-Path $Out "SDL3.dll")
+# The game's crash log prints the executable's own SHA-1; the same value here is what matches a
+# report to the symbols bundle for its exact build.
+$exeSha1 = (Get-FileHash -LiteralPath (Join-Path $Out "DraconusRecomp.exe") -Algorithm SHA1).Hash.ToLowerInvariant()
+
+# RenHDrum is loaded from the executable's own folder, so the bundle carries it: a launcher that
+# offers the Controller options and then falls back silently would be a lie. The checked-in binary is
+# the pinned one, and a release refuses to ship a different one.
+$renhdrumCheck = & powershell -NoProfile -ExecutionPolicy Bypass `
+    -File (Join-Path $root "tools\build-renhdrum.ps1") -Check 2>&1
+if ($LASTEXITCODE -ne 0) { throw ($renhdrumCheck -join "`n") }
+$renhdrum = Join-Path $root "third_party\renhdrum\renhdrum.dll"
+Copy-Item -LiteralPath $renhdrum -Destination (Join-Path $Out "renhdrum.dll")
+# MIT asks for the notice and the permission text to travel with every copy.
+$licenses = Join-Path $Out "licenses"
+New-Item -ItemType Directory -Force $licenses | Out-Null
+Copy-Item -LiteralPath (Join-Path $root "third_party\renhdrum\LICENSE-MIT") `
+    -Destination (Join-Path $licenses "renhdrum-LICENSE-MIT.txt")
+Copy-Item -LiteralPath (Join-Path $root "third_party\renhdrum\NOTICE") `
+    -Destination (Join-Path $licenses "renhdrum-NOTICE.txt")
 
 # The shipped TOML is a template: a release must not carry the builder's own disc path.
 $text = Get-Content -LiteralPath $toml -Raw
@@ -159,6 +191,7 @@ $info = @(
     "version: $version",
     "commit: $commit",
     "built:  $(Get-Date -Format o)",
+    "exe sha1: $exeSha1",
     "repo:   https://github.com/GnomeChimpsky/Draconus-Recomp",
     "disc:   user supplies their own GDI or CHD",
     "",
@@ -166,6 +199,41 @@ $info = @(
     "No disc image, extracted game file, save or screenshot is included."
 ) -join "`r`n"
 [System.IO.File]::WriteAllText((Join-Path $Out "BUILD-INFO.txt"), $info + "`r`n", $utf8)
+
+# The symbols bundle is what turns a player's crash log into function names. It is a separate
+# download rather than part of the game: the map is not needed to play, and the crash log names the
+# executable SHA-1 above, so the right one is never in doubt.
+if (-not $SkipSymbols) {
+    $map = Join-Path $BuildDir "games\draconus\draconus_boot.map"
+    if (-not (Test-Path -LiteralPath $map)) {
+        throw "missing $map; build with /MAP or pass -SkipSymbols"
+    }
+    $symbolName = "DraconusRecomp-$version-symbols"
+    $symbols = Join-Path $SymbolsOut $symbolName
+    if (Test-Path -LiteralPath $symbols) { Remove-Item -LiteralPath $symbols -Recurse -Force }
+    New-Item -ItemType Directory -Force $symbols | Out-Null
+    Copy-Item -LiteralPath $map -Destination (Join-Path $symbols "draconus_boot.map")
+    Copy-Item -LiteralPath (Join-Path $root "tools\symbolize.py") `
+        -Destination (Join-Path $symbols "symbolize.py")
+    Copy-Item -LiteralPath (Join-Path $Out "BUILD-INFO.txt") `
+        -Destination (Join-Path $symbols "BUILD-INFO.txt")
+    $symbolReadme = @(
+        "Symbols for Draconus-Recomp $version.",
+        "",
+        "The crash log the game writes with the Crash log setting names this executable's SHA-1;",
+        "compare it with the exe sha1: line in BUILD-INFO.txt before using this map.",
+        "",
+        "    python symbolize.py crash.log draconus_boot.map --out crash.symbolized.txt",
+        "",
+        "draconus_boot.map is the linker map from the same build. It resolves the host stack's",
+        "module+offset entries to function names; DLL frames are left alone."
+    ) -join "`r`n"
+    [System.IO.File]::WriteAllText((Join-Path $symbols "README.txt"), $symbolReadme + "`r`n", $utf8)
+    $symbolZip = Join-Path $SymbolsOut "$symbolName.zip"
+    if (Test-Path -LiteralPath $symbolZip) { Remove-Item -LiteralPath $symbolZip -Force }
+    Compress-Archive -Path (Join-Path $symbols "*") -DestinationPath $symbolZip
+    Write-Host ("symbols: {0}" -f $symbolZip)
+}
 
 # Refuse the mistake this script exists to prevent: a game-data file in the release tree.
 $forbidden = @(Get-ChildItem -LiteralPath $Out -Recurse -File | Where-Object {

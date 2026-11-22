@@ -1,5 +1,5 @@
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index d0620ec..7659964 100644
+index 92f6816..9d5760f 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -85,6 +85,41 @@ extern "C" __declspec(dllimport) unsigned int __stdcall timeEndPeriod(unsigned i
@@ -267,7 +267,7 @@ index d0620ec..7659964 100644
          std::vector<char> raw((std::istreambuf_iterator<char>(f)),
                                std::istreambuf_iterator<char>());
          if (raw.size() != dream::hle::Flash::kSize) {
-@@ -3073,7 +3110,7 @@ int main(int argc, char** argv) {
+@@ -3056,7 +3093,7 @@ int main(int argc, char** argv) {
                      return;
                  std::snprintf(name, sizeof name, "%s.%03u", dump_ta.c_str(), written++);
              }
@@ -276,7 +276,7 @@ index d0620ec..7659964 100644
                  std::fwrite(stream.data(), 4, stream.size(), f);
                  std::fclose(f);
                  // The frame number as well as the render index: a visual fault is noticed at a
-@@ -3091,11 +3128,11 @@ int main(int argc, char** argv) {
+@@ -3074,11 +3111,11 @@ int main(int argc, char** argv) {
              if (!dump_vram.empty() && !vram_written) {
                  vram_written = true;
                  const std::string vpath = std::string(name) + ".vram";
@@ -290,7 +290,7 @@ index d0620ec..7659964 100644
                      for (std::uint32_t off = 0; off < 0x2000; off += 4) {
                          const std::uint32_t word = pvr.reg(off);
                          std::fwrite(&word, 4, 1, f);
-@@ -3152,7 +3189,7 @@ int main(int argc, char** argv) {
+@@ -3135,7 +3172,7 @@ int main(int argc, char** argv) {
      dream::maple::MemoryCard* card_ptr = nullptr;
      if (!vmu.empty()) {
          auto card = std::make_unique<dream::maple::MemoryCard>();
@@ -299,7 +299,7 @@ index d0620ec..7659964 100644
              case dream::maple::CardStatus::Ok:
                  std::printf("memory card %s: %s\n", vmu.c_str(),
                              card->formatted() ? "formatted" : "present but not formatted");
-@@ -3168,7 +3205,7 @@ int main(int argc, char** argv) {
+@@ -3151,7 +3188,7 @@ int main(int argc, char** argv) {
                      return 2;
                  }
                  card->format();
@@ -308,7 +308,7 @@ index d0620ec..7659964 100644
                      std::fprintf(stderr, "cannot create a memory card at %s\n", vmu.c_str());
                      return 2;
                  }
-@@ -3225,7 +3262,7 @@ int main(int argc, char** argv) {
+@@ -3208,7 +3245,7 @@ int main(int argc, char** argv) {
      std::vector<std::pair<std::uint64_t, Pad>> replayed;
      std::size_t replay_next = 0;
      if (!replay_input.empty()) {
@@ -317,7 +317,7 @@ index d0620ec..7659964 100644
          if (!rec) {
              std::fprintf(stderr, "--replay-input %s: cannot read it\n", replay_input.c_str());
              return 2;
-@@ -3255,7 +3292,7 @@ int main(int argc, char** argv) {
+@@ -3238,7 +3275,7 @@ int main(int argc, char** argv) {
      std::uint64_t recorded = 0;
      Pad last_recorded;
      if (!record_input.empty()) {
@@ -326,7 +326,7 @@ index d0620ec..7659964 100644
          if (!record_file) {
              std::fprintf(stderr, "--record-input %s: cannot write it\n", record_input.c_str());
              return 2;
-@@ -3579,7 +3616,7 @@ int main(int argc, char** argv) {
+@@ -3562,7 +3599,7 @@ int main(int argc, char** argv) {
      FILE* hash_file = nullptr;
      std::uint64_t hashed_frame = ~0ull;
      if (!write_hash.empty()) {
@@ -335,7 +335,7 @@ index d0620ec..7659964 100644
          if (!hash_file) {
              std::fprintf(stderr, "cannot write %s\n", write_hash.c_str());
              return 2;
-@@ -3590,7 +3627,7 @@ int main(int argc, char** argv) {
+@@ -3573,7 +3610,7 @@ int main(int argc, char** argv) {
      }
      FILE* log_file = nullptr;
      if (!write_log.empty()) {
@@ -344,7 +344,7 @@ index d0620ec..7659964 100644
          if (!log_file) {
              std::fprintf(stderr, "cannot write %s\n", write_log.c_str());
              return 2;
-@@ -3946,7 +3983,7 @@ int main(int argc, char** argv) {
+@@ -3929,7 +3966,7 @@ int main(int argc, char** argv) {
      }
  #endif
      if (!dump_vram.empty()) {
@@ -353,7 +353,7 @@ index d0620ec..7659964 100644
              std::fwrite(sys.memory.vram(), 1, dream::mem::DcMemory::kVramSize, f);
              std::fclose(f);
              std::printf("wrote %s: %u bytes of video memory\n", dump_vram.c_str(),
-@@ -3954,7 +3991,7 @@ int main(int argc, char** argv) {
+@@ -3937,7 +3974,7 @@ int main(int argc, char** argv) {
          }
          // The PVR register block carries palette memory (at +0x1000) and its format.
          const std::string regs_path = dump_vram + ".regs";
@@ -362,7 +362,7 @@ index d0620ec..7659964 100644
              for (std::uint32_t off = 0; off < 0x2000; off += 4) {
                  const std::uint32_t w = pvr.reg(off);
                  std::fwrite(&w, 4, 1, f);
-@@ -3963,7 +4000,7 @@ int main(int argc, char** argv) {
+@@ -3946,7 +3983,7 @@ int main(int argc, char** argv) {
          }
      }
      if (!dump_aram.empty()) {
@@ -371,7 +371,7 @@ index d0620ec..7659964 100644
              std::fwrite(sys.memory.aram(), 1, dream::mem::DcMemory::kAramSize, f);
              std::fclose(f);
          }
-@@ -3978,7 +4015,7 @@ int main(int argc, char** argv) {
+@@ -3961,7 +3998,7 @@ int main(int argc, char** argv) {
          std::printf("\n");
      }
      if (!wav.empty()) {
@@ -380,7 +380,7 @@ index d0620ec..7659964 100644
              const std::uint32_t data_bytes = static_cast<std::uint32_t>(pcm.size() * 2);
              auto put32 = [&](std::uint32_t v) {
                  const unsigned char b[4] = {
-@@ -4026,7 +4063,7 @@ int main(int argc, char** argv) {
+@@ -4009,7 +4046,7 @@ int main(int argc, char** argv) {
              // One file, both halves, in the order they go into the TOML. Written even when empty
              // apart from a note, because "the run found nothing to add" is an answer and an
              // absent file is not.
@@ -389,7 +389,7 @@ index d0620ec..7659964 100644
                  std::fprintf(f, "# Suggested by %s from a run that stopped: %s.\n", argv[0], stop);
                  if (entries.empty() && rel.empty())
                      std::fprintf(f,
-@@ -4056,7 +4093,7 @@ int main(int argc, char** argv) {
+@@ -4039,7 +4076,7 @@ int main(int argc, char** argv) {
          }
      }
      if (!flash_dump.empty()) {
@@ -398,7 +398,7 @@ index d0620ec..7659964 100644
          o.write(reinterpret_cast<const char*>(sys.memory.flash()), dream::hle::Flash::kSize);
      }
      if (!dump.empty()) {  // --dump ADDR:LEN: hex dump of guest memory at stop
-@@ -4076,7 +4113,7 @@ int main(int argc, char** argv) {
+@@ -4059,7 +4096,7 @@ int main(int argc, char** argv) {
          std::printf("serial output (%zu bytes):\n%s\n", scif.transmitted.size(),
                      scif.transmitted.c_str());
      if (!sample_file.empty()) {
@@ -407,7 +407,7 @@ index d0620ec..7659964 100644
          for (const auto& smp : samples) {
              char line[128];
              std::snprintf(line, sizeof line, "%llu %08x %08x %08x %08x %08x\n",
-@@ -4098,10 +4135,35 @@ int main(int argc, char** argv) {
+@@ -4081,10 +4118,35 @@ int main(int argc, char** argv) {
                          samples[i].r15, samples[i].r10, samples[i].sr, samples[i].pr);
      }
      if (!report.empty()) {

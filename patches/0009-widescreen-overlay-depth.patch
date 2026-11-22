@@ -1,5 +1,51 @@
+diff --git a/render/include/dream/render/display_list.h b/render/include/dream/render/display_list.h
+index 75a30a5..3e7d6d6 100644
+--- a/render/include/dream/render/display_list.h
++++ b/render/include/dream/render/display_list.h
+@@ -93,6 +93,14 @@ struct Frame {
+ // not touch the interior boundary between two quads that share a larger texture.
+ bool polygon_tiles(const Frame& frame, const Polygon& polygon);
+ 
++// The depth a translucent strip is sorted by, back to front: the mean of its vertices' 1/w. A
++// renderer without the hardware's per-pixel sort has to order whole strips, and the mean decides a
++// large flat surface better than its nearest vertex does. The octagonal grate under Draconus's
++// minotaur has its near rim at 1/w 0.277 while the minotaur's skirt sits at 0.28-0.30; sorted by
++// the nearest vertex the grate's strip came after some skirt strips and its bars were blended over
++// the skirt. Its mean (0.21) is behind the skirt at every pixel that overlaps it.
++float polygon_sort_depth(const Frame& frame, const Polygon& polygon);
++
+ // Whether the frame carries perspective geometry: at least one polygon whose vertices do not all
+ // share the same depth. A screen painted with 2D quads -- a title, an options page, a loading card --
+ // has a constant z across each quad, however many quads it is cut into. A 3D scene has depth that
+@@ -105,10 +113,22 @@ bool frame_uses_depth(const Frame& frame);
+ // Widescreen presentation squeezes a 3D frame's x by (4/3)/aspect and stretches it back in the
+ // window. Screen-space overlays -- a HUD, a pause menu or a line of text drawn over the world --
+ // are not part of that projection, so without this they would ride the presenter's stretch and come
+-// out 4/3 too wide. This compresses the frame's overlay quads by `factor` about the element's own
+-// anchor: a centred element keeps its centre, one at an edge keeps that edge. `width` is the
+-// guest's screen width (640), which is the coordinate space the overlays are drawn in. Returns how
+-// many quads were adjusted; a pure 2D frame or an aspect of 4:3 leaves the frame untouched.
++// out 4/3 too wide. This squeezes the frame's overlay geometry by `factor`:
++//
++//  * A large flat quad at the HUD's own depth (within a small multiple of the world's near depth)
++//    is a panel -- the item wheel is one -- and is compressed about the element's anchor, left
++//    edge, right edge or centre. The 3D model submitted inside it takes only its *scale* from the
++//    title's projection and is pinned to the panel's centre, so it is moved by as much as the
++//    panel's centre moves rather than scaled again: its width is already the compressed one.
++//  * Every other screen-space quad in front of the world is compressed about its element's anchor.
++//    Quads close to each other at one depth are one element and share an anchor, so a marker drawn
++//    inside a map's rectangle moves with the map instead of staying at its own centre.
++//  * A screen that spans the picture (a fade, a full-screen backdrop) is left alone: it has no
++//    anchor, and a uniform overlay does not distort.
++//
++// `width` is the guest's screen width (640), which is the coordinate space the overlays are drawn
++// in. Returns how many polygons were adjusted; a pure 2D frame or an aspect of 4:3 leaves the frame
++// untouched.
+ std::size_t compress_screen_overlays(Frame& frame, float factor, float width);
+ 
+ // Feed it the same 32-byte chunks the Tile Accelerator FIFO receives.
 diff --git a/render/src/display_list.cpp b/render/src/display_list.cpp
-index bcdc850..7ca8906 100644
+index f9f3347..93be2b7 100644
 --- a/render/src/display_list.cpp
 +++ b/render/src/display_list.cpp
 @@ -486,6 +486,16 @@ bool polygon_tiles(const Frame& frame, const Polygon& polygon) {
@@ -76,7 +122,7 @@ index bcdc850..7ca8906 100644
              const float panel_w = max_x - min_x, panel_h = max_y - min_y;
              if (panel_w < 128.0f || panel_h < 128.0f || panel_w > width * 0.9f)
                  continue;
-@@ -645,7 +682,22 @@ std::size_t compress_screen_overlays(Frame& frame, float factor, float width) {
+@@ -651,7 +688,22 @@ std::size_t compress_screen_overlays(Frame& frame, float factor, float width) {
                  if (&polygon != panel.quad &&
                      (lo <= panel.z + 0.05f || hi > panel.z + 1.5f))
                      continue;
@@ -100,52 +146,6 @@ index bcdc850..7ca8906 100644
                  handled.push_back(&polygon);
              }
          }
-diff --git a/render/include/dream/render/display_list.h b/render/include/dream/render/display_list.h
-index 75a30a5..3e7d6d6 100644
---- a/render/include/dream/render/display_list.h
-+++ b/render/include/dream/render/display_list.h
-@@ -93,6 +93,14 @@ struct Frame {
- // not touch the interior boundary between two quads that share a larger texture.
- bool polygon_tiles(const Frame& frame, const Polygon& polygon);
- 
-+// The depth a translucent strip is sorted by, back to front: the mean of its vertices' 1/w. A
-+// renderer without the hardware's per-pixel sort has to order whole strips, and the mean decides a
-+// large flat surface better than its nearest vertex does. The octagonal grate under Draconus's
-+// minotaur has its near rim at 1/w 0.277 while the minotaur's skirt sits at 0.28-0.30; sorted by
-+// the nearest vertex the grate's strip came after some skirt strips and its bars were blended over
-+// the skirt. Its mean (0.21) is behind the skirt at every pixel that overlaps it.
-+float polygon_sort_depth(const Frame& frame, const Polygon& polygon);
-+
- // Whether the frame carries perspective geometry: at least one polygon whose vertices do not all
- // share the same depth. A screen painted with 2D quads -- a title, an options page, a loading card --
- // has a constant z across each quad, however many quads it is cut into. A 3D scene has depth that
-@@ -105,10 +113,22 @@ bool frame_uses_depth(const Frame& frame);
- // Widescreen presentation squeezes a 3D frame's x by (4/3)/aspect and stretches it back in the
- // window. Screen-space overlays -- a HUD, a pause menu or a line of text drawn over the world --
- // are not part of that projection, so without this they would ride the presenter's stretch and come
--// out 4/3 too wide. This compresses the frame's overlay quads by `factor` about the element's own
--// anchor: a centred element keeps its centre, one at an edge keeps that edge. `width` is the
--// guest's screen width (640), which is the coordinate space the overlays are drawn in. Returns how
--// many quads were adjusted; a pure 2D frame or an aspect of 4:3 leaves the frame untouched.
-+// out 4/3 too wide. This squeezes the frame's overlay geometry by `factor`:
-+//
-+//  * A large flat quad at the HUD's own depth (within a small multiple of the world's near depth)
-+//    is a panel -- the item wheel is one -- and is compressed about the element's anchor, left
-+//    edge, right edge or centre. The 3D model submitted inside it takes only its *scale* from the
-+//    title's projection and is pinned to the panel's centre, so it is moved by as much as the
-+//    panel's centre moves rather than scaled again: its width is already the compressed one.
-+//  * Every other screen-space quad in front of the world is compressed about its element's anchor.
-+//    Quads close to each other at one depth are one element and share an anchor, so a marker drawn
-+//    inside a map's rectangle moves with the map instead of staying at its own centre.
-+//  * A screen that spans the picture (a fade, a full-screen backdrop) is left alone: it has no
-+//    anchor, and a uniform overlay does not distort.
-+//
-+// `width` is the guest's screen width (640), which is the coordinate space the overlays are drawn
-+// in. Returns how many polygons were adjusted; a pure 2D frame or an aspect of 4:3 leaves the frame
-+// untouched.
- std::size_t compress_screen_overlays(Frame& frame, float factor, float width);
- 
- // Feed it the same 32-byte chunks the Tile Accelerator FIFO receives.
 diff --git a/render/src/vk/renderer.cpp b/render/src/vk/renderer.cpp
 index f29bb81..4c6999f 100644
 --- a/render/src/vk/renderer.cpp

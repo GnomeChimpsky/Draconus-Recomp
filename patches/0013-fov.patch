@@ -1,17 +1,18 @@
 diff --git a/docs/game-config.md b/docs/game-config.md
-index d530fbe..efdd9ff 100644
+index ff75fa0..efdd9ff 100644
 --- a/docs/game-config.md
 +++ b/docs/game-config.md
-@@ -38,6 +38,9 @@ symbols = "symbols.tsv"              # names file, see below
+@@ -38,6 +38,10 @@ symbols = "symbols.tsv"              # names file, see below
  pointers = true                      # follow literal-pool pointers (default true)
  sweep = true                         # linear sweep of gaps (default true)
  
 +[camera]                             # optional: vertical field-of-view hook, used by --fov
 +fov_address = 0x0C098648             # guest address of the FOV float (must be 4-byte aligned)
 +fov_base_degrees = 90.0              # the title's own value at that address, for the default
- 
++
  [hle]                                # guest address -> runtime handler (Phase 2/3)
  "0x0C080684" = "libc.bfslu"
+ 
 diff --git a/render/include/dream/render/display_list.h b/render/include/dream/render/display_list.h
 index 3e7d6d6..932d3dc 100644
 --- a/render/include/dream/render/display_list.h
@@ -372,7 +373,7 @@ index 8c9d61e..1d5c051 100644
      Frame frame;
      auto quad = [&](float x0, float y0, float x1, float y1, float z, int list) {
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 2fb726a..4b2cccb 100644
+index e9b8400..45bc646 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -10,6 +10,7 @@
@@ -498,7 +499,7 @@ index 2fb726a..4b2cccb 100644
      std::unique_ptr<dream::gdrom::Disc> disc;
      if (cfg.disc_image) {
          disc = dream::gdrom::open_disc(*cfg.disc_image, err);
-@@ -3377,6 +3439,7 @@ int run(int argc, char** argv) {
+@@ -3360,6 +3422,7 @@ int run(int argc, char** argv) {
          live->wide_x_factor = (aspect > 0.0 && cfg.widescreen_x_scale_address != 0)
                                    ? static_cast<float>((4.0 / 3.0) / aspect)
                                    : 1.0f;

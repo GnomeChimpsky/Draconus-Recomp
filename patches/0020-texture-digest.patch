@@ -1,0 +1,79 @@
+diff --git a/render/include/dream/render/texture.h b/render/include/dream/render/texture.h
+index 75c61dd..8115cf2 100644
+--- a/render/include/dream/render/texture.h
++++ b/render/include/dream/render/texture.h
+@@ -67,6 +67,12 @@ bool describe_texture(std::uint32_t tcw, std::uint32_t tsp, std::uint32_t stride
+ bool decode_texture(const TextureInfo& info, const std::uint8_t* vram, std::size_t vram_size,
+                     const std::uint32_t* palette, std::vector<std::uint32_t>& out);
+ 
++// A cheap fingerprint of the bytes a texture is decoded from, so the cache can notice that video
++// memory changed under it through a path that reported no write. Samples are spread across the
++// whole region; zero means the texture lies outside video memory or has no known size.
++std::uint64_t texture_digest(const TextureInfo& info, const std::uint8_t* vram,
++                             std::size_t vram_size);
++
+ // Unpacks the 1024 words of palette memory into RGBA8888.
+ void unpack_palette(const std::uint32_t* palette_ram, PaletteFormat format, std::uint32_t* out);
+ 
+diff --git a/render/src/texture.cpp b/render/src/texture.cpp
+index 91b04a7..bf8fa36 100644
+--- a/render/src/texture.cpp
++++ b/render/src/texture.cpp
+@@ -354,4 +354,23 @@ bool decode_texture(const TextureInfo& info, const std::uint8_t* vram, std::size
+     }
+ }
+ 
++std::uint64_t texture_digest(const TextureInfo& info, const std::uint8_t* vram,
++                             std::size_t vram_size) {
++    const u32 bytes = info.size_bytes();
++    if (!vram || bytes < 8 || static_cast<std::size_t>(info.address) + bytes > vram_size)
++        return 0;
++    const std::uint8_t* base = vram + info.address;
++    // Enough samples to catch an image replaced by another one, few enough that taking the
++    // fingerprint on every cache hit costs nothing.
++    constexpr unsigned kSamples = 256;
++    std::uint64_t h = 0xCBF29CE484222325ull;  // FNV-1a offset basis
++    for (unsigned i = 0; i < kSamples; ++i) {
++        const std::size_t off = (static_cast<std::size_t>(bytes) - 8) * i / (kSamples - 1);
++        std::uint64_t w = 0;
++        std::memcpy(&w, base + off, 8);
++        h = (h ^ w) * 0x100000001B3ull;
++    }
++    return h ? h : 1;  // 0 means "no fingerprint"
++}
++
+ }  // namespace dream::render
+diff --git a/render/tests/test_texture.cpp b/render/tests/test_texture.cpp
+index 2fb2a41..2f7f82d 100644
+--- a/render/tests/test_texture.cpp
++++ b/render/tests/test_texture.cpp
+@@ -104,6 +104,29 @@ TEST_CASE("texture: the word pair describes size, format and layout") {
+     CHECK_FALSE(describe_texture(make_tcw(0, 7), make_tsp(0, 0), 0, info));
+ }
+ 
++TEST_CASE("texture: the fingerprint follows the bytes a texture is decoded from") {
++    auto v = vram();
++    TextureInfo info;
++    REQUIRE(describe_texture(make_tcw(0x1000, 2), make_tsp(2, 2), 0, info));  // 32x32 ARGB4444
++    CHECK(info.size_bytes() == 32u * 32u * 2u);
++    const std::uint64_t before = texture_digest(info, v.data(), v.size());
++    CHECK(before != 0);
++    // Replacing the image changes the fingerprint; touching bytes outside it does not.
++    std::fill(v.begin() + 0x1000, v.begin() + 0x1000 + info.size_bytes(), 0x11);
++    const std::uint64_t replaced = texture_digest(info, v.data(), v.size());
++    CHECK(replaced != before);
++    CHECK(texture_digest(info, v.data(), v.size()) == replaced);
++    v[0x200] = 0xFF;
++    CHECK(texture_digest(info, v.data(), v.size()) == replaced);
++    // A change at the start of the image is seen (the samples are spread across the whole region,
++    // so a single texel between two samples is not: those writes are what the invalidation ranges
++    // are for).
++    v[0x1000] ^= 0xFF;
++    CHECK(texture_digest(info, v.data(), v.size()) != replaced);
++    // A texture that does not fit has no fingerprint to compare.
++    CHECK(texture_digest(info, v.data(), 0x1000 + 100) == 0);
++}
++
+ TEST_CASE("texture: the three 16-bit formats expand to full-range RGBA") {
+     auto v = vram();
+     TextureInfo info;

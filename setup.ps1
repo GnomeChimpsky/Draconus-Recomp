@@ -103,7 +103,13 @@ function Test-EnginePatchMarkers {
         [bool](Select-String -LiteralPath (Join-Path $engine "render\src\vk\window.cpp") `
                     -SimpleMatch 'The requested content rate can be higher than the panel' -Quiet),
         [bool](Select-String -LiteralPath (Join-Path $engine "render\include\dream\render\vk\context.h") `
-                    -SimpleMatch 'create_device' -Quiet)
+                    -SimpleMatch 'create_device' -Quiet),
+        (Test-Path -LiteralPath (Join-Path $engine "render\include\dream\render\haptics.h")),
+        (Test-Path -LiteralPath (Join-Path $engine "runtime\boot\crash_log.h")),
+        [bool](Select-String -LiteralPath (Join-Path $engine "runtime\boot\crash_log.cpp") `
+                    -SimpleMatch 'BUILD-INFO' -Quiet),
+        [bool](Select-String -LiteralPath (Join-Path $engine "render\include\dream\render\texture.h") `
+                    -SimpleMatch 'texture_digest' -Quiet)
     )
     return -not ($late -contains $false)
 }

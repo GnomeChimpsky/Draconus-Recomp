@@ -346,7 +346,7 @@ index b46d2cc..9e5e731 100644
 +    }
 +}
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 7a5e805..3da0e28 100644
+index 15f1508..c66f387 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -1403,6 +1403,10 @@ struct Live {
