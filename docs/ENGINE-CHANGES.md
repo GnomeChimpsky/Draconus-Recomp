@@ -3154,24 +3154,44 @@ of failing.
   two seconds and a device plugged in after the window opened is found (`SDL_PumpEvents` first):
   Windows registers the HID interface long before the audio class one.
 - **The effect.** The pack's seven power steps become amplitude, and its 4-30 Hz motor rate scales
-  the low band (60-120 Hz) so a slow heavy effect stays a thump and a fast one rises; a short hit
-  (`duration_ms` <= 160) gets a stronger, higher band at 340 Hz so a blow reads sharp. A one-shot is
-  retired after its own duration, a continuous one 250 ms after the last repeat, so a lost stop
-  cannot leave a motor running.
+  the low band (60-120 Hz) so a slow heavy effect stays a thump and a fast one rises. Two guards keep
+  the pad from making noise it was not asked for: the amplitude is scaled by how long the effect lasts
+  (a real motor has inertia, so a 50 ms pulse gets a third of the level and a 900 ms one all of it),
+  and the high band — the part a voice coil turns into an audible tick — needs both half drive and at
+  least 80 ms behind it. That is what a turn or a step tap is not: the title fires short light effects
+  when the character turns, and on a pad that plays the waveform faithfully those were audible clicks.
+  The high band itself stays at 170-200 Hz for the same reason. A one-shot is retired after its own
+  duration, a continuous one 250 ms after the last repeat, so a lost stop cannot leave a motor running.
 - **The triggers.** `render/trigger_effect.{h,cpp}` builds the DualSense zone effects (mode,
-  10-zone strength map, `feedback`/`weapon`/`vibration`) and `TriggerPlanner` decides which one each
-  trigger gets: left holds a light `feedback` resistance while the block is held; an effect with
-  power >= 0.20 arriving while it is held turns into a 110 ms buzz in the left trigger (the block
-  took a hit); a right-trigger press opens a 400 ms window with a faint 55 ms buzz for the swing, and
-  an impact inside the window turns into a 90 ms hard buzz (the blow landed) and closes the window so
-  the burst behind a hit is not read as a second one. Only changes are sent, through
-  `renhdrum_hd_haptics_trigger_block` and `SDL_SendJoystickEffect`, from one thread.
+  10-zone strength map, `feedback`/`weapon`/`vibration`) and `TriggerPlanner` turns the pack's effects
+  into them. The rumble is the only input: an effect at 45 % of the pack's drive or more becomes a
+  100 ms buzz, in the left trigger only while the block is held and in both otherwise. The level is
+  RenHDrum's own (amplitude 3 at 25 Hz; the first build used amplitude 8 at 45-60 Hz, which a
+  DualSense renders as a loud mechanical rattle rather than a tap). Below that drive is ambience and
+  never reaches a trigger, one trigger cannot start a second pulse within 120 ms, and letting go of
+  the block ends its buzz. Optional resistance puts a constant weight under *both* triggers from
+  launch -- `feedback` from zone 1, strength 3 on the left and 1 on the right by default -- and a
+  buzz plays through it before the weight returns. The launcher exposes each of those numbers: the
+  rumble gain (`--haptics-strength`), the buzz level (`--trigger-strength`), the weight on each
+  trigger (`--resistance-left`/`--resistance-right`), where it bites (`--resistance-zone`) and the
+  pad speaker's level (`--speaker-level`). Every one of them is only offered while the Modern control
+  preset is selected, because that is the layout where the triggers block and attack. Trigger feedback is HID only: it opens no audio
+  endpoint, so it works with `--haptics` off. The resistance is off unless `--trigger-resistance`
+  says otherwise -- the first build applied it whenever the planner existed, because the option was
+  never fed into the planner's default, which read as a stiff trigger the player had not asked for.
+  Only changes are sent, through `renhdrum_hd_haptics_trigger_block` and `SDL_SendJoystickEffect`,
+  from one thread.
 - **The speaker** is off unless asked for (`--haptics-speaker`), because it is RenHDrum's synthesis of
   a coarse signal rather than game audio; when on it opens the pad's speaker route with the 47-byte
   effects block and closes it on release.
 - **Release.** `Window::destroy` stops the haptics before the pads close (the pad's speaker and
   triggers must be released while the pad is still open), and a hot-plug detaches the slot before
   `SDL_CloseGamepad`.
+- **Re-announcements.** SDL announces every connected pad right after init, and an unrelated device
+  event also lands in the window's device refresh. Rebuilding there used to close and reopen every
+  pad, which for a DualSense meant three audio-endpoint opens at startup -- each one a chance for the
+  pad's amplifier to click, and the first trace of the feature showed exactly that. The refresh now
+  re-enumerates first and does nothing when the set of gamepads is unchanged.
 
 Flags: `--haptics`, `--trigger-feedback`, `--trigger-resistance`, `--haptics-speaker`,
 `--haptics-strength N` (10-100). `DREAM_RENHDRUM=0` disables the whole path, `DREAM_RENHDRUM_TRACE=1`
@@ -3182,13 +3202,22 @@ repository's pinned `third_party/renhdrum/renhdrum.dll` (see its `SOURCE.md`). T
 pinned by `render/tests/test_trigger_effect.cpp` against the same vectors RenHDrum's own suite uses,
 so a change that would stop a real controller feeling anything fails the suite instead.
 
-**Verified.** `dream_render_tests` passes (125 cases, 5,188 assertions) with eleven new cases for the
+**Verified.** `dream_render_tests` passes (125 cases, 5,190 assertions) with eleven new cases for the
 effect encodings, the clamping, the resistance, the block-hit and landing-blow pulses, the swing
 window, one hit per swing, resistance switched off, and reset. On a wired DualSense, a scripted run of
 the game with `--haptics --trigger-feedback --trigger-resistance` prints `haptics: on (DualSense USB,
 triggers)`, opens the pad's audio endpoint and stays clean; `dream_haptics_probe` plays the whole
 sequence — resistance, block hit, release, swing, landing blow, rumble — so a pad can be checked
 without playing to the first fight.
+
+Two diagnostics split "the pad makes a noise" into signal and mechanics. `--triggers N` samples the
+trigger axes and reports them: on the development pad LT and RT rest at exactly 0 with no value
+changes, so the planner is not being fed jitter. `--render FILE.wav` writes the four channels the pad's
+DAC is handed for a walking-like sequence: the two speaker channels are exactly zero with
+`--haptics-speaker` off, the actuator channels' largest sample-to-sample step is 0.016, and all of
+their energy sits below 400 Hz (72 % at 40-150 Hz, 28 % at 150-400 Hz) — the stream itself contains
+nothing that sounds like a click. What the pad still does on its own, a voice coil making sound as well
+as motion, is a matter of level: the strength slider.
 
 **Packaging.** The DLL is loaded from beside the executable, so a release carries it: the repository's
 `third_party/renhdrum/` holds the pinned `v0.5.0` binary, its MIT license and upstream `NOTICE`, and

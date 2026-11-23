@@ -140,6 +140,11 @@ DEFAULTS = {
     "haptics_resistance": False,
     "haptics_speaker": False,
     "haptics_strength": 100,
+    "haptics_trigger_strength": 3,
+    "haptics_resistance_left": 3,
+    "haptics_resistance_right": 1,
+    "haptics_resistance_zone": 1,
+    "haptics_speaker_level": 60,
     "gamma": 100,
     "crash_log": False,
     "check_updates": True,
@@ -971,19 +976,39 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
         cmd += ["--interpret"]
     if s.get("controls", "classic") == "modern":
         cmd += ["--controls", "modern"]
-    # Haptics are one switch with sub-choices: without --haptics the engine never loads the DLL, so
-    # the sub-flags would be dead weight on the command line.
-    if s.get("haptics"):
-        cmd += ["--haptics"]
+    # The haptics only make sense with the twin-stick layout, where the triggers block and attack;
+    # the launcher greys them out in Classic, and the command line agrees rather than carrying
+    # settings that would do nothing.
+    if s.get("controls", "classic") == "modern":
+        # HD rumble is the audio-endpoint path (actuators, speaker, strength). The trigger feedback
+        # is HID-only: it needs no audio endpoint, so it is its own switch and works with HD rumble
+        # off.
+        if s.get("haptics"):
+            cmd += ["--haptics"]
+            strength = max(10, min(100, int(s.get("haptics_strength") or 100)))
+            if strength != 100:
+                cmd += ["--haptics-strength", str(strength)]
+            if s.get("haptics_speaker"):
+                cmd += ["--haptics-speaker"]
+                level = max(0, min(100, int(s.get("haptics_speaker_level") or 60)))
+                if level != 60:
+                    cmd += ["--speaker-level", str(level)]
         if s.get("haptics_triggers"):
             cmd += ["--trigger-feedback"]
+            buzz = max(1, min(8, int(s.get("haptics_trigger_strength") or 3)))
+            if buzz != 3:
+                cmd += ["--trigger-strength", str(buzz)]
         if s.get("haptics_resistance"):
             cmd += ["--trigger-resistance"]
-        if s.get("haptics_speaker"):
-            cmd += ["--haptics-speaker"]
-        strength = max(10, min(100, int(s.get("haptics_strength") or 100)))
-        if strength != 100:
-            cmd += ["--haptics-strength", str(strength)]
+            left = max(1, min(8, int(s.get("haptics_resistance_left") or 3)))
+            right = max(1, min(8, int(s.get("haptics_resistance_right") or 1)))
+            zone = max(0, min(9, int(s.get("haptics_resistance_zone") or 1)))
+            if left != 3:
+                cmd += ["--resistance-left", str(left)]
+            if right != 1:
+                cmd += ["--resistance-right", str(right)]
+            if zone != 1:
+                cmd += ["--resistance-zone", str(zone)]
     if s.get("crash_log"):
         cmd += ["--crash-log"]
     gamma = int(s.get("gamma") or 100)
@@ -1054,36 +1079,82 @@ def describe_exit(code: int | None) -> str:
 #   slider  min, max, suffix                  note   (a grey line of text)
 #   disc    (the disc row, handled specially)
 
+def _depends_of(control: dict) -> list[tuple[str, object]]:
+    """The conditions a row needs: one (key, value) pair, or a list of pairs when a row hangs off
+    more than one setting (a trigger slider needs Modern controls *and* its own switch)."""
+    dep = control.get("depends")
+    if not dep:
+        return []
+    if isinstance(dep[0], (list, tuple)):
+        return [tuple(x) for x in dep]
+    return [tuple(dep)]
+
+
+def _holds(current, wanted) -> bool:
+    """Whether a setting satisfies one condition. A collection means "one of these"."""
+    if isinstance(wanted, (list, tuple, set)):
+        return current in wanted
+    return current == wanted
+
+
 TABS = [
     ("Controller", [
+        # The controls preset decides whether the haptics below mean anything: in Classic the
+        # triggers strafe rather than block and attack, so the feedback has nothing to follow.
+        {"kind": "combo", "key": "controls", "label": "Controls", "width": 46,
+         "values": [("Classic - Dreamcast pad", "classic"),
+                    ("Modern - twin-stick, LT block, RT attack", "modern")],
+         "warning": "Haptics settings below need Modern controls.",
+         "help": "Modern enables twin stick controls: left stick moves and strafes, right stick "
+                 "turns. Left trigger blocks, right trigger attacks. In this mode you use d-pad "
+                 "instead of left stick to navigate menus."},
         {"kind": "check", "key": "haptics", "label": "HD rumble (RenHDrum)",
-         "help": "Off, the jump pack drives the pad's two motors, exactly as a Dreamcast wheel "
-                 "does. On, the pads go through RenHDrum: a DualSense's voice-coil actuators over "
-                 "its own USB audio, a Pro Controller's HD Rumble packets, an Xbox pad's four "
-                 "motors. A pad it does not recognise keeps the plain rumble, and so does the whole "
-                 "feature if the file is missing, so nothing here can leave a player without "
-                 "feedback."},
-        {"kind": "check", "key": "haptics_triggers", "label": "Trigger feedback on hits",
-         "depends": ("haptics", True),
-         "help": "The game's own rumble fires when a block takes a hit and when a swing lands. "
-                 "This turns those moments into a pulse in the trigger that made them: a short "
-                 "buzz in the left trigger for the block, a harder one in the right for the hit. "
-                 "Needs a DualSense, wired; over Bluetooth the pad keeps plain rumble."},
-        {"kind": "check", "key": "haptics_resistance", "label": "Trigger resistance while blocking",
-         "depends": ("haptics", True),
-         "help": "Holding the left trigger to block gives a light resistance, so the guard has "
-                 "weight before anything hits it. It stops the moment you let go, and a block that "
-                 "takes a hit buzzes through it."},
-        {"kind": "check", "key": "haptics_speaker", "label": "Controller speaker taps",
-         "depends": ("haptics", True),
-         "help": "RenHDrum turns the rumble into audible taps from the DualSense's own speaker, "
-                 "so footsteps and blows make a small sound in your hands. Off by default: the "
-                 "pack's signal is coarse, and this is a taste rather than an improvement."},
-        {"kind": "slider", "key": "haptics_strength", "label": "Haptic strength",
-         "min": 10, "max": 100, "suffix": "%", "depends": ("haptics", True),
-         "help": "How hard the pad's actuators are driven. 100% is the engine's own level; lower is "
-                 "for a pad that feels too strong next to the picture. The triggers keep the "
-                 "strengths their effects ask for, so this does not soften them."},
+         "depends": ("controls", "modern"),
+         "warning": "Wired DualSense \u00b7 Switch Pro Controller, USB or Bluetooth \u00b7 Xbox "
+                    "One/Series, USB or Bluetooth.",
+         "help": "Off: normal rumble only. On: rumble goes through RenHDrum, activating built in HD "
+                 "rumble motors."},
+        {"kind": "slider", "key": "haptics_strength", "label": "HD rumble strength",
+         "min": 10, "max": 100, "suffix": "%",
+         "depends": [("controls", "modern"), ("haptics", True)],
+         "help": "How hard the pad's actuators are driven. 100% is the game's own strength, lower "
+                 "for less feedback."},
+        {"kind": "check", "key": "haptics_triggers", "label": "Trigger feedback on blocks and hits",
+         "depends": ("controls", "modern"),
+         "warning": "Wired DualSense only.",
+         "help": "Every rumble the game sends becomes a short buzz in a trigger. Left trigger when "
+                 "blocking, both triggers for hits."},
+        {"kind": "slider", "key": "haptics_trigger_strength", "label": "Trigger buzz strength",
+         "min": 1, "max": 8, "suffix": "",
+         "depends": [("controls", "modern"), ("haptics_triggers", True)],
+         "help": "How hard a rumble buzzes the trigger, 1-8. 3 is RenHDrum's default."},
+        {"kind": "check", "key": "haptics_resistance", "label": "Trigger resistance (both triggers)",
+         "depends": ("controls", "modern"),
+         "warning": "Wired DualSense only.",
+         "help": "Resistance on both triggers, the left a bit more to simulate shield wielding."},
+        {"kind": "slider", "key": "haptics_resistance_left", "label": "Resistance: left trigger",
+         "min": 1, "max": 8, "suffix": "",
+         "depends": [("controls", "modern"), ("haptics_resistance", True)],
+         "help": "How hard the left trigger pushes back, 1-8."},
+        {"kind": "slider", "key": "haptics_resistance_right", "label": "Resistance: right trigger",
+         "min": 1, "max": 8, "suffix": "",
+         "depends": [("controls", "modern"), ("haptics_resistance", True)],
+         "help": "How hard the right trigger pushes back, 1-8."},
+        {"kind": "slider", "key": "haptics_resistance_zone", "label": "Resistance starts at",
+         "min": 0, "max": 9, "suffix": "",
+         "depends": [("controls", "modern"), ("haptics_resistance", True)],
+         "help": "Where in the trigger's travel the weight begins to bite, 0 (the very top) to 9. A "
+                 "larger number leaves the first part of the pull free."},
+        {"kind": "check", "key": "haptics_speaker", "label": "Controller speaker taps "
+                                                          "(experimental)",
+         "depends": [("controls", "modern"), ("haptics", True)],
+         "warning": "Wired DualSense only: the pad's speaker becomes part of its USB audio endpoint.",
+         "help": "RenHDrum turns the rumble into audible taps from the DualSense's own speaker. For "
+                 "testing only."},
+        {"kind": "slider", "key": "haptics_speaker_level", "label": "Speaker level",
+         "min": 0, "max": 100, "suffix": "%",
+         "depends": [("controls", "modern"), ("haptics", True), ("haptics_speaker", True)],
+         "help": "How loud the taps are. 60% is RenHDrum's default level."},
     ]),
     ("Graphics", [
         {"kind": "combo", "key": "sh4_clock", "label": "CPU clock",
@@ -1162,12 +1233,6 @@ TABS = [
          "help": "Your own dump of the USA V1.000 release. GDI and CHD images are "
                  "accepted; the launcher checks the disc before Play, so a wrong dump fails "
                  "here instead of inside the game."},
-        {"kind": "combo", "key": "controls", "label": "Controls", "width": 46,
-         "values": [("Classic - Dreamcast pad", "classic"),
-                    ("Modern - twin-stick, LT block, RT attack", "modern")],
-         "help": "Modern enables twin stick controls: left stick moves and strafes, right stick "
-                 "turns. Left trigger blocks, right trigger attacks. In this mode you use d-pad "
-                 "instead of left stick to navigate menus."},
         {"kind": "slider", "key": "gamma", "label": "Brightness / gamma", "min": 50, "max": 200,
          "suffix": "%",
          "help": "Gamma curve on the finished picture: 100% is the original; above it lifts dark "
@@ -1192,7 +1257,7 @@ TABS = [
 ]
 
 # The Game tab is first: the disc and the engine path are what a player acts on before playing.
-TABS.sort(key=lambda tab: ("Game", "Controller", "Graphics", "Audio").index(tab[0]))
+TABS.sort(key=lambda tab: ("Game", "Graphics", "Audio", "Controller").index(tab[0]))
 
 
 # ----------------------------------------------------------------------------- UI
@@ -1212,7 +1277,14 @@ class Launcher(tk.Tk):
         try:
             # The native Windows theme draws its own backgrounds, which fight the launcher's dark
             # palette; claim a flat one for the comboboxes, checkboxes and buttons.
-            ttk.Style(self).theme_use("clam")
+            style = ttk.Style(self)
+            style.theme_use("clam")
+            # The per-tab scrollbar, in the same palette: a visible thumb against the page, so it
+            # reads as "there is more below" rather than a stray line at the edge.
+            style.configure("Launcher.Vertical.TScrollbar", background="#6b5560",
+                            troughcolor="#20171b", bordercolor="#141013",
+                            arrowcolor=self.FG, darkcolor="#6b5560", lightcolor="#8a6f7a",
+                            gripcount=0)
         except tk.TclError:
             pass
         # Fit the window to the desktop's work area (above the taskbar) and centre it, so the
@@ -1229,7 +1301,10 @@ class Launcher(tk.Tk):
             value=("Updated to %s. Ready." % updated_to) if updated_to else "Ready.")
         self.vars: dict[str, tk.Variable] = {}
         self.combos: dict[str, ttk.Combobox] = {}
-        self._dependent: list[tuple[str, str, tk.Widget]] = []
+        # (conditions, widget): a widget is live only while every (key, value) condition holds.
+        self._dependent: list[tuple[list[tuple[str, object]], tk.Widget]] = []
+        # The text of each gated row, dimmed with its widget so the whole row reads as off.
+        self._dim_rows: list[tuple[list[tuple[str, object]], list[tk.Widget]]] = []
         # The update check runs on a worker thread; results come back through a queue that the Tk
         # thread drains, so no Tk call is ever made from the worker.
         self._auto_update_check = auto_update_check
@@ -1246,7 +1321,15 @@ class Launcher(tk.Tk):
         self._game_started = 0.0
         # The saved aspect decides the pixel counts the resolution rows show.
         self._refresh_resolution()
+        # One scrollable view per tab: (canvas, scrollbar, inner frame).
+        self.tab_views: dict[str, tuple[tk.Canvas, ttk.Scrollbar, tk.Frame]] = {}
         self._build()
+        # Wheel over a tab scrolls it when its options are taller than the page. bind_all here
+        # rather than per widget: the pointer is mostly over labels and controls, and each of those
+        # would otherwise need its own binding.
+        self.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
+        self.bind_all("<Button-4>", self._on_mousewheel, add="+")
+        self.bind_all("<Button-5>", self._on_mousewheel, add="+")
         self._sync_depends()
         self._update_disc_state()
         self.protocol("WM_DELETE_WINDOW", self._close)
@@ -1360,42 +1443,117 @@ class Launcher(tk.Tk):
         for name, controls in TABS:
             tab = tk.Frame(nb, bg=self.BG)
             nb.add(tab, text=name)
-            self._build_tab(tab, controls)
+            self._build_tab(tab, controls, name)
         nb.pack(fill="both", expand=True, pady=(10, 0))
 
-    def _build_tab(self, tab: tk.Frame, controls: list[dict]) -> None:
-        tab.configure(padx=18, pady=14)
+    def _build_tab(self, tab: tk.Frame, controls: list[dict], name: str = "") -> None:
+        """Lay one tab out inside a vertical scroll area.
+
+        A short window cannot show every option; without this the notebook simply clipped the
+        bottom rows. The canvas gives each tab its own scrollbar, shown only while the content is
+        taller than the page, and the rows are gridded into the frame inside it.
+        """
+        tab.rowconfigure(0, weight=1)
+        tab.columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(tab, bg=self.BG, highlightthickness=0, bd=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(tab, orient="vertical", command=canvas.yview,
+                               style="Launcher.Vertical.TScrollbar")
+        scroll.grid(row=0, column=1, sticky="ns")
+        scroll.grid_remove()  # shown only when the page is taller than the viewport
+        canvas.configure(yscrollcommand=scroll.set)
+
+        inner = tk.Frame(canvas, bg=self.BG, padx=18, pady=14)
+        window = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def sync(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            needed = inner.winfo_reqheight() > canvas.winfo_height() + 1
+            if needed and not scroll.winfo_ismapped():
+                scroll.grid()
+            elif not needed and scroll.winfo_ismapped():
+                scroll.grid_remove()
+                canvas.yview_moveto(0)
+
+        def fit_width(event) -> None:
+            canvas.itemconfigure(window, width=event.width)
+            # The explanatory lines are built with a 700/720-pixel wrap, which clips instead of
+            # wrapping once the page is narrower (a 1024-wide laptop). Re-wrap them to the page,
+            # capped so a wide window keeps the original line length.
+            wrap = max(200, min(720, event.width - 40))
+            for child in inner.winfo_children():
+                try:
+                    if int(child.cget("wraplength")) > 0:
+                        child.configure(wraplength=wrap)
+                except (tk.TclError, ValueError):
+                    pass
+            sync()
+
+        inner.bind("<Configure>", sync)
+        canvas.bind("<Configure>", fit_width)
+        self.tab_views[name] = (canvas, scroll, inner)
+
         row = 0
         for c in controls:
             kind = c["kind"]
             if kind == "note":
                 fg = "#e0a030" if c.get("warn") else self.DIM
-                tk.Label(tab, text=c["text"], bg=self.BG, fg=fg, anchor="w",
+                tk.Label(inner, text=c["text"], bg=self.BG, fg=fg, anchor="w",
                          justify="left", wraplength=700).grid(
                     row=row, column=0, columnspan=2, sticky="w", pady=(8, 0))
                 row += 1
                 continue
 
-            tk.Label(tab, text=c.get("label", ""), bg=self.BG, fg=self.FG, anchor="w").grid(
-                row=row, column=0, sticky="w", pady=(10, 0))
-            widget = self._control(tab, c)
+            label = tk.Label(inner, text=c.get("label", ""), bg=self.BG, fg=self.FG, anchor="w")
+            label.grid(row=row, column=0, sticky="w", pady=(10, 0))
+            widget = self._control(inner, c)
             if widget is not None:
                 widget.grid(row=row, column=1, sticky="w", padx=(18, 0), pady=(10, 0))
             row += 1
+            # Only the setting's name follows the enabled state. The warning stays yellow and the
+            # explanation stays dim whatever happens: they are notes about the row, not part of it.
+            row_text = [label]
             if c.get("warning"):
-                tk.Label(tab, text=c["warning"], bg=self.BG, fg="#e0a030", anchor="w",
-                         justify="left", wraplength=720, font=("Segoe UI", 9)).grid(
-                    row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
+                warn = tk.Label(inner, text=c["warning"], bg=self.BG, fg="#e0a030", anchor="w",
+                                justify="left", wraplength=720, font=("Segoe UI", 9))
+                warn.grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
                 row += 1
             # The explanation sits under its row rather than in a third column: a long radio label
             # or a wide combo pushed a third column off the edge of the window.
             if c.get("help"):
-                tk.Label(tab, text=c["help"], bg=self.BG, fg=self.DIM, anchor="w",
-                         justify="left", wraplength=720, font=("Segoe UI", 8)).grid(
-                    row=row, column=0, columnspan=2, sticky="w", pady=(2, 0))
+                help_label = tk.Label(inner, text=c["help"], bg=self.BG, fg=self.DIM, anchor="w",
+                                      justify="left", wraplength=720, font=("Segoe UI", 8))
+                help_label.grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 0))
                 row += 1
-        tab.columnconfigure(0, minsize=190)
-        tab.columnconfigure(1, weight=1)
+            if c.get("depends"):
+                self._dim_rows.append((_depends_of(c), row_text))
+        inner.columnconfigure(0, minsize=190)
+        inner.columnconfigure(1, weight=1)
+
+    def _on_mousewheel(self, event) -> None:
+        """Scroll the selected tab when the pointer is over its page."""
+        try:
+            name = self.notebook.tab(self.notebook.select(), "text")
+        except tk.TclError:
+            return
+        view = self.tab_views.get(name)
+        if view is None:
+            return
+        canvas = view[0]
+        widget = event.widget
+        while widget is not None and widget is not canvas:
+            widget = getattr(widget, "master", None)
+        if widget is None:  # the pointer is outside the page, or on its scrollbar
+            return
+        num = getattr(event, "num", None)
+        if num == 4:
+            step = -1
+        elif num == 5:
+            step = 1
+        else:
+            step = -1 if getattr(event, "delta", 0) > 0 else 1
+        canvas.yview_scroll(step, "units")
 
     def _control(self, tab: tk.Frame, c: dict) -> tk.Widget | None:
         kind, key = c["kind"], c.get("key")
@@ -1445,7 +1603,7 @@ class Launcher(tk.Tk):
             self.vars[key] = var
             ent = ttk.Entry(tab, textvariable=var, width=c.get("width", 18))
             if c.get("depends"):
-                self._dependent.append((c["depends"][0], c["depends"][1], ent))
+                self._dependent.append((_depends_of(c), ent))
             if key == "aspect_custom":
                 # The resolution labels follow this text, so type "32:9" and see the pixels.
                 var.trace_add("write", lambda *_a: self._custom_aspect_changed())
@@ -1458,7 +1616,7 @@ class Launcher(tk.Tk):
             box = ttk.Checkbutton(tab, variable=var,
                                   command=lambda k=key: self._check_changed(k))
             if c.get("depends"):
-                self._dependent.append((c["depends"][0], c["depends"][1], box))
+                self._dependent.append((_depends_of(c), box))
             return box
         if kind == "radio":
             var = tk.StringVar(value=str(self.settings.get(key, "")))
@@ -1509,13 +1667,15 @@ class Launcher(tk.Tk):
         self._sync_depends()
 
     def _sync_depends(self) -> None:
-        for dep_key, dep_value, widget in self._dependent:
-            current = self.settings.get(dep_key)
-            if isinstance(dep_value, (list, tuple, set)):
-                enabled = current in dep_value
-            else:
-                enabled = current == dep_value
+        for conditions, widget in self._dependent:
+            enabled = all(_holds(self.settings.get(key), value) for key, value in conditions)
             widget.configure(state="normal" if enabled else "disabled")
+        for conditions, labels in self._dim_rows:
+            enabled = all(_holds(self.settings.get(key), value) for key, value in conditions)
+            for label in labels:
+                # The row's name only. The help below it keeps its own dim colour so it stays a
+                # description rather than turning into a second title.
+                label.configure(fg=self.FG if enabled else self.DIM)
 
     def _combo_changed(self, key: str) -> None:
         self.settings[key] = self._value_for(key)
@@ -1579,6 +1739,8 @@ class Launcher(tk.Tk):
         self.vars.clear()
         self.combos.clear()
         self._dependent.clear()
+        self._dim_rows.clear()
+        self.tab_views.clear()
         self._build()
         # Rebuilding the window makes a fresh Play button, which must still be disabled while the
         # game Reset was pressed against is running.
@@ -2146,25 +2308,40 @@ def selftest() -> int:
         if not needle and text:
             failures.append("exit 0: %r" % text)
 
-    # Haptics: one master switch, and the sub-choices only reach the command line under it. A stale
-    # settings file without these keys reads as off through .get(), which is what `base` is.
+    # Haptics only mean anything in Modern controls, where the triggers block and attack: with
+    # Classic they must not reach the command line at all, even when the boxes are ticked.
+    modern = dict(base, controls="modern")
     for flag in ("--haptics", "--trigger-feedback", "--trigger-resistance", "--haptics-speaker"):
-        if flag in build_command(image, dict(base)):
+        if flag in build_command(image, dict(modern)):
             failures.append("haptics: off still passed %s" % flag)
-    cmd = build_command(image, dict(base, haptics=True, haptics_triggers=True,
+        if flag in build_command(image, dict(base, haptics=True, haptics_triggers=True,
+                                             haptics_resistance=True, haptics_speaker=True)):
+            failures.append("haptics: %s passed without Modern controls" % flag)
+    cmd = build_command(image, dict(modern, haptics=True, haptics_triggers=True,
                                     haptics_resistance=True, haptics_speaker=True))
     expect("haptics", cmd, ["--haptics", "--trigger-feedback", "--trigger-resistance",
-                            "--haptics-speaker"])
-    # Without the master switch the engine never loads the DLL, so the sub-flags would only make the
-    # command line describe a run that is not happening.
-    cmd = build_command(image, dict(base, haptics_triggers=True, haptics_resistance=True))
-    if "--haptics" in cmd or "--trigger-feedback" in cmd or "--trigger-resistance" in cmd:
-        failures.append("haptics: sub-choices passed without the master switch")
-    # The strength only travels when it is not the default, like every other defaulted slider.
-    if "--haptics-strength" in build_command(image, dict(base, haptics=True)):
-        failures.append("haptics: the default strength was passed explicitly")
-    cmd = build_command(image, dict(base, haptics=True, haptics_strength=60))
-    expect("haptics strength", cmd, ["--haptics-strength", "60"])
+                            "--haptics-speaker", "--controls", "modern"])
+    # Trigger feedback is its own switch: it is HID-only and never opens the pad's audio path, so it
+    # must reach the command line on its own, without HD rumble.
+    cmd = build_command(image, dict(modern, haptics_triggers=True, haptics_resistance=True))
+    if "--haptics" in cmd:
+        failures.append("triggers: HD rumble was passed without being asked for")
+    expect("triggers", cmd, ["--trigger-feedback", "--trigger-resistance"])
+    # Every strength only travels when it is not the default, like every other defaulted slider.
+    for flag in ("--haptics-strength", "--trigger-strength", "--resistance-left",
+                 "--resistance-right", "--resistance-zone", "--speaker-level"):
+        if flag in build_command(image, dict(modern, haptics=True, haptics_triggers=True,
+                                             haptics_resistance=True, haptics_speaker=True)):
+            failures.append("haptics: %s passed at its default" % flag)
+    cmd = build_command(image, dict(modern, haptics=True, haptics_strength=60,
+                                    haptics_speaker=True, haptics_speaker_level=40))
+    expect("haptics strength", cmd, ["--haptics-strength", "60", "--speaker-level", "40"])
+    cmd = build_command(image, dict(modern, haptics_triggers=True, haptics_trigger_strength=5))
+    expect("trigger strength", cmd, ["--trigger-strength", "5"])
+    cmd = build_command(image, dict(modern, haptics_resistance=True, haptics_resistance_left=5,
+                                    haptics_resistance_right=2, haptics_resistance_zone=3))
+    expect("resistance strengths", cmd, ["--resistance-left", "5", "--resistance-right", "2",
+                                         "--resistance-zone", "3"])
 
     cmd = build_command(image, dict(base, audio=False))
     expect("audio", cmd, ["--no-audio"])
@@ -2490,21 +2667,40 @@ def check_ui(app: Launcher) -> list[str]:
     # The tabs that remain, and their order: Game first, because the disc comes before settings, and
     # Controller before graphics because the pad is what the player plugs in next.
     names = [app.notebook.tab(i, "text") for i in range(len(app.notebook.tabs()))]
-    if names != ["Game", "Controller", "Graphics", "Audio"]:
+    if names != ["Game", "Graphics", "Audio", "Controller"]:
         failures.append("tabs: %r" % names)
 
-    # The Controller tab's trigger options hang off the HD rumble switch. Ticking it has to enable
-    # them there and then: the rows are the only way a player learns they exist, and a row that
-    # stays greyed until Play is a row nobody finds.
+    # The Controller tab is gated on Modern controls: in Classic the haptics rows must be dead, and
+    # under Modern the sub-options must follow their own switches there and then. The rows are the
+    # only way a player learns they exist, and a row that stays greyed until Play is a row nobody
+    # finds.
     haptics_was = bool(app.vars["haptics"].get())
+    controls_was = str(app.vars["controls"].get())
+    controls_spec = next(c for _, cs in TABS for c in cs if c.get("key") == "controls")
+    modern_label = next(t for t, v in controls_spec["values"] if v == "modern")
+    classic_label = next(t for t, v in controls_spec["values"] if v == "classic")
 
-    def dependent_states() -> list:
-        return [str(w.cget("state")) for k, _v, w in app._dependent if k == "haptics"]
+    def dependent_states(key: str) -> list:
+        return [str(w.cget("state")) for conds, w in app._dependent
+                if any(k == key for k, _v in conds)]
 
+    app.vars["controls"].set(classic_label)
+    app._combo_changed("controls")
+    app.vars["haptics"].set(True)
+    app._check_changed("haptics")
+    app.update()
+    classic_states = dependent_states("controls")
+    if not classic_states:
+        failures.append("no Controller row depends on the controls preset")
+    elif any(s != "disabled" for s in classic_states):
+        failures.append("Classic controls left a haptics row enabled: %r" % (classic_states,))
+
+    app.vars["controls"].set(modern_label)
+    app._combo_changed("controls")
     app.vars["haptics"].set(False)
     app._check_changed("haptics")
     app.update()
-    off_states = dependent_states()
+    off_states = dependent_states("haptics")
     if not off_states:
         failures.append("no Controller row depends on HD rumble")
     elif any(s != "disabled" for s in off_states):
@@ -2512,11 +2708,14 @@ def check_ui(app: Launcher) -> list[str]:
     app.vars["haptics"].set(True)
     app._check_changed("haptics")
     app.update()
-    on_states = dependent_states()
+    on_states = dependent_states("haptics")
     if any(s == "disabled" for s in on_states):
         failures.append("HD rumble on left its rows disabled: %r" % (on_states,))
+
     app.vars["haptics"].set(haptics_was)
     app._check_changed("haptics")
+    app.vars["controls"].set(controls_was)
+    app._combo_changed("controls")
     app.update()
 
     # Clamping and centring are unit-tested; this is the real window, so a regression in the
@@ -2538,8 +2737,50 @@ def check_ui(app: Launcher) -> list[str]:
         failures.append("action bar disappeared in a short window")
     elif bar.winfo_rooty() + bar.winfo_height() > app.winfo_rooty() + app.winfo_height():
         failures.append("action bar bottom is outside the short window")
+
+    # The clipped rows must still be reachable: the selected tab gets a scrollbar and scrolls.
+    saved_tab = app.notebook.index(app.notebook.select())
+    graphics = [app.notebook.tab(i, "text")
+                for i in range(len(app.notebook.tabs()))].index("Graphics")
+    app.notebook.select(graphics)
+    app.update()
+    canvas, scroll, inner = app.tab_views["Graphics"]
+    if inner.winfo_reqheight() <= canvas.winfo_height():
+        failures.append("Graphics tab unexpectedly fits a 900x420 window")
+    elif not scroll.winfo_ismapped():
+        failures.append("Graphics tab has no scrollbar in a short window")
+    else:
+        before = canvas.yview()
+        canvas.yview_scroll(10, "units")
+        app.update()
+        if canvas.yview() == before or canvas.yview()[0] <= 0.0:
+            failures.append("Graphics tab did not scroll: %r -> %r"
+                            % (before, canvas.yview()))
+    app.notebook.select(saved_tab)
+    app.update()
+
     app.minsize(*saved_min)
     app.geometry(saved_geometry)
+    app.update()
+
+    # And once the window is tall again, the bar goes away rather than lingering disabled.
+    app.notebook.select(graphics)
+    app.update()
+    canvas, scroll, inner = app.tab_views["Graphics"]
+    fits = inner.winfo_reqheight() <= canvas.winfo_height() + 1
+    if fits and scroll.winfo_ismapped():
+        failures.append("Graphics scrollbar shown although the page fits")
+    if not fits and not scroll.winfo_ismapped():
+        failures.append("Graphics page is taller than the window but has no scrollbar")
+
+    # A tab that does fit keeps its bar hidden rather than showing a disabled one.
+    app.notebook.select(names.index("Game"))
+    app.update()
+    canvas, scroll, inner = app.tab_views["Game"]
+    if (inner.winfo_reqheight() <= canvas.winfo_height() + 1
+            and scroll.winfo_ismapped()):
+        failures.append("Game scrollbar shown although the page fits")
+    app.notebook.select(saved_tab)
     app.update()
 
     # The disc row gates Play. Nothing selected must mean no Play, whatever the saved settings say.

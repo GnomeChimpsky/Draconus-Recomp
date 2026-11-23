@@ -26,6 +26,8 @@ capture-*
 *.vmu
 *.sav
 screenshot-*.ppm
+# Haptics traces written by tools\haptics-trace.bat
+haptics-trace*.log
 
 # Python
 __pycache__/

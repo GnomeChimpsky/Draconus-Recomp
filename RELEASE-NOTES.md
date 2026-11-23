@@ -7,17 +7,20 @@ disc and ships no game data. The [README](README.md) is the manual; the
 
 ## Unreleased
 
-* **HD rumble and trigger feedback.** A new **Controller** tab turns on RenHDrum, the haptics engine
-  that reaches the parts of a modern pad the Dreamcast's own rumble pack never could: a DualSense's
-  voice-coil actuators over its USB audio endpoint, a Switch Pro Controller's HD Rumble packets, and
-  an Xbox pad's four motors. The game already rumbles when a block takes a hit and when a swing
-  lands, so **Trigger feedback on hits** turns those moments into a pulse in the trigger that made
-  them — left for the block, right for the landed blow — and **Trigger resistance while blocking**
-  gives the left trigger a light resistance for as long as the block is held. Both are DualSense
-  features and need it wired; **Controller speaker taps** is there too, off by default. Everything
-  degrades to the old two-motor rumble: a pad RenHDrum does not claim, a missing `renhdrum.dll`, or
-  the option switched off all behave exactly as before. The DLL ships in the release folder under
-  the MIT license (see `licenses/`), so there is nothing to download or install.
+* **Controller haptics.** A new **Controller** tab — available with the **Modern** control layout,
+  where the triggers block and attack — turns on RenHDrum, the haptics engine that reaches the parts
+  of a modern pad the Dreamcast's own rumble pack never could: a DualSense's voice-coil actuators over
+  its USB audio endpoint, a Switch Pro Controller's HD Rumble packets, and an Xbox pad's four motors.
+  **Trigger feedback on blocks and hits** is a separate, HID-only switch: every rumble the game sends
+  becomes a short buzz in the left trigger while you block, and in both triggers otherwise — it needs
+  no HD rumble and never opens the pad's audio path. **Trigger resistance (both triggers)** puts a
+  constant weight under both triggers from the moment the game starts, the left a little heavier than
+  the right, with the buzzes playing through it. Every strength has its own slider: HD rumble, trigger
+  buzz, each trigger's resistance, where the resistance begins, and the speaker level.
+  **Controller speaker taps (experimental)** is there too, off by default. Everything degrades to the
+  old two-motor rumble: a pad RenHDrum does not claim, a missing `renhdrum.dll`, or the option
+  switched off all behave exactly as before. The DLL ships in the release folder under the MIT
+  license (see `licenses/`), so there is nothing to download or install.
 * **Opt-in crash logging.** The launcher's Game tab has a **Crash log** setting, off by default.
   Turned on, the run's console output is written to
   `%APPDATA%\dream-recomp\logs\draconus-<timestamp>.log`, and a crash appends a report with the
