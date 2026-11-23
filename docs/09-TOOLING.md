@@ -90,7 +90,9 @@ Settings persist in `%APPDATA%\dream-recomp\launcher.json` (the pre-release
 `%APPDATA%\DraconusRecomp\launcher.json` is read as a fallback and rewritten here on the next save). `--selftest` checks the command each
 setting produces without opening a window; `--smoke` (optionally `--shot FILE`) builds the window and
 exits, which is also how the layout is reviewed. The tabs are one table (`TABS`) plus their keys in
-`DEFAULTS`, so a new option is a few lines rather than new layout code.
+`DEFAULTS`, so a new option is a few lines rather than new layout code. Each tab is a scroll area:
+when the window is resized shorter than its options, the tab grows a vertical scrollbar (the wheel
+scrolls it too), and the explanation lines re-wrap to a narrow window instead of clipping.
 
 ## Frozen launcher (release)
 

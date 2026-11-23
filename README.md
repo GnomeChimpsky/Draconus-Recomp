@@ -274,18 +274,23 @@ stick (or the d-pad) moves menu cursors; and because the left trigger is now blo
 both-triggers **User Mode** chord is not available as it was. Modern is a layer over the player's
 bindings, not a separate file: `F1` still edits the base layout, and **Classic** restores it exactly.
 
-**HD rumble and trigger feedback.** The Controller tab (or `play-draconus.ps1 -Haptics`) hands the
-jump pack's effects to [RenHDrum](https://github.com/trzz1214/RenHDrum) instead of the pad's two
-motors. A DualSense then plays them on its voice-coil actuators through its own USB audio endpoint, a
-Switch Pro Controller gets real HD Rumble packets, and an Xbox pad gets all four motors. The game
-rumbles when a block takes a hit and when a swing lands, so two more options turn those moments into
-the trigger that made them: **Trigger feedback on hits** buzzes the left trigger for a block and the
-right one for a landed blow, and **Trigger resistance while blocking** gives the left trigger a light
-resistance for as long as the block is held. Both are DualSense-only and need it **wired** — over
-Bluetooth the pad keeps the plain rumble — and a pad RenHDrum does not claim always falls back to it.
-`renhdrum.dll` ships in the release folder and is loaded from beside the executable; a source tree
-gets it from `third_party\renhdrum\`. With it missing, or with the option off, nothing changes from
-the paragraph above. `DREAM_RENHDRUM_TRACE=1` prints which pad was claimed and
+**Controller haptics.** With **Modern** controls selected, the Controller tab (or
+`play-draconus.ps1 -Haptics`) hands the jump pack's effects to
+[RenHDrum](https://github.com/trzz1214/RenHDrum) instead of the pad's two motors. A DualSense then
+plays them on its voice-coil actuators through its own USB audio endpoint, a Switch Pro Controller gets
+real HD Rumble packets, and an Xbox pad gets all four motors. Three switches sit under it. **Trigger
+feedback on blocks and hits** turns every rumble the game sends into a short buzz — the left trigger
+only while you hold block, both otherwise — and needs no HD rumble at all, so it never opens the pad's
+audio path. **Trigger resistance (both triggers)** puts a constant weight under both triggers from the
+moment the game starts, the left a little heavier than the right, with the buzzes playing through it.
+**Controller speaker taps (experimental)** makes the rumble audible from the DualSense's own speaker,
+off by default. Each strength has its own slider: HD rumble, trigger buzz, the resistance on each
+trigger and where it begins, and the speaker level. The trigger options are DualSense-only and need it
+**wired**; over Bluetooth the pad keeps the plain rumble, and a pad RenHDrum does not claim always
+falls back to it. `renhdrum.dll` ships in the release folder and is loaded from beside the executable;
+a source tree gets it from `third_party\renhdrum\`. With it missing, or with the options off, nothing
+changes from the paragraph above. `DREAM_RENHDRUM_TRACE=1` prints what was claimed and every effect
+sent — `tools\haptics-trace.bat` runs the game with those traces and writes a log — and
 `DREAM_RENHDRUM=0` switches the whole path off for a comparison. What each option does, and what to
 check when a pad does nothing, is in [docs/19-CONTROLLER-HAPTICS.md](docs/19-CONTROLLER-HAPTICS.md).
 
@@ -293,8 +298,8 @@ check when a pad does nothing, is in [docs/19-CONTROLLER-HAPTICS.md](docs/19-CON
 
 Release players run `DraconusLauncher.exe` from the release folder and need no Python. From a source
 tree, `tools\launcher.bat` (or `python tools\launcher.py`) opens the same window: the project's
-emblem, the author credit and a link to the repository on the left, and Game, Controller, Graphics
-and Audio tabs on the right.
+emblem, the author credit and a link to the repository on the left, and Game, Graphics, Audio and
+Controller tabs on the right.
 
 Pick your `.gdi` or `.chd` with **Browse...**; it is verified as soon as it is selected and the path
 is saved when the config is writable. **Check disc** re-checks the current selection, and Play stays
@@ -385,7 +390,9 @@ at 4:3, or 2560x1440 at 16:9 (16:9 keeps the 2560 width and takes the height out
 drawn at 640x480 times the scale, and the engine's 720-line floor upscales 1x on a wide aspect. A
 window larger than the desktop's work area is shrunk to fit and centred above the taskbar, and the
 bottom bar is laid out before the settings page, so Play and the folder buttons stay clickable when
-a short screen has to clip the page. On a 1080p display 4x opens at the largest
+a short screen has to clip the page. When a tab's options are taller than the page, that tab shows a
+vertical scrollbar (the mouse wheel scrolls it too), so every option stays reachable after a resize.
+On a 1080p display 4x opens at the largest
 16:9 the screen allows; **Exclusive fullscreen** takes the display's own mode instead, which is how
 4x 16:9 becomes exactly 2560x1440 on a 2560x1440 panel. The game itself always sees its 640x480
 framebuffer, which is why captures and reports say 640x480 at every setting.
