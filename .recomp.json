@@ -11,5 +11,5 @@
   "toolchain": "Dream-recomp",
   "approach": "Static recompilation",
   "maintainers": [{ "name": "GnomeChimpsky", "link": "https://github.com/GnomeChimpsky/" }],
-  "notes": "1.1.0 is a Windows x64 release. The release launcher is frozen, needs no Python, and updates itself from GitHub; the first three levels have been played end to end, while later levels and the credits are not yet verified (M7). Linux/Steam Deck native builds are not currently provided."
+  "notes": "1.2.0 is a Windows x64 release. The release launcher is frozen, needs no Python, updates itself, and adds controller haptics plus opt-in crash logging with a symbols bundle; the first three levels have been played end to end, while later levels and the credits are not yet verified (M7). Linux/Steam Deck native builds are not currently provided."
 }

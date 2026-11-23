@@ -5,7 +5,10 @@ Draconus-Recomp is a native Windows x64 static recompilation of *Draconus: Cult 
 disc and ships no game data. The [README](README.md) is the manual; the
 [quick start](README.md#quick-start) is the shortest way in.
 
-## Unreleased
+## 1.2.0 — 2026-11-23
+
+The second update. Windows x64; the requirements and install steps are the same as 1.1, and the
+launcher can update itself in place.
 
 * **Controller haptics.** A new **Controller** tab — available with the **Modern** control layout,
   where the triggers block and attack — turns on RenHDrum, the haptics engine that reaches the parts
