@@ -47,12 +47,29 @@ import vmu  # noqa: E402  (the tool beside this script; only its per-user card p
 # the banner ends at x=801, so using it unmodified drew the logo noticeably left of the panel's
 # centre; this file is the same artwork, centred in its own canvas.
 FROZEN = bool(getattr(sys, "frozen", False))
+
+
+def inherited_stream(fd: int):
+    """A standard stream this windowed build did not get on its own.
+
+    Started from Explorer the frozen launcher is a windowed program with no console, so Python
+    gives it no stdout and stderr. A launcher that starts it with pipes (RecompLauncher runs
+    --prepare and reads its progress lines) does hand over the handles, and fd 1 and 2 still
+    name them; reopening those is what lets a setup step report what it is doing. With no
+    handle at all there is nowhere to write and the run continues silently.
+    """
+    try:
+        return open(fd, "w", encoding="utf-8", errors="replace", closefd=False)
+    except OSError:
+        return open(os.devnull, "w")
+
+
 if FROZEN:
     # A windowed build has no stdout; --selftest/--smoke must not crash on print().
     if sys.stdout is None:
-        sys.stdout = open(os.devnull, "w")
+        sys.stdout = inherited_stream(1)
     if sys.stderr is None:
-        sys.stderr = open(os.devnull, "w")
+        sys.stderr = inherited_stream(2)
     APP_DIR = os.path.dirname(os.path.abspath(sys.executable))
 
     def _game_dir() -> str:
@@ -174,24 +191,29 @@ def verify_disc(image: str) -> tuple[bool, str]:
     """Run the project's own verifier. Returns (ok, human-readable report).
 
     Frozen builds carry dracdisc as a module: there is no interpreter to start, so it runs
-    in-process and its output is captured from stdout.
+    in-process and its output is captured from stdout. A file the verifier cannot parse is a
+    rejection with its reason, never an exception in the launcher: the player picked the wrong
+    file, and the launcher has to say so.
     """
-    if FROZEN:
-        import contextlib
-        import io
-        from dracdisc import cli as _cli
+    try:
+        if FROZEN:
+            import contextlib
+            import io
+            from dracdisc import cli as _cli
 
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            rc = _cli.main(["verify", image])
-        report = buf.getvalue()
-    else:
-        result = subprocess.run(
-            [sys.executable, "-m", "dracdisc", "verify", image],
-            cwd=DISC_TOOL, capture_output=True, text=True,
-        )
-        rc = result.returncode
-        report = (result.stdout or "") + (result.stderr or "")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                rc = _cli.main(["verify", image])
+            report = buf.getvalue()
+        else:
+            result = subprocess.run(
+                [sys.executable, "-m", "dracdisc", "verify", image],
+                cwd=DISC_TOOL, capture_output=True, text=True,
+            )
+            rc = result.returncode
+            report = (result.stdout or "") + (result.stderr or "")
+    except Exception as exc:  # noqa: BLE001 - any parse failure on the player's file is a rejection
+        return False, "Disc check failed: %s" % exc
     return rc == 0 and "VERIFY OK" in report, report.strip()
 
 
@@ -1029,6 +1051,96 @@ def build_command(image: str, s: dict, extra: list[str] | None = None) -> list[s
     return cmd + (extra or [])
 
 
+# --- headless runs: a launcher setting the game up and starting it ------------------------------
+#
+# --prepare and --play are what RecompLauncher's recomplauncher.json calls. Neither opens the
+# window: the launcher is still the one program a player starts, and it still owns the settings,
+# the disc check and the engine command line, so the two front ends cannot drift apart. Without
+# these flags the launcher behaves exactly as it did.
+
+def prepare_cli(image: str) -> int:
+    """--prepare: verify the player's own disc and report it the way RecompLauncher reads it.
+
+    Progress lines are `progress <0..1> <text>`, one per line. A disc that doesn't verify exits
+    non-zero, which the launcher shows as a failed setup; the full report goes to stderr for the
+    log. It writes nothing: the disc is handed to the engine again on every Play.
+    """
+    def say(fraction, text) -> None:
+        print("progress %s %s" % (fraction, text), flush=True)
+
+    if not image:
+        say(0, "No disc selected")
+        print("--prepare needs --game <path>", file=sys.stderr, flush=True)
+        return 2
+    # The verifier runs in the disc tool's folder, so a relative path would be looked for there
+    # instead of where the player launched the launcher from.
+    image = os.path.abspath(image)
+    if not os.path.exists(image):
+        say(0, "The disc file is missing: " + image)
+        print("the disc image is missing: " + image, file=sys.stderr, flush=True)
+        return 2
+    if os.path.splitext(image)[1].lower() not in (".gdi", ".chd"):
+        say(0, "That isn't a disc image: pick the .gdi sheet or a .chd")
+        print("not a .gdi or .chd: " + image, file=sys.stderr, flush=True)
+        return 2
+    say("0.1", "Checking your disc")
+    ok, report = verify_disc(image)
+    summary = describe_disc(report)
+    if not ok:
+        # One short line the setup screen can show; the verifier's own report goes to the log.
+        unreadable = summary.startswith("Disc check failed") or summary.lstrip().startswith("Traceback")
+        say(1, "That file isn't a Dreamcast disc image: pick the .gdi sheet or a .chd" if unreadable
+            else "That isn't the USA V1.000 release this recomp reads")
+        print(report, file=sys.stderr, flush=True)
+        return 2
+    say(1, "Your disc is the USA V1.000 release")
+    return 0
+
+
+def play_cli(image: str, extra: list[str]) -> int:
+    """--play: start the game with the saved settings and the player's own disc, no window.
+
+    The launcher waits for the engine and passes its exit code back, so a front end sees one
+    process playing the game. Extra arguments are forwarded to the engine, which is how a player's
+    own launch options reach it. RECOMPLAUNCHER=1 is never overridden here: the front end installs
+    releases, so this path does not check for or install updates.
+    """
+    if not image:
+        print("--play needs --game <path>", file=sys.stderr, flush=True)
+        return 2
+    # The engine is started in the game's folder, so a relative path would resolve from there.
+    image = os.path.abspath(image)
+    if not os.path.exists(image):
+        print("the disc image is missing: " + image, file=sys.stderr, flush=True)
+        return 2
+    if not os.path.exists(BINARY):
+        print("the recompiled build is missing: " + BINARY, file=sys.stderr, flush=True)
+        return 2
+    # Point the title config at the disc when it can be written, as the window does: opening the
+    # launcher by hand then shows the disc that was played. A read-only install still plays, since
+    # the engine gets --disc as well.
+    try:
+        write_image_path(image)
+    except (OSError, RuntimeError):
+        pass
+    cmd = build_command(image, load_settings(), extra)
+    try:
+        # The engine is a console program. Started from the windowed launcher directly it would
+        # open a console window beside the game; a front end playing on a TV has no use for one,
+        # and the engine's own crash log is what a report needs.
+        game = subprocess.Popen(cmd, cwd=ROOT,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except OSError as exc:
+        print("could not start the game: %s" % exc, file=sys.stderr, flush=True)
+        return 2
+    try:
+        return game.wait()
+    except KeyboardInterrupt:
+        # Ctrl+C on the launcher: the game is the thing being played, so stop it and report it.
+        game.terminate()
+        return game.wait()
+
+
 # --- how the launcher explains an exit ----------------------------------------------------------
 #
 # Windows puts an NTSTATUS in the exit code when a process dies of a fault (0xC0000005 for an access
@@ -1788,6 +1900,10 @@ class Launcher(tk.Tk):
         self._ui_queue.put((callback, args))
 
     def _auto_check_updates(self) -> None:
+        # A launcher that started this game installs its releases itself (RECOMPLAUNCHER=1): two
+        # updaters on one folder would fight over what the other put there.
+        if os.environ.get("RECOMPLAUNCHER"):
+            return
         if self.settings.get("check_updates", True):
             self.check_updates(manual=False)
 
@@ -1905,6 +2021,10 @@ class Launcher(tk.Tk):
                                 "unzip the release over it instead." % shown)
 
     def install_update(self) -> None:
+        if os.environ.get("RECOMPLAUNCHER"):
+            # RecompLauncher owns updates in its own install; the player gets them from there.
+            self.status.set("The launcher that started this game installs its updates.")
+            return
         release = self._update_release
         asset = update_asset(release) if release else None
         if not release or asset is None:
@@ -2905,12 +3025,29 @@ if __name__ == "__main__":
     ap.add_argument("--shot", default=None)
     ap.add_argument("--check-updates", action="store_true",
                     help="ask GitHub for the latest release, print it and exit")
+    # A launcher starting the game on the player's behalf: --prepare verifies their disc on a
+    # setup screen, --play starts the game with no window of this launcher's own. Both are what
+    # recomplauncher.json calls; the launcher stays the program that owns the settings.
+    ap.add_argument("--play", action="store_true",
+                    help="start the game with the saved settings and --game's disc, no window")
+    ap.add_argument("--prepare", action="store_true",
+                    help="verify --game's disc for a setup step, printing progress lines")
+    ap.add_argument("--game", metavar="PATH", default="",
+                    help="the player's own disc image (.gdi or .chd)")
     ap.add_argument("--version", action="version",
                     version="Draconus-Recomp launcher %s" % VERSION)
     # The update helper starts the new launcher with the version it installed, so the window can
     # say so; it is not a player-facing option.
     ap.add_argument("--updated", metavar="VERSION", default="", help=argparse.SUPPRESS)
-    args = ap.parse_args()
+    # Anything else is the player's own launch options, which belong to the game. With no --play
+    # there is nothing to pass them to, so they stay an error as they always were.
+    args, extra = ap.parse_known_args()
+    if extra and not args.play:
+        ap.error("unrecognized arguments: " + " ".join(extra))
+    if args.prepare:
+        sys.exit(prepare_cli(args.game))
+    if args.play:
+        sys.exit(play_cli(args.game, extra))
     if args.selftest:
         sys.exit(selftest())
     if args.check_updates:
