@@ -2,6 +2,8 @@
 
 # Draconus-Recomped
 
+<a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+
 **Version 1.2.0** — current release ([release notes](RELEASE-NOTES.md)).
 
 A native Windows x64 static recompilation of **Draconus: Cult of the Wyrm**
@@ -39,6 +41,11 @@ Two paths: run the prebuilt release, or build it from source.
    itself: **Check for updates** asks GitHub for the latest release and installs it in place,
    keeping your disc path, settings and saves.
 
+[RecompLauncher](https://recomplauncher.com) installs the release from GitHub too. It checks your
+dump on its own setup screen and its Play starts the game without the launcher window; the release
+carries a `recomplauncher.json` for that, and your display, controller and audio options appear on
+the game's page there. Both front ends read the same settings file, so the values stay together.
+
 The folder is self-contained: `DraconusRecomp.exe`, `draconus.toml`, `SDL3.dll` and the Visual C++
 runtime sit beside the frozen launcher, so a machine with no Python and no compiler can run it
 ([Build the release](#build-the-release) lists what ships). What it does need:
@@ -63,6 +70,15 @@ To start the game without the launcher, from the release folder:
 
 ```powershell
 .\DraconusRecomp.exe --config draconus.toml --disc "D:\dumps\draconus.gdi" --window
+```
+
+The launcher can also run without its window, which is how RecompLauncher sets the game up and
+starts it. `--prepare` verifies a disc and prints one `progress` line per step; `--play` starts the
+game with the saved settings and waits for it, passing its exit code back:
+
+```powershell
+.\DraconusLauncher.exe --prepare --game "D:\dumps\draconus.gdi"   # verify the dump
+.\DraconusLauncher.exe --play --game "D:\dumps\draconus.gdi"      # play with launcher.json's settings
 ```
 
 ### Build from source
@@ -112,12 +128,13 @@ with `-ExecutionPolicy Bypass`. `docs/LEGAL.md` covers what you must supply.
 ## Build the release
 
 For players, the release is a prebuilt Windows x64 folder: `DraconusLauncher.exe` (with the
-`_internal` folder beside it), `DraconusRecomp.exe`, `draconus.toml`, `SDL3.dll`, the Visual C++
-runtime DLLs, the `LICENSE`, `LEGAL.md`, `THIRD-PARTY-NOTICES.md`, `README.md` and `RELEASE-NOTES.md`
-files, and a `BUILD-INFO.txt` recording the version, commit and build time. It needs no Python or
-compiler, but does need a Vulkan-capable GPU driver. The launcher verifies your own GDI/CHD and runs
-the game with `--disc` pointing at it; the boot program is read from your disc, so no extracted
-`1ST_READ.BIN` ships. Non-ASCII account names, disc folders and file names are supported.
+`_internal` folder beside it), `DraconusRecomp.exe`, `draconus.toml`, `recomplauncher.json`,
+`SDL3.dll`, the Visual C++ runtime DLLs, the `LICENSE`, `LEGAL.md`, `THIRD-PARTY-NOTICES.md`,
+`README.md` and `RELEASE-NOTES.md` files, and a `BUILD-INFO.txt` recording the version, commit and
+build time. It needs no Python or compiler, but does need a Vulkan-capable GPU driver. The launcher
+verifies your own GDI/CHD and runs the game with `--disc` pointing at it; the boot program is read
+from your disc, so no extracted `1ST_READ.BIN` ships. Non-ASCII account names, disc folders and file
+names are supported.
 
 Build the release from a configured tree:
 

@@ -1,0 +1,248 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "Draconus: Cult of the Wyrm",
+  "repo": "GnomeChimpsky/Draconus-Recomp",
+  "inputs": [
+    {
+      "id": "game",
+      "label": "Your own dump of the USA V1.000 release (F888 / T-40203N): pick the .gdi sheet with its track files beside it, or a .chd image.",
+      "formats": [{ "type": "file", "extensions": ["gdi", "chd"] }]
+    }
+  ],
+  "prepare": {
+    "program": ["DraconusLauncher.exe"],
+    "args": ["--prepare", "--game", "{input:game}"],
+    "label": "Checking your disc"
+  },
+  "start": {
+    "program": ["DraconusLauncher.exe"],
+    "args": ["--play", "--game", "{input:game}"]
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "json",
+      "file": [{ "path": "{config}/dream-recomp/launcher.json" }],
+      "new": {
+        "scale": "1",
+        "aspect": "off",
+        "fov": "90",
+        "display_mode": "windowed",
+        "present_rate": "0",
+        "frame_interpolation": "false",
+        "vsync": "true",
+        "fps": "false",
+        "sh4_clock": "200",
+        "controls": "classic",
+        "haptics": "false",
+        "haptics_triggers": "false",
+        "gamma": "100",
+        "audio": "true",
+        "audio_volume": "100",
+        "crash_log": "false"
+      }
+    }
+  ],
+  "settings": [
+    {
+      "id": "display_mode",
+      "label": "Display mode",
+      "group": "Display",
+      "help": "Borderless fullscreen fills the screen and still switches apps quickly. Exclusive fullscreen gives the game the screen to itself and can change the panel's refresh rate.",
+      "choices": [
+        { "label": "Windowed", "set": { "display_mode": "windowed" } },
+        { "label": "Borderless fullscreen", "set": { "display_mode": "borderless" } },
+        { "label": "Exclusive fullscreen", "set": { "display_mode": "exclusive" } }
+      ],
+      "defaults": { "display_mode": "windowed" }
+    },
+    {
+      "id": "resolution",
+      "label": "Resolution",
+      "group": "Display",
+      "help": "What the game draws at, before the window's shape is applied. 1x is the console's own 640 x 480; higher is sharper and needs a faster graphics card.",
+      "choices": [
+        { "label": "1x (640 x 480)", "set": { "scale": "1" } },
+        { "label": "2x (1280 x 960)", "set": { "scale": "2" } },
+        { "label": "3x (1920 x 1440)", "set": { "scale": "3" } },
+        { "label": "4x (2560 x 1920)", "set": { "scale": "4" } }
+      ],
+      "defaults": { "scale": "1" }
+    },
+    {
+      "id": "widescreen",
+      "label": "Widescreen",
+      "group": "Display",
+      "help": "Off keeps the console's 4:3. 16:9 and 21:9 widen the field of view instead of stretching the picture; menus and loading cards keep their shape.",
+      "choices": [
+        { "label": "Off (4:3)", "set": { "aspect": "off" } },
+        { "label": "16:9", "set": { "aspect": "16:9" } },
+        { "label": "21:9", "set": { "aspect": "21:9" } }
+      ],
+      "defaults": { "aspect": "off" }
+    },
+    {
+      "id": "fov",
+      "label": "Field of view",
+      "group": "Display",
+      "help": "The vertical field of view in degrees. 90 is the game's own; wider shows more of the world and everything looks smaller, narrower zooms in. It works together with Widescreen.",
+      "slider": { "key": "fov", "min": 60, "max": 120, "step": 1, "format": "%d" },
+      "defaults": { "fov": "90" }
+    },
+    {
+      "id": "frame_rate",
+      "label": "Frame rate",
+      "group": "Display",
+      "help": "The game logic stays at the console's 60 Hz. A higher present rate repeats the picture unless interpolation is on, which draws the frames between for smoother motion (and costs more GPU time).",
+      "choices": [
+        { "label": "60 (the console's own)", "set": { "present_rate": "0", "frame_interpolation": "false" } },
+        { "label": "120", "set": { "present_rate": "120", "frame_interpolation": "false" } },
+        { "label": "120, interpolated", "set": { "present_rate": "120", "frame_interpolation": "true" } },
+        { "label": "144, interpolated", "set": { "present_rate": "144", "frame_interpolation": "true" } }
+      ],
+      "defaults": { "present_rate": "0", "frame_interpolation": "false" }
+    },
+    {
+      "id": "vsync",
+      "label": "V-Sync",
+      "group": "Display",
+      "help": "On keeps the picture in step with the display. Off presents immediately: less latency, but the picture can tear.",
+      "choices": [
+        { "label": "On", "set": { "vsync": "true" } },
+        { "label": "Off", "set": { "vsync": "false" } }
+      ],
+      "defaults": { "vsync": "true" }
+    },
+    {
+      "id": "fps",
+      "label": "Frame counter",
+      "group": "Display",
+      "help": "Starts with the frame-rate overlay on. F10 toggles it in game.",
+      "choices": [
+        { "label": "Off", "set": { "fps": "false" } },
+        { "label": "On", "set": { "fps": "true" } }
+      ],
+      "defaults": { "fps": "false" }
+    },
+    {
+      "id": "controls",
+      "label": "Controls",
+      "group": "Controls",
+      "help": "Classic is the Dreamcast pad. Modern is the twin-stick layer: left stick moves and strafes, right stick turns, LT blocks and RT attacks.",
+      "choices": [
+        { "label": "Classic (Dreamcast pad)", "set": { "controls": "classic" } },
+        { "label": "Modern (twin-stick, LT block, RT attack)", "set": { "controls": "modern" } }
+      ],
+      "defaults": { "controls": "classic" }
+    },
+    {
+      "id": "haptics",
+      "label": "HD rumble (RenHDrum)",
+      "group": "Controls",
+      "help": "On sends rumble through RenHDrum: a DualSense's voice-coil actuators, a Switch Pro Controller's HD Rumble, an Xbox pad's four motors. Off is the original two-motor rumble.",
+      "choices": [
+        { "label": "Off", "set": { "haptics": "false" } },
+        { "label": "On", "set": { "haptics": "true" } }
+      ],
+      "defaults": { "haptics": "false" },
+      "when": { "controls": "modern" }
+    },
+    {
+      "id": "haptics_triggers",
+      "label": "Trigger feedback",
+      "group": "Controls",
+      "help": "Every rumble becomes a short buzz in a trigger: the left one while blocking, both for hits. Needs a wired DualSense.",
+      "choices": [
+        { "label": "Off", "set": { "haptics_triggers": "false" } },
+        { "label": "On", "set": { "haptics_triggers": "true" } }
+      ],
+      "defaults": { "haptics_triggers": "false" },
+      "when": { "controls": "modern" }
+    },
+    {
+      "id": "gamma",
+      "label": "Brightness / gamma",
+      "group": "Game",
+      "help": "Gamma on the finished picture: 100% is the game's own; above it lifts dark and mid tones, below it deepens them. F11 and F12 captures keep the game's unmodified frame.",
+      "slider": { "key": "gamma", "min": 50, "max": 200, "step": 5, "format": "%d" },
+      "defaults": { "gamma": "100" }
+    },
+    {
+      "id": "audio",
+      "label": "Sound",
+      "group": "Game",
+      "help": "Off runs the game silently and skips the audio device entirely.",
+      "choices": [
+        { "label": "On", "set": { "audio": "true" } },
+        { "label": "Off", "set": { "audio": "false" } }
+      ],
+      "defaults": { "audio": "true" }
+    },
+    {
+      "id": "audio_volume",
+      "label": "Volume",
+      "group": "Game",
+      "help": "Playback volume.",
+      "slider": { "key": "audio_volume", "min": 0, "max": 100, "step": 5, "format": "%d" },
+      "defaults": { "audio_volume": "100" },
+      "when": { "audio": "true" }
+    },
+    {
+      "id": "sh4_clock",
+      "label": "CPU clock",
+      "group": "Game",
+      "advanced": true,
+      "help": "Gives the game more cycles in each frame, which can help it draw every frame at high resolutions. Overclocks can affect game speed and audio on some machines: use with caution.",
+      "choices": [
+        { "label": "200 MHz (the console)", "set": { "sh4_clock": "200" } },
+        { "label": "250 MHz", "set": { "sh4_clock": "250" } },
+        { "label": "300 MHz (1.5x)", "set": { "sh4_clock": "300" } },
+        { "label": "400 MHz (2x)", "set": { "sh4_clock": "400" } }
+      ],
+      "defaults": { "sh4_clock": "200" }
+    },
+    {
+      "id": "crash_log",
+      "label": "Crash log",
+      "group": "Game",
+      "advanced": true,
+      "help": "Keeps this run's output and, if the game dies, a crash report in %APPDATA%\\dream-recomp\\logs. Turn it on to make a bug report, then send the newest file.",
+      "choices": [
+        { "label": "Off", "set": { "crash_log": "false" } },
+        { "label": "On", "set": { "crash_log": "true" } }
+      ],
+      "defaults": { "crash_log": "false" }
+    }
+  ],
+  "saves": ["{config}/dream-recomp/saves/draconus"],
+  "folders": {
+    "saves": [{ "path": "{config}/dream-recomp/saves/draconus" }],
+    "settings": [{ "path": "{config}/dream-recomp" }],
+    "logs": [{ "path": "{config}/dream-recomp/logs" }]
+  },
+  "actions": [
+    {
+      "id": "saves",
+      "label": "Saves",
+      "help": "Your memory card: every save the game has made. Backed up and synced with the game.",
+      "open": "saves"
+    },
+    {
+      "id": "settings",
+      "label": "Settings",
+      "help": "The launcher's settings file and your controller bindings.",
+      "open": "settings"
+    }
+  ],
+  "system": {
+    "windows": { "version": "10", "graphics": { "vulkan": "1.1" } }
+  },
+  "looks": {
+    "graphics": "vulkan",
+    "lines": 480
+  },
+  "exit_codes": {
+    "2": "The game couldn't start: your disc wasn't accepted, or the window or sound device couldn't open. It needs the USA V1.000 release as a .gdi with its tracks, or a .chd."
+  }
+}

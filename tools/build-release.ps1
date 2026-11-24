@@ -6,7 +6,8 @@
 #   tools\build-release.ps1 -SkipSymbols       # no symbols bundle beside the release
 #
 # The release is deliberately a small, explicit set of files: the game executable, the frozen
-# launcher, the title TOML, SDL3, the Visual C++ runtime DLLs, and the legal/notice files. The
+# launcher, the title TOML, recomplauncher.json (so RecompLauncher can set the game up from the
+# player's own disc), SDL3, the Visual C++ runtime DLLs, and the legal/notice files. The
 # launcher and the _internal folder it needs sit at the root, so the player double-clicks
 # DraconusLauncher.exe rather than looking inside a folder. It
 # never copies engine/, extracted game files, dumps, saves, screenshots or captures: the runtime
@@ -140,7 +141,7 @@ foreach ($dll in @("MSVCP140.dll", "VCRUNTIME140.dll", "VCRUNTIME140_1.dll")) {
 }
 
 foreach ($file in @("LICENSE", "README.md", "RELEASE-NOTES.md", "THIRD-PARTY-NOTICES.md",
-                    "Draconus Recomped Emblem light.png")) {
+                    "Draconus Recomped Emblem light.png", "recomplauncher.json")) {
     $source = Join-Path $root $file
     if (-not (Test-Path -LiteralPath $source)) { throw "missing release file: $source" }
     Copy-Item -LiteralPath $source -Destination (Join-Path $Out $file)
