@@ -5,6 +5,23 @@ Draconus-Recomp is a native Windows x64 static recompilation of *Draconus: Cult 
 disc and ships no game data. The [README](README.md) is the manual; the
 [quick start](README.md#quick-start) is the shortest way in.
 
+## 1.2.1 — 2026-11-24
+
+RecompLauncher support. Windows x64; the requirements, saves and settings are unchanged, and the
+launcher updates itself in place as before.
+
+* **Set up and play from RecompLauncher.** Every release now carries `recomplauncher.json` at the
+  top of the folder. [RecompLauncher](https://recomplauncher.com) reads it to ask for your own dump
+  once, verify it with the project's own checker, and show the game's display, controller and audio
+  options on the game's page. Its Play starts the game with those settings and without the launcher
+  window; the disc is handed over on every start, so an update never asks for it again.
+* **The launcher can run without its window.** `--prepare --game <disc>` verifies a dump and prints
+  `progress` lines for a setup screen, and `--play --game <disc>` starts the game with the saved
+  `launcher.json` settings, waits for it and returns its exit code. Launch options after `--play`
+  are passed on to the game. Running `DraconusLauncher.exe` by hand is exactly as it was, and a
+  launcher that started the game (`RECOMPLAUNCHER=1`) no longer offers its own updater.
+* Nothing about the game changed: no gameplay, graphics, audio, save or settings-format changes.
+
 ## 1.2.0 — 2026-11-23
 
 The second update. Windows x64; the requirements and install steps are the same as 1.1, and the
