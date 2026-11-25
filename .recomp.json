@@ -11,5 +11,5 @@
   "toolchain": "Dream-recomp",
   "approach": "Static recompilation",
   "maintainers": [{ "name": "GnomeChimpsky", "link": "https://github.com/GnomeChimpsky/" }],
-  "notes": "1.2.1 is a Windows x64 release that adds RecompLauncher support: Easy Setup from the player's own GDI or CHD, the display and controller options on the game's page, and Play without the launcher window. The release launcher is frozen and needs no Python; controller haptics and opt-in crash logging with a symbols bundle arrived in 1.2.0. The first three levels have been played end to end, while later levels and the credits are not yet verified (M7). Linux/Steam Deck native builds are not currently provided."
+  "notes": "1.2.5 is a Windows x64 release that adds resolutions above 1440p: the Resolution list runs to 6x, so 5x is 3200x1800 and 6x is 3840x2160 (4K) at 16:9, with 7x and 8x available through --scale. RecompLauncher support (Easy Setup from the player's own GDI or CHD, Play without the launcher window) arrived in 1.2.1; controller haptics and opt-in crash logging with a symbols bundle in 1.2.0. The release launcher is frozen and needs no Python. The first three levels have been played end to end, while later levels and the credits are not yet verified (M7). Linux/Steam Deck native builds are not currently provided."
 }

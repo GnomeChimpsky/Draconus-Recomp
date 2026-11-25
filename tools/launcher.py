@@ -100,7 +100,7 @@ RELEASES_PAGE = REPOSITORY + "/releases"
 # compared with the latest published release; bump it when a release is cut (tools/build-release.ps1
 # copies it into BUILD-INFO.txt). The update check reads the latest *published* release from GitHub,
 # so a draft or pre-release is never offered.
-VERSION = "1.2.1"
+VERSION = "1.2.5"
 RELEASES_API = "https://api.github.com/repos/GnomeChimpsky/Draconus-Recomp/releases/latest"
 GAME_ID = "draconus"
 
@@ -866,6 +866,11 @@ DISPLAY_REFRESH_RATES = display_refresh_rates()
 PRESENT_RATE_CHOICES = present_rate_choices(DISPLAY_REFRESH_RATES)
 INTERPOLATION_RATES = [rate for _, rate in PRESENT_RATE_CHOICES if rate > 60]
 
+# The scales the launcher offers. The engine accepts up to 8 (render/window_size.h kMaxScale), but
+# 4x is already 1440p at 16:9 and 6x is 4K UHD, so the rows stop there: 7x and 8x are a command-line
+# option for supersampling, not something a dropdown has to name.
+RESOLUTION_SCALES = (1, 2, 3, 4, 5, 6)
+
 
 def aspect_ratio(aspect: str, custom: str = "16:9") -> float:
     """The width/height ratio a Widescreen setting names; 4:3 for off or an unreadable value."""
@@ -883,24 +888,29 @@ def aspect_ratio(aspect: str, custom: str = "16:9") -> float:
     return ratio if ratio > 0 else 4.0 / 3.0
 
 
+def resolution_label(scale: int, aspect: str = "off", custom: str = "16:9") -> str:
+    """The window `--scale` opens at this aspect, named the way the resolution combo names it.
+
+    The engine draws at 640x480 times the scale and opens a window whose width follows the aspect,
+    with a 720-line floor (render/window_size.cpp). Same rounding as the engine's std::lround.
+    """
+    ratio = aspect_ratio(aspect, custom)
+    height = max(int(640 * scale / ratio + 0.5), 720)
+    width = int(height * ratio + 0.5)
+    label = "%dx - %d x %d" % (scale, width, height)
+    if scale == 1:
+        label += " (native render)"
+    return label
+
+
 def resolution_choices(aspect: str = "off", custom: str = "16:9") -> list[tuple[str, int]]:
     """Rows for the resolution combo: the window each --scale opens at this aspect.
 
-    The engine draws at 640x480 times the scale and opens a window whose width follows the aspect,
-    with a 720-line floor (render/window_size.cpp). So 4x at 16:9 is a 2560x1440 window, not the
-    4:3 render's 2560x1920, and 1x at 16:9 is a 1280x720 window showing the native render upscaled.
+    So 4x at 16:9 is a 2560x1440 window, not the 4:3 render's 2560x1920, and 1x at 16:9 is a
+    1280x720 window showing the native render upscaled. Above 1440p: 5x is 3200x1800 and 6x is
+    3840x2160 at 16:9, which is 4K.
     """
-    ratio = aspect_ratio(aspect, custom)
-    rows: list[tuple[str, int]] = []
-    for scale in (1, 2, 3, 4):
-        # Same rounding as the engine's std::lround, including the 720-line minimum.
-        height = max(int(640 * scale / ratio + 0.5), 720)
-        width = int(height * ratio + 0.5)
-        label = "%dx - %d x %d" % (scale, width, height)
-        if scale == 1:
-            label += " (native render)"
-        rows.append((label, scale))
-    return rows
+    return [(resolution_label(scale, aspect, custom), scale) for scale in RESOLUTION_SCALES]
 
 
 def window_geometry(screen_w: int, screen_h: int, margin_w: int = 80,
@@ -1279,7 +1289,8 @@ TABS = [
          # Replaced in the window for the aspect the player has saved; 4:3 is the build-time list.
          "values": resolution_choices(),
          "help": "Renders at a multiple of 640 x 480; the window opens at the size shown for the "
-                 "selected aspect."},
+                 "selected aspect. 4x is 1440p at 16:9 and 6x is 4K; above that the list stops "
+                 "because the extra pixels need a display that big to show them."},
         {"kind": "combo", "key": "aspect", "label": "Widescreen",
          "values": [("Off - 4:3", "off"), ("16:9 - hor+", "16:9"),
                     ("21:9 - hor+", "21:9"), ("Custom ratio - hor+", "custom")],
@@ -1809,8 +1820,19 @@ class Launcher(tk.Tk):
                     break
         if control is None:
             return
-        control["values"] = resolution_choices(self.settings.get("aspect", "off"),
-                                               self.settings.get("aspect_custom", "16:9"))
+        aspect = self.settings.get("aspect", "off")
+        custom = self.settings.get("aspect_custom", "16:9")
+        values = resolution_choices(aspect, custom)
+        # The engine accepts 7x and 8x from the command line even though the list stops at 6. A
+        # scale saved from one of those runs keeps a row of its own, so the combo shows the value
+        # it holds instead of an empty box (and touching another setting does not lose it).
+        try:
+            saved = int(self.settings.get("scale", 1))
+        except (TypeError, ValueError):
+            saved = 1
+        if saved not in [value for _, value in values]:
+            values.append((resolution_label(saved, aspect, custom), saved))
+        control["values"] = values
         box = self.combos.get("scale")
         if box is not None:
             box.configure(values=[label for label, _ in control["values"]])
@@ -2497,12 +2519,23 @@ def selftest() -> int:
     # The engine's 720-line window floor applies too, so 1x wide is a 1280x720 window showing the
     # native render upscaled rather than a 640x360 window.
     labels = {scale: label for label, scale in resolution_choices("off", "16:9")}
-    if labels[4] != "4x - 2560 x 1920" or labels[1] != "1x - 960 x 720 (native render)":
+    if (labels[6] != "6x - 3840 x 2880" or labels[5] != "5x - 3200 x 2400"
+            or labels[4] != "4x - 2560 x 1920"
+            or labels[1] != "1x - 960 x 720 (native render)"):
         failures.append("resolution 4:3: %r" % (labels,))
     labels = {scale: label for label, scale in resolution_choices("16:9", "16:9")}
-    if (labels[4] != "4x - 2560 x 1440" or labels[2] != "2x - 1280 x 720"
+    if (labels[6] != "6x - 3840 x 2160" or labels[5] != "5x - 3200 x 1800"
+            or labels[4] != "4x - 2560 x 1440" or labels[2] != "2x - 1280 x 720"
             or labels[1] != "1x - 1280 x 720 (native render)"):
         failures.append("resolution 16:9: %r" % (labels,))
+    # The rows stop at 6 even though the engine accepts 8: the dropdown names the steps a display
+    # could actually show, and 6x is 4K.
+    if max(scale for _, scale in resolution_choices()) != 6:
+        failures.append("resolution rows should stop at 6x")
+    # A scale outside the list still has a name, so a saved 7x/8x shows up rather than as an empty
+    # box: the engine takes it, and the window it asks for is the same width-first rule.
+    if resolution_label(8, "16:9") != "8x - 5120 x 2880":
+        failures.append("resolution label for 8x: %r" % (resolution_label(8, "16:9"),))
     labels = {scale: label for label, scale in resolution_choices("21:9", "16:9")}
     if labels[4] != "4x - 2560 x 1097":
         failures.append("resolution 21:9: %r" % (labels[4],))
@@ -2708,6 +2741,18 @@ def check_ui(app: Launcher) -> list[str]:
     pick("aspect", "Off - 4:3")
     if app.vars["scale"].get() != "4x - 2560 x 1920":
         failures.append("resolution label at 4:3: %r" % (app.vars["scale"].get(),))
+
+    # The step above 1440p is 6x, and it really reaches the engine: 3840x2160 at 16:9.
+    pick("aspect", "16:9 - hor+")
+    pick_value("scale", 6)
+    cmd = build_command(app.image_path or "disc.gdi", app.collect())
+    for flag in ("--scale", "6"):
+        if flag not in cmd:
+            failures.append("6x + 16:9 lost %r: %s" % (flag, " ".join(cmd)))
+    if app.vars["scale"].get() != "6x - 3840 x 2160":
+        failures.append("6x label at 16:9: %r" % (app.vars["scale"].get(),))
+    pick("aspect", "Off - 4:3")
+
     pick_value("scale", 1)
     cmd = build_command(app.image_path or "disc.gdi", app.collect())
     for flag in ("--scale", "--aspect"):
@@ -2722,6 +2767,15 @@ def check_ui(app: Launcher) -> list[str]:
         failures.append("resolution label at 32:9: %r" % (app.vars["scale"].get(),))
     app.vars["aspect_custom"].set("16:9")
     pick("aspect", "Off - 4:3")
+
+    # A scale saved from a command-line 7x/8x run is not one of the rows, but it still has to have
+    # a name: the engine accepts it, and a blank box would lose the value on the next change.
+    app.settings["scale"] = 8
+    app._refresh_resolution()
+    if app.vars["scale"].get() != "8x - 5120 x 3840":
+        failures.append("saved 8x label at 4:3: %r" % (app.vars["scale"].get(),))
+    app.settings["scale"] = 1
+    app._refresh_resolution()
 
     # Every dropdown must show a label for the value it holds. A combo whose key is missing from
     # DEFAULTS renders as an empty box and silently keeps the engine's default: the CPU clock did

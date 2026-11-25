@@ -657,6 +657,36 @@ sleep: sd 0.76 ms with a lag-1 autocorrelation of -0.46, real but sub-millisecon
 looks like. A sleep-then-spin pacer cut it to 0.49 ms for 7 % of a core; rejected, with the numbers
 in the comment.
 
+## Resolutions above 1440p (2026-11-25)
+
+`--scale` stops at 8 now, where it stopped at 4. 4x is 1440p at 16:9 (2560x1440 from a 2560x1920
+drawing), so the two steps above it are 5x (**3200x1800**) and 6x (**3840x2160**, exactly 4K UHD);
+7x and 8x are there for supersampling from the command line. The launcher's Resolution dropdown and
+the RecompLauncher settings stop at 6, because that is the largest step a display can show, and the
+launcher's resolution rows are labelled from the same width-first rule the engine uses.
+
+Two things to know before quoting this as "4K support":
+
+* **A 1440p panel shows no more pixels.** Windowed, the window is fitted to 90% of the usable
+  desktop, and borderless takes the display's mode, so 6x on a 1440p screen draws 3840x2880 and
+  minifies it into 2560x1440 — better edge quality, same size. Measured on the development machine:
+  `--scale 6 --aspect 16:9` reports `drawing at 3840x2880, showing 2226x1252` windowed and
+  `showing 2560x1440` borderless. There is no 4K panel here, so the step that reaches 3840x2160 on
+  the glass is unverified by eye.
+* **Only the 3D is rendered at the scale.** Menus, title cards, loading screens and FMV are the
+  guest's own 640x480 pixels, uploaded and shown as before, so they do not sharpen.
+
+Memory: the offscreen colour and depth attachments are 12 bytes a pixel together with the readback,
+so 4x is 59 MB, 5x 92 MB and 6x 133 MB when something asks for the pixels. The readback buffer is
+now allocated on first use (44 MB at 6x), so a windowed run that never takes a screenshot or a
+capture carries only the 89 MB of colour and depth. `--frame-interpolation` keeps a second offscreen
+target, which doubles that. GPU cost rises with the pixel count (6x is 2.25x the work of 1440p);
+the CPU side is unchanged, so a machine that holds 60 Hz at 4x should hold it at 6x unless the GPU
+was already close to its budget.
+
+Carried by `patches/0021-resolutions-above-1440p.patch` and ledger entry 054; the render suite's
+window-size cases pin 5x/6x/8x, and the launcher's `--selftest` and `--smoke` pin the 5x/6x rows.
+
 ## Things that cost time and should not be repeated
 
 * `GdiImage.read` originally read a multi-sector request contiguously and returned ECC as data; that

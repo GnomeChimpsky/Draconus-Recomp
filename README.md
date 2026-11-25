@@ -4,7 +4,7 @@
 
 <a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
 
-**Version 1.2.1** — current release ([release notes](RELEASE-NOTES.md)).
+**Version 1.2.5** — current release ([release notes](RELEASE-NOTES.md)).
 
 The game's own SH-4 code runs natively: it is translated ahead of time into C++, and the Dreamcast hardware, GD-ROM, controllers, video, AICA sound and the memory card, is replaced by native code. The launcher checks your dump against the known boot-executable hash and plays it; the boot program is read from the disc, so the release carries no disc assets.
 
@@ -20,7 +20,7 @@ The first three levels have been played end to end from the owner's own disc. La
 ## Highlights
 
 * A launcher that needs no Python or compiler. Run DraconusLauncher.exe, pick a .gdi or .chd, verify it, pick your settings, then press Play.
-* Optional enhancements. Hor+ widescreen and ultrawide (16:9, 21:9, custom) with the HUD, menus and loading screens adapting properly. 1x–4x internal resolution, windowed, borderless and exclusive fullscreen, display-derived present rates, with optional frame interpolation and modern twin-stick control layout.
+* Optional enhancements. Hor+ widescreen and ultrawide (16:9, 21:9, custom) with the HUD, menus and loading screens adapting properly. 1x–6x internal resolution (6x is 4K at 16:9), windowed, borderless and exclusive fullscreen, display-derived present rates, with optional frame interpolation and modern twin-stick control layout.
 * Controllers and rumble. A pad is mapped on first plug-in, with an XInput fallback when SDL cannot open it. A jump pack is always attached and drives the pad's own rumble motors; enable Options → JUMPPACK → PACK ON in the game to feel it.
 * Saves that travel. A windowed run attaches a standard 128 KB VMU card per user, created and formatted on first run, and the game's own Save and Load screens use it. The card opens in Flycast and a Flycast card can be used.
 
@@ -246,7 +246,8 @@ projection inputs. The item wheel's model is scaled back about the wheel so the 
 its ring at any FOV. `-Gamma 1.25` sets the finished picture's display gamma (1.0 is the title's own;
 above 1.0 lifts the dark and mid tones, below 1.0 deepens them); it is applied at presentation, so
 F11 and F12 keep the guest's unmodified framebuffer. `-Scale 2` draws at twice the guest's resolution and
-opens the window at that size (4x at 16:9 is 2560x1440, shrunk to fit a smaller screen), and
+opens the window at that size (4x at 16:9 is 2560x1440, shrunk to fit a smaller screen; 6x is
+3840x2160, 4K, so it needs a 4K display to show its extra pixels), and
 `-DisplayMode` chooses **windowed**, **borderless** (desktop fullscreen at the display's own size,
 which changes no display mode) or **exclusive** (one of the display's fullscreen modes, which can
 change the panel's refresh; a system that refuses it falls back to borderless). `-PresentRate`
@@ -327,9 +328,9 @@ python tools\launcher.py --selftest
 
 * **Graphics** -- the CPU clock at the top (200 MHz is the console; more is an overclock that gives
   a heavy scene more cycles inside each frame, and can affect game speed and audio on some titles),
-  internal resolution (1x to 4x; the list names the window each scale opens at for the selected
-  aspect — 4x is 2560x1440 at 16:9, not 4:3's 2560x1920, and 1x is upscaled to the 720-line
-  minimum), widescreen
+  internal resolution (1x to 6x; the list names the window each scale opens at for the selected
+  aspect — 4x is 2560x1440 at 16:9, not 4:3's 2560x1920, 6x is 3840x2160 (4K) at 16:9, and 1x is
+  upscaled to the 720-line minimum), widescreen
   (off, 16:9, 21:9 or a custom ratio, hor+), field of view (60-120°; 90 is the game's own, and
   above it the game can cull geometry at the far screen edges, so models may pop in when the
   camera turns), display mode (windowed, borderless or exclusive
@@ -397,10 +398,12 @@ an option is a few lines rather than new layout code. Settings persist under
 `%APPDATA%\dream-recomp\launcher.json` (the pre-release `%APPDATA%\DraconusRecomp` file is read as a
 fallback, so an upgrade keeps its choices); `--selftest` checks the command
 each setting produces, and `--smoke` builds the window, checks that selecting 4x and 16:9 really
-produces `--scale 4 --aspect 16:9`, and closes it.
+produces `--scale 4 --aspect 16:9` and that 6x produces `--scale 6`, and closes it.
 
 The resolution list names the window each scale opens at for the selected aspect: 4x is 2560x1920
-at 4:3, or 2560x1440 at 16:9 (16:9 keeps the 2560 width and takes the height out of it). The 3D is
+at 4:3, or 2560x1440 at 16:9 (16:9 keeps the 2560 width and takes the height out of it); 5x is
+3200x2400 / 3200x1800 and 6x is 3840x2880 / 3840x2160, which is 4K at 16:9. The list stops at 6x
+even though the engine accepts 8, because 6x is the largest step a display can show. The 3D is
 drawn at 640x480 times the scale, and the engine's 720-line floor upscales 1x on a wide aspect. A
 window larger than the desktop's work area is shrunk to fit and centred above the taskbar, and the
 bottom bar is laid out before the settings page, so Play and the folder buttons stay clickable when
@@ -408,7 +411,9 @@ a short screen has to clip the page. When a tab's options are taller than the pa
 vertical scrollbar (the mouse wheel scrolls it too), so every option stays reachable after a resize.
 On a 1080p display 4x opens at the largest
 16:9 the screen allows; **Exclusive fullscreen** takes the display's own mode instead, which is how
-4x 16:9 becomes exactly 2560x1440 on a 2560x1440 panel. The game itself always sees its 640x480
+4x 16:9 becomes exactly 2560x1440 on a 2560x1440 panel. The same rule means 6x on a 1440p panel is
+the 4x window with a 3840x2880 drawing minified into it: the extra samples are averaged rather than
+shown, so the picture is cleaner but not larger. The game itself always sees its 640x480
 framebuffer, which is why captures and reports say 640x480 at every setting.
 
 ## Build the game by hand

@@ -5,6 +5,21 @@ Draconus-Recomp is a native Windows x64 static recompilation of *Draconus: Cult 
 disc and ships no game data. The [README](README.md) is the manual; the
 [quick start](README.md#quick-start) is the shortest way in.
 
+## 1.2.5 — 2026-11-25
+
+Resolutions above 1440p. Windows x64; the requirements, saves and settings are unchanged, and the
+launcher updates itself in place as before.
+
+* **Up to 6x internal resolution.** The Resolution list now runs past 4x: 5x is **3200x1800** and
+  6x is **3840x2160**, which is 4K at 16:9. A display at least that big shows the extra detail; on
+  a smaller screen the same drawing is minified into the window, which sharpens edges without
+  making the picture larger. The 3D is rendered at the scale — menus, title cards and movies stay
+  the game's own 640x480 pixels, as before. `--scale` accepts up to 8x for supersampling.
+* **Less memory at the higher scales.** The frame's host-side readback buffer is now allocated only
+  when something asks for the pixels (a screenshot, a capture, `--framebuffer-writeback`), so an
+  ordinary windowed run at 6x no longer reserves 44 MB it never reads.
+* Nothing else about the game changed: no gameplay, audio or save changes.
+
 ## 1.2.1 — 2026-11-24
 
 RecompLauncher support. Windows x64; the requirements, saves and settings are unchanged, and the

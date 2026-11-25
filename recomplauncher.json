@@ -61,12 +61,14 @@
       "id": "resolution",
       "label": "Resolution",
       "group": "Display",
-      "help": "What the game draws at, before the window's shape is applied. 1x is the console's own 640 x 480; higher is sharper and needs a faster graphics card.",
+      "help": "What the game draws at, before the window's shape is applied. 1x is the console's own 640 x 480; higher is sharper and needs a faster graphics card. 6x is 4K in a 16:9 window.",
       "choices": [
         { "label": "1x (640 x 480)", "set": { "scale": "1" } },
         { "label": "2x (1280 x 960)", "set": { "scale": "2" } },
         { "label": "3x (1920 x 1440)", "set": { "scale": "3" } },
-        { "label": "4x (2560 x 1920)", "set": { "scale": "4" } }
+        { "label": "4x (2560 x 1920)", "set": { "scale": "4" } },
+        { "label": "5x (3200 x 2400)", "set": { "scale": "5" } },
+        { "label": "6x (3840 x 2880)", "set": { "scale": "6" } }
       ],
       "defaults": { "scale": "1" }
     },

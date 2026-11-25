@@ -3,6 +3,7 @@
 #   .\play-draconus.ps1                    # window, translated path (fastest)
 #   .\play-draconus.ps1 -Scale 2           # 1280x960 window
 #   .\play-draconus.ps1 -Scale 4 -Widescreen -Fullscreen   # 2560x1440 full screen
+#   .\play-draconus.ps1 -Scale 6 -Widescreen -Fullscreen   # 3840x2160 (4K) full screen
 #   .\play-draconus.ps1 -Interpret         # the development interpreter, for comparison
 #   .\play-draconus.ps1 -ModernControls    # left stick strafe, right stick turn, LT block, RT attack
 #   .\play-draconus.ps1 -Gamma 1.25        # lift the picture's dark and mid tones
@@ -26,7 +27,9 @@
 param(
     [switch]$Interpret,
     [switch]$Translated,
-    [ValidateRange(1, 4)][int]$Scale = 1,
+    # -Scale N: the engine's own range is 1 to 8. 4x is 1440p at 16:9, 5x and 6x are the steps
+    # above it, and 6x is 4K (3840x2160 in a 16:9 window); the launcher's dropdown stops at 6.
+    [ValidateRange(1, 8)][int]$Scale = 1,
     # -Widescreen: hor+ at 16:9. The title's projection is widened and 3D scenes are presented
     # stretched, so more world is visible horizontally and nothing is distorted. Menus, the title
     # and loading cards are flat 2D screens, keep their 4:3 shape, and are pillarboxed.

@@ -1,0 +1,178 @@
+diff --git a/render/include/dream/render/vk/offscreen.h b/render/include/dream/render/vk/offscreen.h
+index fcd51f8..20cd8d1 100644
+--- a/render/include/dream/render/vk/offscreen.h
++++ b/render/include/dream/render/vk/offscreen.h
+@@ -15,7 +15,9 @@
+ // round trip through the host is 20 MB down and 20 MB back up every frame, and skipping it is the
+ // difference between a frame that fits 60 Hz with room to spare and one that just fits. The pixels
+ // are only brought back when the guest itself needs them -- a render to texture, --framebuffer-
+-// writeback, a screenshot -- through `render(..., readback=true)` or `read_back()`.
++// writeback, a screenshot -- through `render(..., readback=true)` or `read_back()`. The host
++// buffer that holds them is allocated on the first of those and not before: at 6x it is 44 MB and
++// at 8x 79 MB, and a windowed run that never asks for the pixels would carry it for nothing.
+ #pragma once
+ 
+ #include <cstdint>
+@@ -76,6 +78,9 @@ public:
+ 
+ private:
+     void barrier_to_colour(VkCommandBuffer cmd);
++    // Allocates the host-side frame buffer the first time a readback is asked for. Fails only when
++    // the allocation itself does.
++    bool ensure_readback();
+ 
+     Context* ctx_ = nullptr;
+     VkExtent2D extent_{};
+diff --git a/render/include/dream/render/window_size.h b/render/include/dream/render/window_size.h
+index 3f3dd87..1cce299 100644
+--- a/render/include/dream/render/window_size.h
++++ b/render/include/dream/render/window_size.h
+@@ -8,6 +8,11 @@
+ 
+ namespace dream::render {
+ 
++// The largest --scale the runtime accepts. 4x is 1440p at 16:9, so 5x and 6x are the steps above
++// it and 6x is 4K UHD (3840x2160) at that aspect. The cap is a memory one rather than a hard limit:
++// at 8x the offscreen target, its depth buffer and the readback are 236 MB together.
++inline constexpr unsigned kMaxScale = 8;
++
+ struct WindowSize {
+     int width = 0;
+     int height = 0;
+@@ -16,7 +21,9 @@ struct WindowSize {
+ // The window a scale asks for at `aspect` (0 means the guest's 4:3). The width follows the scale
+ // (640 * scale) and the height follows the aspect, with a 720-line floor so 1x is not a postage
+ // stamp. 4:3 is 960x720 at 1x and 2560x1920 at 4x; 16:9 is 1280x720 at 1x (a 2x render in the same
+-// window, which supersamples vertically) and 1920x1080 / 2560x1440 at 3x / 4x.
++// window, which supersamples vertically) and 1920x1080 / 2560x1440 / 3200x1800 / 3840x2160 at
++// 3x / 4x / 5x / 6x. Only a display at least that big shows the extra pixels: a window smaller than
++// the render is the same drawing supersampled, which sharpens edges but cannot add detail.
+ WindowSize scaled_window_size(unsigned scale, double aspect);
+ 
+ // `want` shrunk, preserving its aspect, until it fits max_width x max_height. Never grows, never
+diff --git a/render/src/vk/offscreen.cpp b/render/src/vk/offscreen.cpp
+index c11e591..00cb6f3 100644
+--- a/render/src/vk/offscreen.cpp
++++ b/render/src/vk/offscreen.cpp
+@@ -123,10 +123,23 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
+         error_ = "vkCreateFence failed for the offscreen target";
+         return false;
+     }
++    // The readback buffer is not created here: a windowed run presents the colour image straight
++    // off the GPU and never asks for the pixels, and at the higher scales the buffer is tens of
++    // megabytes of host memory. ensure_readback() allocates it on the first readback instead.
++    return true;
++}
++
++bool Offscreen::ensure_readback() {
++    const VkDeviceSize bytes = static_cast<VkDeviceSize>(extent_.width) * extent_.height * 4;
++    if (readback_.capacity() >= bytes)
++        return true;
++    if (!ctx_) {
++        error_ = "the offscreen target has no context for a readback";
++        return false;
++    }
+     // cpu_reads: the GPU writes this buffer and the CPU copies it out when a frame is brought back,
+     // so it wants cached host memory rather than the write-combined BAR heap.
+-    if (!readback_.ensure(ctx, static_cast<VkDeviceSize>(width) * height * 4,
+-                          VK_BUFFER_USAGE_TRANSFER_DST_BIT, /*cpu_reads=*/true)) {
++    if (!readback_.ensure(*ctx_, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, /*cpu_reads=*/true)) {
+         error_ = "could not allocate the readback buffer";
+         return false;
+     }
+@@ -196,6 +209,10 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+     // next guest frame while the GPU is still drawing this one, and the wait a frame later costs
+     // nothing because the GPU finished long ago.
+     wait();
++    // The host-side copy at the end of this frame needs the buffer, and it has to be allocated
++    // before the command buffer is built: a failure then leaves nothing half-submitted.
++    if (readback && !ensure_readback())
++        return false;
+     vkResetCommandBuffer(cmd_, 0);
+     VkCommandBufferBeginInfo bi{};
+     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+@@ -293,6 +310,8 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+ bool Offscreen::read_back() {
+     if (!ctx_ || !cmd_ || !rendered_)
+         return false;
++    if (!ensure_readback())
++        return false;
+     wait();
+     vkResetCommandBuffer(cmd_, 0);
+     VkCommandBufferBeginInfo bi{};
+diff --git a/render/tests/test_window_size.cpp b/render/tests/test_window_size.cpp
+index 707e6bc..cebb899 100644
+--- a/render/tests/test_window_size.cpp
++++ b/render/tests/test_window_size.cpp
+@@ -7,6 +7,7 @@
+ #include "doctest.h"
+ 
+ using dream::render::fit_window;
++using dream::render::kMaxScale;
+ using dream::render::scaled_window_size;
+ 
+ TEST_CASE("window size: 4:3 follows the scale") {
+@@ -40,6 +41,24 @@ TEST_CASE("window size: widescreen keeps the width and takes the height out of i
+     CHECK(scaled_window_size(4, 21.0 / 9.0).height == 1097);
+ }
+ 
++TEST_CASE("window size: the scales above 1440p") {
++    // 4x is 1440p at 16:9, so 5x and 6x are the steps above it: 3200x1800 and 3840x2160, the
++    // second of which is exactly 4K UHD. At 4:3 the same scales name 3200x2400 and 3840x2880.
++    CHECK(scaled_window_size(5, 16.0 / 9.0).width == 3200);
++    CHECK(scaled_window_size(5, 16.0 / 9.0).height == 1800);
++    CHECK(scaled_window_size(6, 16.0 / 9.0).width == 3840);
++    CHECK(scaled_window_size(6, 16.0 / 9.0).height == 2160);
++    CHECK(scaled_window_size(5, 0.0).width == 3200);
++    CHECK(scaled_window_size(5, 0.0).height == 2400);
++    CHECK(scaled_window_size(6, 0.0).width == 3840);
++    CHECK(scaled_window_size(6, 0.0).height == 2880);
++    // The cap the runtime enforces is a size the policy already answers for: 8x is 5120x2880 in a
++    // 16:9 window.
++    CHECK(kMaxScale == 8);
++    CHECK(scaled_window_size(kMaxScale, 16.0 / 9.0).width == 5120);
++    CHECK(scaled_window_size(kMaxScale, 16.0 / 9.0).height == 2880);
++}
++
+ TEST_CASE("window size: a scale larger than the display is shrunk to fit") {
+     const auto screen = scaled_window_size(4, 16.0 / 9.0);  // 2560x1440
+     // A 90% budget on a 2560x1392 work area: 2304x1252 is the box, the 16:9 window fits inside it.
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index 13a2998..236393d 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -611,9 +611,9 @@ struct Live {
+     //
+     // The window follows the scale instead of staying at 960x720 (2026-11-13): 4x is a 2560-wide
+     // window, not a 960-wide one showing a 2560-wide render. A wide aspect keeps that width and
+-    // takes the height out of it, so 4x 16:9 is 2560x1440. The fullscreen modes ignore the size and
+-    // take the display's mode, which is the only way to get a 2560x1440 window on a 2560x1440
+-    // panel -- a decorated one cannot fit.
++    // takes the height out of it, so 4x 16:9 is 2560x1440 and 6x the cap's 3840x2160. The fullscreen
++    // modes ignore the size and take the display's mode, which is the only way to get a 2560x1440
++    // window on a 2560x1440 panel -- a decorated one cannot fit.
+     bool start(unsigned scale, bool validation, const std::string& title, double aspect,
+                dream::render::vk::DisplayMode display) {
+         const std::uint32_t w = kGuestWidth * scale, h = kGuestHeight * scale;
+@@ -2488,7 +2488,9 @@ void usage(const char* argv0, std::FILE* out) {
+         "                         display's own size) or exclusive (a fullscreen display mode,\n"
+         "                         which can change the panel's refresh). Implies --window;\n"
+         "                         --fullscreen is the old name for borderless.\n"
+-        "  --scale N              draw at N times the guest's 640x480 (1 to 4, default 1)\n"
++        "  --scale N              draw at N times the guest's 640x480 (1 to 8, default 1). 4x is\n"
++        "                         1440p at 16:9; 5x and 6x are above it and 6x is 4K (3840x2160),\n"
++        "                         which needs a display that big to show the extra pixels\n"
+         "  --aspect W:H           present the 4:3 frame in a window of this aspect and widen the\n"
+         "                         title's projection to match (hor+). 0 is 4:3; the title's TOML\n"
+         "                         names the projection hook.\n"
+@@ -3056,8 +3058,8 @@ int run(int argc, char** argv) {
+         std::fprintf(stderr, "--config is required\n");
+         return 2;
+     }
+-    if (scale < 1 || scale > 4) {
+-        std::fprintf(stderr, "--scale must be 1 to 4\n");
++    if (scale < 1 || scale > dream::render::kMaxScale) {
++        std::fprintf(stderr, "--scale must be 1 to %u\n", dream::render::kMaxScale);
+         return 2;
+     }
+     // A display mode other than windowed is a window mode: the display chooses the size, so

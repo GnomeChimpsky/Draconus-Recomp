@@ -3304,6 +3304,58 @@ chain rather than the working tree, so the engine-doc blank line no longer block
 working engine on every source file; the only remaining differences are the engine's own
 `docs/progress.md` and `docs/runtime-maple.md`, which are local notes and not build inputs.
 
+## Patch 054: resolutions above 1440p (2026-11-25)
+
+`--scale` stopped at 4, and 4x at 16:9 is 1440p: 2560x1440 shown from a 2560x1920 drawing. On a 4K
+display that meant the runtime still drew at 2560 and the presenter stretched it into 3840x2160, so
+the picture was larger without being sharper. The cap is now 8, which puts two steps above 1440p:
+
+| `--scale` | 4:3 | 16:9 |
+|---|---|---|
+| 4 | 2560x1920 | 2560x1440 (1440p) |
+| 5 | 3200x2400 | 3200x1800 |
+| 6 | 3840x2880 | 3840x2160 (**4K UHD**) |
+| 7 | 4480x3360 | 4480x2520 |
+| 8 | 5120x3840 | 5120x2880 |
+
+`kMaxScale = 8` is now declared once in `render/window_size.h`; the boot validates `--scale` against
+it (so `--scale 9` says "must be 1 to 8" instead of the number living in two places) and the help
+text names the steps rather than only the range. `render/tests/test_window_size.cpp` pins 5x, 6x and
+the cap's own size, including that 6x at 16:9 is exactly 3840x2160.
+
+The readback buffer is the one allocation that had to change. `Offscreen::create` used to allocate
+`width * height * 4` bytes of cached host memory unconditionally, and at 6x that is 44 MB (79 MB at
+8x) that a windowed run never touches: the presenter samples the colour image straight off the GPU.
+`ensure_readback()` now allocates it on the first `render(..., readback=true)` or `read_back()`, so a
+plain run carries only the colour and depth attachments (89 MB at 6x) and a screenshot, a capture,
+`--framebuffer-writeback` or a render to texture pays for the buffer when it asks. The failure path
+is unchanged: `read_back` returns false and the boot reports the offscreen's error, as before.
+
+The launcher's dropdown stops at 6 rather than at the engine's 8: 6x is the largest step a display
+can actually show, and 7x/8x are a command-line option for supersampling. Its resolution rows and
+`--selftest` pin the 5x/6x labels for every aspect, and `--smoke` now checks that picking 6x really
+produces `--scale 6`.
+
+Carried by `patches/0021-resolutions-above-1440p.patch`, which touches
+`render/{include,src,tests}` and `runtime/boot/boot_main.cpp` and applies after 0020.
+
+**Verified.** `dream_render_tests` passes 134 cases / 5,240 assertions with the new cases (the
+window-size filter runs 4 cases / 40 assertions). The launcher's `--selftest` passes, and `--scale 0`
+and `--scale 9` are refused with `--scale must be 1 to 8`. On the RTX 3080 / 2560x1440 development
+machine, `--scale 6 --aspect 16:9` reports **drawing at 3840x2880, showing 2226x1252** windowed and
+**showing 2560x1440** borderless, so 6x on a 1440p panel is the 4K drawing minified into the panel
+(the supersampling path), exactly as the window policy says. A `--capture-at` frame is a
+33,177,617-byte PPM, the size of 3840x2880 RGB, and contains the correct picture. `--framebuffer-
+writeback` at 6x reports **49 written back** with no allocation error, which exercises the lazily
+allocated readback. There is no 4K panel here, so 6x *reaching* a 3840x2160 screen is verified by
+the reported sizes and the presenter's existing behaviour, not by eye at that resolution.
+
+The chain was re-applied to a fresh pinned tree to check the new patch: 0001–0021 apply in order and
+reproduce the working engine for every file 0021 touches. Four files still differ, and they are the
+`DREAM_DEBUG_PC` and `DREAM_TRACE_TA_PC` development hooks of `docs/18` and `docs/19`, which live in
+the working tree and in no patch — the same kind of gap patch 053 found, left alone here because
+that investigation is still in progress.
+
 ## Validation against the engine's own tests (2026-11-06)
 
 All five local changes are carried by a build with `-DDREAM_BUILD_TESTS=ON`
