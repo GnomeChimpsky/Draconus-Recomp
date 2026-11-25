@@ -6,40 +6,35 @@
 
 **Version 1.2.1** — current release ([release notes](RELEASE-NOTES.md)).
 
-A native Windows x64 static recompilation of **Draconus: Cult of the Wyrm**
-(Dreamcast, 2000, developed by Treyarch and published by Crave Entertainment; USA V1.000,
-`F888` / `T-402`), built on [`dream-recomp`](https://github.com/phobos665/dream-recomp).
-
-The game's SH-4 code is translated ahead of time into C++, and the Dreamcast hardware
-(file system, controllers, video, sound, memory card) is replaced by native code. The
-result runs from the user's own disc, no disc data or extracted game files are included or
-distributed. A prebuilt release contains translated code but no disc assets; see
-`docs/LEGAL.md`.
+The game's own SH-4 code runs natively: it is translated ahead of time into C++, and the Dreamcast hardware, GD-ROM, controllers, video, AICA sound and the memory card, is replaced by native code. The launcher checks your dump against the known boot-executable hash and plays it; the boot program is read from the disc, so the release carries no disc assets.
 
 The first three levels have been played end to end from the owner's own disc. Later levels are not yet verified.
 
-This repository holds the research, the disc tooling, the title configuration and the
-engine fixes. The engine itself is fetched by `setup.ps1` at a pinned commit, so it is
-not vendored here. The project lives at
-<https://github.com/GnomeChimpsky/Draconus-Recomp>.
+## Install
 
-## Quick start
+Unzip the release folder anywhere. There is no installer and no admin rights are needed.
+Run DraconusLauncher.exe, press Browse... and pick your dump — it is verified as soon as it is selected, then press Play.
+Settings live in %APPDATA%\dream-recomp\launcher.json; the virtual memory card is %APPDATA%\dream-recomp\saves\draconus\vmu_a1.bin. The launcher's bottom bar opens both folders.
+Upgrading: replace the folder and keep your per-user data. The launcher reads a pre-1.0 %APPDATA%\DraconusRecomp\launcher.json as a fallback, and old bindings are migrated into %APPDATA%\dream-recomp, so settings and controls survive the move.
+Highlights
 
-Two paths: run the prebuilt release, or build it from source.
+A launcher that needs no Python or compiler. Run DraconusLauncher.exe, pick a .gdi or .chd, verify it, pick your settings, then press Play.
+Optional enhancements. Hor+ widescreen and ultrawide (16:9, 21:9, custom) with the HUD, menus and loading screens adapting properly. 1x–4x internal resolution, windowed, borderless and exclusive fullscreen, display-derived present rates, with optional frame interpolation and modern twin-stick control layout.
+Controllers and rumble. A pad is mapped on first plug-in, with an XInput fallback when SDL cannot open it. A jump pack is always attached and drives the pad's own rumble motors; enable Options → JUMPPACK → PACK ON in the game to feel it.
+Saves that travel. A windowed run attaches a standard 128 KB VMU card per user, created and formatted on first run, and the game's own Save and Load screens use it. The card opens in Flycast and a Flycast card can be used.
+Requirements
 
-### Play the release
+Windows x64. The only target, there is no Linux build yet.
+A Vulkan-capable GPU driver.
+Your own dump. Draconus: Cult of the Wyrm, USA V1.000 (F888 / T-402), .gdi with its tracks or .chd.
+A keyboard or gamepad.
+Known limitations
 
-1. Download the release from
-   [Releases](https://github.com/GnomeChimpsky/Draconus-Recomp/releases) and unzip it anywhere.
-   There is no installer to run.
-2. Have your own dump ready: **Draconus: Cult of the Wyrm**, USA V1.000 (`F888` / `T-402`), as a
-   `.gdi` with its track files or a `.chd`. This is the only game data involved — the boot program
-   is read from your disc — and a dump that is not the USA V1.000 release (another region, or the
-   January 2000 prototype) is refused by hash.
-3. Double-click `DraconusLauncher.exe`, press **Browse...** and pick your dump — it is verified as
-   soon as it is selected — then press **Play**. The launcher shows its version and can update
-   itself: **Check for updates** asks GitHub for the latest release and installs it in place,
-   keeping your disc path, settings and saves.
+Only the first three levels have been thoroughly playtested. Later levels, the credits and any coverage gap they expose are unverified.
+Windows x64 only. There is no Linux, macOS or 32-bit build, and no installer.
+A source build needs a GDI. dracdisc extract does not decode CHD. The release runtime reads a .chd directly, and chdman converts one for a source build.
+The executables are unsigned, so Windows SmartScreen or an antivirus may warn.
+No game data is included. Disc images, extracted files, saves, screenshots and the generated C++ are not distributed; only the compiled program is.
 
 [RecompLauncher](https://recomplauncher.com) installs the release from GitHub too. It checks your
 dump on its own setup screen and its Play starts the game without the launcher window; the release
@@ -52,7 +47,7 @@ runtime sit beside the frozen launcher, so a machine with no Python and no compi
 
 | Requirement | Note |
 |---|---|
-| Windows x64 | The project's only target; there is no Linux, macOS or 32-bit build. |
+| Windows x64 |
 | A Vulkan-capable GPU driver | The renderer is Vulkan, and `vulkan-1.dll` comes from the driver rather than the bundle. |
 | A dump of your own | USA V1.000, `.gdi` with its tracks or `.chd`, as above. |
 | A gamepad (optional) | The keyboard works out of the box; a pad is mapped on first plug-in. |
