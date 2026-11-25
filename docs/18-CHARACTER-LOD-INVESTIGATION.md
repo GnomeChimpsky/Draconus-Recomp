@@ -110,6 +110,80 @@ Scripts in `work/lod/`: `lod_inspect.py`, `lod_clusters.py`, `lod_pertex.py`, `l
   (frames 6190–6500). Backing away moves the guard from ~3 to ~8 units and the triangle
   count falls smoothly 292 → 137 with no step.
 
+## The debugger, and what it found (2026-11-23)
+
+There is no interactive debugger on this machine, but the development interpreter decodes every
+instruction itself, so a breakpoint can live inside it. `DREAM_DEBUG_PC=0xADDR[:N]` (with
+`DREAM_DEBUG_FROM` to ignore hits before a guest cycle) prints `r0..r15`, `pr`, `sr`, `fr0..fr15`
+and the XF bank — the bank `ftrv` multiplies by, so a skinning matrix is readable — when that
+guest instruction is about to run. Addresses are masked to the P0 alias.
+
+The first thing it settled: **the LOD is a vertex count, and the count is distance-dependent.**
+
+| breakpoint | near (~frame 6120) | far (~frame 6290) |
+|---|---|---|
+| `0x0c174b04` (transform entry), part `8CC6CB40` | `r5 = 0x1E` (30 vertices) | `r5 = 0x0A` (10 vertices) |
+| `0x0c174b04`, part `8CC526A0` | `r5 = 0x0B` (11) | `r5 = 0x04` (4) |
+| `0x0c163262` (draw loop), `r13` | `0x11` (17) | `0x07` (7) |
+| `0x0c160e1a` (chunk loop), `r11` | `0x200` (512) | `0x16F`, `0x126`, `0x34`, `0x0A` |
+
+So the same part is transformed with a third of its vertices when the character is far away.
+The count is passed down the draw chain: `fn_0c164660` (parts loop) → `fn_0c160c3c` (per-part
+draw, takes the part, the vertex source, a matrix and a flag word, plus stack arguments) →
+`fn_0c174b04` (XMTRX + `ftrv`, loops `r5` vertices). The count is a stack argument to
+`fn_0c160c3c` and arrives in `r5` at the transform.
+
+Inside `fn_0c160c3c` the count is a **byte length**: at `0x0c160d34` it computes
+`r11 = r12 - r10` (end pointer minus start), then scales it with `shad` (shift by `-5`).
+
+Measured at `0x0c160d36`, start/end for the same part:
+
+| frame | start | end | length |
+|---|---|---|---|
+| near (~6120) | `8CDF6060` | `8CDFA060` | **0x4000** (16384 B) |
+| far (~6290) | `8CE180E0` | `8CE1AEC0` | 0x2DE0 (11744 B) |
+| far | `8CCC2340` | `8CCC29C0` | 0x0680 (1664 B) |
+| far | `8CC8A620` | `8CC8A760` | **0x0140** (320 B) |
+
+So the LOD walks a **prefix of the part's vertex data**, and the prefix shrinks with distance:
+16 KB at 3–4 units against 320 bytes beyond the threshold. That is the whole effect — a range
+end pointer, not a blend and not a second mesh.
+
+This reframes the fix: it is not a blend factor to disable but a **data-length clamp**, so the
+candidate patch is wherever that end pointer (or the shift that scales it) is chosen from the
+distance — a comparison, not a scale.
+
+The clamp itself is five instructions at `0x0c160d24`:
+
+```
+0x0c160d24: r0  = 0x4000        ; chunk size, 16 KB
+0x0c160d26: r12 = r10           ; end = start
+0x0c160d28: r2  = *(r14+4)      ; r2 = the part's data end (stack argument)
+0x0c160d2a: r12 += 0x4000       ; end = start + chunk
+0x0c160d2c: cmp/hi r2, r12      ; if end > limit ...
+0x0c160d2e: bf 0xc160d32        ;   keep it
+0x0c160d30: r12 = r2            ; else end = limit
+0x0c160d32: r11 = r12 - r10     ; length = end - start
+0x0c160d3e: r11 = shad(r11, -5) ; count = length scaled
+```
+
+So the per-part walk is `min(start + 0x4000, limit)`, and the distance changes the **`limit`**
+stack argument: it is the part's data end. Near it lies at least a full 16 KB chunk ahead of the
+start; far it is only 320 bytes ahead. That argument is built by the caller `fn_0c164660`, which
+is the remaining hop — the clamp is known, the producer of `limit` is not.
+
+Measured at `0x0c160d28`, where the limit is loaded (`stack[1]`, with `r14 == r15`):
+
+| | start (`r10`) | limit | limit − start |
+|---|---|---|---|
+| near (~6120) | `8CDF6060` | `8CE0F5E0` | 0x19580 — 103,808 B (the full part) |
+| far (~6290) | `8CE180E0` | `8CE1AEC0` | 0x02DE0 — 11,744 B (11% of it) |
+
+So the LOD is a **fraction of the part's vertex data**: the whole model up close, about an
+eighth of it beyond the threshold. The two call sites that push the limit are `0x0c164ae2` and
+`0x0c164b5e` in `fn_0c164660`; the value is not in any register sampled at those sites, so it is
+read through one of the pushed pointers rather than computed in a register there.
+
 ## Where the remaining work starts
 
 The evidence points at a per-vertex collapse: vertices blend toward a point as distance
